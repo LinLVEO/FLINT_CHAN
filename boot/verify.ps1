@@ -87,6 +87,16 @@
 #          boot 侧 `parse_apis` 同口径硬错（错误码 **-189**）。样本：正例 **b1c1**（写出名恰好 63 字节，
 #          $pos ＋ $diff）+ 负例 **nb38**（74 字节裸短名，④ 负例 ＋ ④b 的「真 flint 侧同样拒绝」差分）。
 #          判据同源 = `test\边界探针.ps1` 的 api_modname_63_ok / api_modname_over63 / api_modname_path64。
+#       ㊸ v1.4.28（B1-5 ＋ B1-4，2026-10-13）：**全局初值尾巴** ＋ **字符串模块名被注入库挡住** ——
+#          B1-5：真 flint 的 `parse_global_init` 只吃一个字面量、随后**静默跳到 ','/';'**（`int g = 0 - 1;`
+#          编译 exit 0 而 g == 0；`int g = 1 + x;` 连"初值必须是编译期常量"都绕过）⇒ 真 flint 改成
+#          **默认档硬错**，boot 侧 `parse_globals` 从**通用 -47** 换成**专码 -213**（结论相同、码分得清）。
+#          样本：负例 **nb39**（④ ＋ ④b）；判据同源 = 探针的 global_init_expr / global_init_var /
+#          global_init_garbage ＋ global_init_neglit_ok（上限内侧不许误伤）。
+#          B1-4：`is_api_decl_start()` 不认字符串模块名 ⇒ 声明不被 `hoist_apis` 前移、被注入的
+#          `lib_print.fl` 挡在身后，报「api 声明必须放在文件最顶部」且**位置指向用户真·顶部那一行**
+#          （假拒绝；boot 侧本来就能编 ⇒ 真 flint 比 boot 窄）。修法 = 谓词接受 `TK_STR`（1 行）。
+#          样本：正例 **b1c2**（$pos ＋ $diff）；判据同源 = 探针的 api_str_modname_print。
 # 退出码：0 = 全部通过；1 = 有失败
 
 $ErrorActionPreference = 'Stop'
@@ -268,6 +278,10 @@ $pos = [ordered]@{
   #      外侧 1 字节 = 负例 nb38.fl（74 字节裸短名，两端都硬错）。b1c1 进 $pos **与** $diff
   #      ⇒ 双向守门：boot 既不许比真 flint 宽（nb38），也不许比真 flint 窄（b1c1）。
   b1c1 = 42
+  #   ㊸ v1.4.28（B1-4）：**字符串模块名 ＋ 同文件 print(...)** —— b1c2 必须能编、产物跑 42
+  #      （改前真 flint 报「api 声明必须放在文件最顶部」并指向第 1 行第 1 列 = 假拒绝；boot 侧本来就能编
+  #      ⇒ 真 flint 比 boot 窄）。进 $pos ＋ $diff ⇒ 双端同结论。
+  b1c2 = 42
 }
 # 2026-09-20（卡 T-20260920-001345）自举缺口收敛第一疗程**转正**的样本（原来 boot 编不过，
 # 现在 boot 与真 flint 都能编且产物退出码相同）。样本实体在 test\samples\（不是 boot\samples\），
@@ -334,7 +348,7 @@ foreach ($n in @('bad', 'nf1', 'nf2', 'nf3', 'nf4', 'nf5', 'nw1', 'nw2', 'nw3', 
                  'nb1', 'nb2', 'nb3', 'nb5', 'nb6', 'nb7', 'nb8', 'nb9',
                  'nb10', 'nb11', 'nb12', 'nb13', 'nb14', 'nb15', 'nb16', 'nb17', 'nb18', 'nb19', 'nb20', 'nb21',
                  'nb22', 'nb23', 'nb24', 'nb25', 'nb27', 'nb28',
-                 'nb29', 'nb30', 'nb31', 'nb32', 'nb34', 'nb35', 'nb36', 'nb37', 'nb38')) {
+                 'nb29', 'nb30', 'nb31', 'nb32', 'nb34', 'nb35', 'nb36', 'nb37', 'nb38', 'nb39')) {
   & $boot "samples\$n.fl" | Out-Null
   if ($LASTEXITCODE -ne 0) { Ok "负例 $n 正确报错（exit=$LASTEXITCODE）" }
   else { Bad "负例 $n 竟然编译成功" }
@@ -346,8 +360,9 @@ Pop-Location
 #     2026-09-20（卡 T-20260920-144154）扩两条多重声明家族的：nb36 = `struct P s, t;`（真 flint 报「期望 ';'」）；
 #     nb37 = `struct P *a, *b;`（真 flint 报「期望变量名」）—— 只有 int/char 基础类型才放行后续声明符的 `*`。
 #     v1.4.28（B1-3）加 nb38 = 导入模块名写出名 74 字节（真 flint 报「导入模块名过长：写出名最长 63 字节，现在 74 字节」）
+#     v1.4.28（B1-5）加 nb39 = 全局标量初值后面还有 token（真 flint 报「全局变量初值只支持一个字面量」；boot 报专码 -213）
 #     （只对这几条断言：别的负例里有的本来就该是「boot 比真 flint 严」的双端断点，不能一刀切）
-foreach ($n in @('nb34', 'nb35', 'nb36', 'nb37', 'nb38')) {
+foreach ($n in @('nb34', 'nb35', 'nb36', 'nb37', 'nb38', 'nb39')) {
   & $flint (Join-Path $bootDir "samples\$n.fl") | Out-Null
   if ($LASTEXITCODE -ne 0) { Ok "$n 真 flint 侧同样拒绝（双端口径一致）" }
   else { Bad "$n 真 flint 侧竟然编译通过 —— 口径不一致" }
@@ -409,6 +424,7 @@ $diff = @('b2j1', 'b2j2', 'b2j3', 'b2j4', 'b2j5', 'b2j6', 'b2j7', 't_arr2', 't_p
           'sib1',                                             # 2026-09-22：第五刀 A1（数组寻址 · SIB 缩放寻址）哨兵
           'acc1',                                             # 2026-09-22：第五刀 B（数组就地更新 · 内存目标运算）哨兵
           'b1c1',                                             # v1.4.28（B1-3）：导入模块名写出名**恰好 63 字节**（上限内侧）⇒ 双端同 42
+          'b1c2',                                             # v1.4.28（B1-4）：字符串模块名 ＋ 同文件 print(...) ⇒ 双端同 42
           'acc2')                                             # 2026-09-22：第六刀 A2（融合档吃数组元素右值）哨兵
 Push-Location $bootDir
 foreach ($k in $diff) {

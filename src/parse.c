@@ -2243,7 +2243,7 @@ static const uint8_t *parse_global_init(Token *t, int ty, int count, int esize,
     else if (is_punct(t, '+')) t = t->next;
     bool isdbl = t->kind == TK_DBL;
     if (t->kind != TK_NUM && t->kind != TK_DBL)
-      error_at(t->loc, "全局变量初值必须是编译期常量（字面量，或字面量之间的 + - * /）"
+      error_at(t->loc, "全局变量初值必须是编译期常量（只支持一个字面量，可带正负号）"
                        "——全局变量在程序启动前就写进 .data，不能依赖运行时才有的值");
     if (isdbl && ty != TY_DOUBLE)
       error_at(t->loc, "double 字面量不能作为 int/char 全局变量的初值"
@@ -2273,6 +2273,18 @@ static const uint8_t *parse_global_init(Token *t, int ty, int count, int esize,
     if (!is_punct(t, '}'))
       error_at(t->loc, "全局数组初值元素比声明长度多（声明 %d 个）", count);
     t = t->next;
+  } else {
+    // —— v1.4.28（B1-5）：非大括号初值只吃**一个字面量**，尾巴上不许再留 token ——
+    // 旧行为（v1.3.0 起）：这里什么都不查，调用方 `collect_globals` 一路 **静默跳到 ','/';'**，
+    //   于是 `int g = 0 - 1;` **编译 exit 0 而 g == 0**（`- 1` 被吞）、`int g = 5 * 3;` ⇒ g == 5、
+    //   `int g = 7 9 ;` ⇒ g == 7；最坏的是 `int g = 1 + x;` —— **x 是变量也照收**、g == 1，
+    //   连"初值必须是编译期常量"这道既有判据都被绕过（run-tests 的 ng_nonconst 只钉了 `= x` 那一种写法）。
+    // 现在：多出来的 token = **默认档硬错**，位置就指在那个多出来的 token 上（不指别处）。
+    //   ⇒ 真 flint 与 boot 同结论（boot 侧 = 专码 -213）。⚠️ 这条不是"收窄真能力"：改前它给的是**错值**。
+    if (!is_punct(t, ',') && !is_punct(t, ';'))
+      error_at(t->loc, "全局变量初值只支持一个字面量（可带正负号）——"
+                       "这里多出来的 token 会被丢弃、初值就是错的（表达式不会被求值）；"
+                       "要算表达式请挪进 main 里赋值（全局只写 int g; 再在 main 里 g = 0 - 1;）");
   }
   *out_len = off;
   return bytes;

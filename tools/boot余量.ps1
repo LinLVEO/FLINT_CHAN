@@ -13,6 +13,13 @@
 #   discipline-remembered-by-humans into a command any gate can call.
 #
 # WHAT COUNTS AS ONE TABLE ENTRY -- the counting rule is taken from boot's OWN parser, not invented.
+#   NOTE 2026-10-13 (B1-3 / B1-5 rounds): the line numbers below were measured BEFORE those two rounds
+#      inserted code into boot\lib_parse.fl, so every lib_parse.fl number in this block is now stale by
+#      a known amount. Re-measured anchors after the two rounds: parse_apis starts at :1323, the two
+#      `nfuncs >= 512` guards are at :1433 (api path) and :1560 (function path), is_func_start_at is at
+#      :1482, collect_funcs is at :1504, parse_program is at :3572. The authoritative limit source is
+#      whatever this script PRINTS at run time (it is regex-read, never hard-coded) -- the prose numbers
+#      below are kept verbatim as the historical record of when the rule was written down.
 #   * limit constant (never hard-coded here): boot\lib_parse.fl:1399
 #       `if (p->nfuncs >= 512) return -85;`   (api declaration path)
 #     and the same guard in the function-definition path: boot\lib_parse.fl:1526

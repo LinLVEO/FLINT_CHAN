@@ -194,9 +194,17 @@ static int path_eq(const char *a, const char *b) {
 static bool is_include_dir(Token *t) {
   return is_ident_tok(t, "include") && t->next && t->next->kind == TK_STR;
 }
-// api 声明起点 = 标识符 api 后跟标识符（模块短名）——decl 到 ';' 结束
+// api 声明起点 = 标识符 api 后跟**模块名**——裸短名（标识符）或字符串字面量（`api "cabridge.dll"`）
+// ⚠️ v1.4.28（B1-4）：**字符串模块名也必须认**。原来只认标识符 ⇒ 这种声明不被 hoist_apis 前移，
+//   于是它会被**注入的 `lib_print.fl` 挡在身后**（注入库的 api 声明被前移、函数体留在原地），
+//   parse 第二遍看到"前面已有函数定义"就报「api 声明必须放在文件最顶部（任何 struct/函数之前）」——
+//   **位置指向的正是用户真·写在顶部的那一行**（指错方向），而 boot 侧同一份源码**能编**（主 Agent 裁定
+//   选 (a)：让该形态正常工作，与 boot 同结论）。判据 = `test\边界探针.ps1` 的 `api_str_modname_print`。
+//   ⚠️ 生产口径不变：**裸名仍是生产写法**（字符串名/路径会把绝对路径烧进产物、换机即失效），
+//   本节改的只是"前移识别"，没有新增关键字、没有新增 API 别名。
 static bool is_api_decl_start(Token *t) {
-  return is_ident_tok(t, "api") && t->next && t->next->kind == TK_IDENT;
+  return is_ident_tok(t, "api") && t->next
+      && (t->next->kind == TK_IDENT || t->next->kind == TK_STR);
 }
 
 // ========== v1.0.8 print 内建：内置输出库（源里用到 print([...]) 才注入）==========

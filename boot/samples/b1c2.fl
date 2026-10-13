@@ -1,0 +1,13 @@
+// b1c2.fl — v1.4.28（B1-4）正例：**字符串模块名 ＋ 同文件 print(...)** 必须能编、产物跑 42
+//   改前真 flint 报「api 声明必须放在文件最顶部（任何 struct/函数之前）」、位置指向**第 1 行第 1 列**
+//   —— 真因 = `src\main.c` 的 `is_api_decl_start()` 只认「api ＋ 标识符」，字符串模块名的声明不被
+//   `hoist_apis` 前移，于是被**注入的 `lib_print.fl`** 的函数体挡在身后；而 **boot 侧同一份源码
+//   exit 0** ⇒ 这是"真 flint 比 boot 窄"的**假拒绝**（主 Agent 裁定选 (a)：让该形态正常工作）。
+//   现在两端同结论：进 $pos（boot 产物退出码 42）＋ 进 $diff（真 flint 同为 42）。
+//   生产口径不变：**裸名**才是生产写法（字符串名/带路径名会把路径烧进产物、换机即失效）。
+api "kernel32.dll" int GetTickCount();
+int main() {
+  print(["b1c2 ok\n"]);
+  if (GetTickCount() > 0) { return 42; }
+  return 7;
+}

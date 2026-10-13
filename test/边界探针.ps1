@@ -142,6 +142,31 @@ $cases = @(
      src='api "C:/Windows/System32//' + ('./'*17) + 'kernel32" int GetTickCount();' + "`n" + 'int main() { if (GetTickCount() > 0) { return 42; } return 7; }' }
   @{ n='api_modname_path64'; kind='wall'; err='导入模块名过长：写出名最长 63 字节，现在 64 字节'; note='同族路径的**外侧 1 字节**（单斜杠基址 `C:/Windows/System32/` ＋ 18×`./` ＋ `kernel32`）= 64 字节 ⇒ 默认档编译期硬错（改前：编译 exit 0、产物导入名被从尾部砍成 63 字节的"半个路径"、启动期 0xC0000135 —— 本刀实测过）';
      src='api "C:/Windows/System32/' + ('./'*18) + 'kernel32" int GetTickCount();' + "`n" + 'int main() { return 42; }' }
+
+  # ---------- 2026-10-13（B1-5）：全局初值**只吃一个字面量**（尾巴一律默认档硬错）----------
+  #   · 改前的真因（实测，不是猜）：`src\parse.c` 的 `parse_global_init` 只读**一个字面量**，随后
+  #     `collect_globals` 一路 **静默跳到 ','／';'** ⇒ `int g = 0 - 1;` 编译 exit 0 而 **g == 0**；
+  #     `int g = 1 + x;`（尾巴里是**变量**）连既有的「初值必须是编译期常量」都绕过（run-tests 的
+  #     ng_nonconst 只钉了 `= x` 那一种写法）⇒ 这是"编译过、值是错的"，不是"支持表达式"。
+  #   · 现在：真 flint 默认档硬错（位置指向**那个多出来的 token**）、boot 同结论（专码 -213）。
+  #   · ⚠️ 三条的 `err` 关键词都是同一句首 —— 差别在注释里（不同尾巴形态走同一道判据）。
+  @{ n='global_init_expr'; kind='wall'; err='全局变量初值只支持一个字面量'; note='**表达式**尾巴：`int g = 0 - 1;`（改前编译 exit 0、g == 0 ⇒ 值静默错）';
+     src='int g = 0 - 1;' + "`n" + 'int main() { return 42; }' }
+  @{ n='global_init_var'; kind='wall'; err='全局变量初值只支持一个字面量'; note='尾巴里是**变量**：`int g = 1 + x;`（改前最坏的一条 —— 编译 exit 0、g == 1、且绕过了「初值必须是编译期常量」这道既有判据）';
+     src='int x = 5;' + "`n" + 'int g = 1 + x;' + "`n" + 'int main() { return 42; }' }
+  @{ n='global_init_garbage'; kind='wall'; err='全局变量初值只支持一个字面量'; note='**纯垃圾尾巴**（连运算符都没有）：`int g = 7 9 ;`（改前编译 exit 0、g == 7 —— 旧实现是"读到第一个字面量就闭眼跳到 ;"）';
+     src='int g = 7 9 ;' + "`n" + 'int main() { return 42; }' }
+  @{ n='global_init_neglit_ok'; kind='ok'; code=42; note='上限内侧（合法形态不许被误伤）：一字面量 ＋ 一元正负号 ⇒ `int g = -5;` 必须能编**且值真是 -5**（防"一刀切把负号字面量也拦了"）';
+     src='int g = -5;' + "`n" + 'int main() { if (g == 0 - 5) { return 42; } return 7; }' }
+
+  # ---------- 2026-10-13（B1-4）：**字符串模块名 ＋ 同文件 print(...)** 必须正常工作 ----------
+  #   · 改前真因：`src\main.c` 的 `is_api_decl_start()` 只认「api ＋ 标识符」⇒ 字符串模块名的声明
+  #     不被 `hoist_apis` 前移，于是被**注入的 `lib_print.fl` 挡在身后**，parse 第二遍报
+  #     「api 声明必须放在文件最顶部」——**位置指向用户真·写在顶部的那一行**（指错方向），
+  #     而 **boot 侧同一份源码能编** ⇒ 真 flint 比 boot 窄的**假拒绝**。
+  #   · 现在：与 boot 同结论（能编、产物跑 42）；生产口径仍是**裸名**（字符串名/路径会烧进产物）。
+  @{ n='api_str_modname_print'; kind='ok'; code=42; note='字符串模块名 ＋ 同文件 `print([...])`：注入的 `lib_print.fl` 不许把这条声明挡在身后（改前真 flint 报「api 声明必须放在文件最顶部（任何 struct/函数之前）」且指向**第 1 行第 1 列**；boot 侧同一份源码 exit 0 ⇒ 双端不一致的假拒绝）';
+     src='api "kernel32.dll" int GetTickCount();' + "`n" + 'int main() { print(["b14 ok\n"]); if (GetTickCount() > 0) { return 42; } return 7; }' }
 )
 
 # ---------------------------------------------------------------- 跑

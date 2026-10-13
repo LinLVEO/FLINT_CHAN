@@ -485,7 +485,10 @@ int wp_drawn_ok = 0;            // M4r: 1 once a frame has really been rendered 
 int wp_loops = 0;               // message pump iterations since startup
 int wp_stat_t0 = 0;
 int wp_dirty = 1;               // 1 = paint+upload this iteration, 2 = do it once more after that
-int wp_prev_dig = 0 - 1;        // data digest of the last painted frame (-1 = nothing painted yet)
+int wp_prev_dig = -1;           // data digest of the last painted frame (-1 = nothing painted yet)
+// v1.4.28 (B1-5): this line used to read `= 0 - 1` and the compiler SILENTLY DROPPED the `- 1`
+//   (global scalar init only ever took the first literal), so the value really was 0, not -1.
+//   The tail is a hard error now, so the literal is written out (same intent, same comment above).
 int wp_mx = 0;                  // last seen pointer position (client coords)
 int wp_my = 0;
 int wp_was_in = 0;              // was the pointer inside the client area last iteration?
@@ -514,7 +517,8 @@ int wp_cover_h = 0;             // v7 (M7): the handle of that window, 0 = expos
 // `latch` = `top` was locked while peeking (so it stays after the keys are released).
 int wp_hk_ok = 0;               // 1 = we really hold an exclusive combo
 int wp_hk_vk = 0;               // ...and which VK it is (0 = none available)
-int wp_hk_which = 0 - 1;        // index into the candidate chain (-1 = none)
+int wp_hk_which = -1;           // index into the candidate chain (-1 = none)
+// v1.4.28 (B1-5): was `= 0 - 1`; the old compiler silently dropped the `- 1` (value really was 0).
 int wp_hk_probe_fail = 0;       // how many candidates were refused (== WP_HK_N means hk none)
 int wp_peek = 0;                // 1 = the hold-to-peek is active on this frame
 int wp_peek_latch = 0;          // 1 = `top` locked while peeking
@@ -583,7 +587,8 @@ int wp_drag_seen = 0;           // 1 = the foreground window MOVED while the but
 int wp_yield_t0 = 0;            // v14: when the last give-way move was issued (the retry cadence)
 int wp_layer_apply = 0;         // 1 = the Setup row changed the selector; the loop performs the move
 int wp_layer_hit = 0;           // v6: what the Layer row's own hit test returned on this frame
-int wp_lay_pick = 0 - 1;        // v10 (M12): which of the three layer buttons was pressed (-1 = none)
+int wp_lay_pick = -1;           // v10 (M12): which of the three layer buttons was pressed (-1 = none)
+// v1.4.28 (B1-5): was `= 0 - 1`; the old compiler silently dropped the `- 1` (value really was 0).
 int wp_pressn = 0;              // v6 diagnostic: press edges the app has seen
 // v13 (M14): wp_pressn above now counts ONLY presses that really landed on the panel (the gate below),
 // because the platform layer polls the GLOBAL button -- before this cut it counted every click on the
