@@ -1,0 +1,294 @@
+// main.fl -- enginesnap: 引擎速查置顶小窗（FLINT 写）
+// 数据源：C:\Users\20838\Desktop\.dsh-tools\task-engine\state-snapshot.txt
+//   （启动引擎-status.ps1 吐的 key=值 快照，UTF-8 无 BOM；key 纯 ASCII，**值可能含中文**）
+// 中文显示：运行时用 Win32 官方两步转码 —— MultiByteToWideChar(CP_UTF8) → WideCharToMultiByte(CP_ACP)
+//   （本机 ANSI = GBK，所以 *A 家族 API 直接能画；不自己写码表）
+// 自检（不建窗、可脚本化）：exe 同目录存在 snap.dump → 解析后写文本成绩单再退出
+//   成绩单：E:\FLINT-lab\tmp\row-probe\enginesnap-dump.txt
+// 交互：右键 = 退出；每 2 秒重读一次快照；快照缺失/读不到 → 显示"快照缺失"，不崩
+include "ui_lib.fl"
+include "io_lib.fl"
+
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);   // ⚠️ 每 2 秒转码一次 → 必须释放，否则内存稳态会涨（J4）
+api kernel32 int GetTickCount();          // 2 秒刷新节拍（ui_lib 未声明，本 app 自己声明）
+api kernel32 int MultiByteToWideChar(int, int, int, int, int, int);
+api kernel32 int WideCharToMultiByte(int, int, int, int, int, int, int, int);
+
+// ⚠️ 语言边界（v1.4.8 实测）：**全局变量不支持指针类型**（int*/char*/double* 全局都编不过）
+//   → 路径不做全局常量，直接在调用点用字符串字面量（只读、无副作用）
+// ⚠️ 另一个边界：源文件必须纯 ASCII → 快照文件名取 ASCII（中文只出现在文件**内容**里，运行时转码）
+
+// —— UTF-8 → ANSI（官方两步：先问宽字符数，再转）；返回写出的字节数（含结尾 0），<0 = 失败 ——
+int utf8_to_ansi(char *src, char *dst, int cap) {
+  int need = 0;
+  int got = 0;
+  int *w = 0;
+  need = MultiByteToWideChar(65001, 0, src, 0 - 1, 0, 0);
+  if (need <= 0) { return 0 - 1; }
+  w = VirtualAlloc(0, need * 2 + 16, 0x3000, 4);
+  if (w == 0) { return 0 - 2; }
+  got = MultiByteToWideChar(65001, 0, src, 0 - 1, w, need);
+  if (got <= 0) { return 0 - 3; }
+  got = WideCharToMultiByte(0, 0, w, 0 - 1, dst, cap, 0, 0);
+  VirtualFree(w, 0, 0x8000);                     // 宽字符中转缓冲立刻还回去（每 2 秒一次，不能漏）
+  if (got <= 0) { return 0 - 4; }
+  return got;
+}
+
+// 在每行**行首**找 "key="，返回值起始下标；找不到 = -1
+int kv_val(char *buf, int n, char *key) {
+  int kl = 0;
+  int i = 0;
+  int ls = 0;
+  int j = 0;
+  int ok = 1;
+  while (key[kl] != 0) { kl = kl + 1; }
+  while (i < n) {
+    if (i == ls) {
+      j = 0;
+      ok = 1;
+      while (j < kl) {
+        if (i + j >= n) { ok = 0; break; }
+        if (buf[i + j] != key[j]) { ok = 0; break; }
+        j = j + 1;
+      }
+      if (ok == 1 && i + kl < n) {
+        if (buf[i + kl] == '=') { return i + kl + 1; }
+      }
+    }
+    if (buf[i] == 10) { ls = i + 1; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 值结束处（行尾）；用于取字符串值的长度
+int kv_end(char *buf, int n, int start) {
+  int i = start;
+  while (i < n) {
+    if (buf[i] == 10) { break; }
+    if (buf[i] == 13) { break; }
+    i = i + 1;
+  }
+  return i;
+}
+
+// 取整数值；找不到/非法 = -1（调用方显示 "--"）
+int kv_int(char *buf, int n, char *key) {
+  int v = kv_val(buf, n, key);
+  int r = 0;
+  int c = 0;
+  int neg = 0;
+  if (v < 0) { return 0 - 1; }
+  if (v >= n) { return 0 - 1; }
+  if (buf[v] == '-') { neg = 1; v = v + 1; }
+  while (v < n) {
+    c = buf[v] % 256;
+    if (c < 48) { break; }
+    if (c > 57) { break; }
+    r = r * 10 + (c - 48);
+    v = v + 1;
+  }
+  if (neg == 1) { return 0 - r; }
+  return r;
+}
+
+// 成绩单用的小工具
+int putb(char *d, int *pos, char *s, int n) {
+  int i = 0;
+  while (i < n) { d[*pos] = s[i]; *pos = *pos + 1; i = i + 1; }
+  return 0;
+}
+
+int puti(char *d, int *pos, int v) {
+  char b[16];
+  int n = 0;
+  if (v < 0) { putb(d, pos, "-", 1); v = 0 - v; }
+  n = std::itoa(v, b);
+  return putb(d, pos, b, n);
+}
+
+int putkv(char *d, int *pos, char *k, int v) {
+  int kl = 0;
+  while (k[kl] != 0) { kl = kl + 1; }
+  putb(d, pos, k, kl);
+  return puti(d, pos, v);
+}
+
+// 显示用：取不到就按 0 算（ui_num 只画无符号，负数会画出怪东西）
+int kv_int0(char *buf, int n, char *key) {
+  int v = kv_int(buf, n, key);
+  if (v < 0) { return 0; }
+  return v;
+}
+
+int main() {
+  char raw[4096];
+  char txt[4096];
+  int n = 0;
+  int rc = 0;
+  int tlen = 0;
+  int mt = 0;
+  int vs = 0;
+  int ve = 0;
+  int vl = 0;
+  int dump = 0;
+  struct WndSt wnd;
+  struct Drw dr;
+  struct UiIn in;
+  struct Seg sg;
+  struct MSG m;
+  struct P pt;
+  struct RECT wr;
+  int *h = 0;
+  int *hf = 0;
+  int *dc = 0;
+  int running = 1;
+  int lx = 0;
+  int ly = 0;
+  int last = 0;
+  int down = 0;
+  int clicked = 0;
+  int c_clicks = 0;
+
+  // —— 读快照 + 转码（一次性；每 2 秒重来）——
+  n = std::file_read("C:\\Users\\20838\\Desktop\\.dsh-tools\\task-engine\\state-snapshot.txt", raw, 4000);
+  if (n > 0) { raw[n] = 0; } else { n = 0; raw[0] = 0; }
+  rc = utf8_to_ansi(raw, txt, 4000);
+  if (rc > 0) { tlen = rc - 1; } else { tlen = 0; txt[0] = 0; }
+
+  if (std::file_exists("E:\\FLINT-lab\\apps\\enginesnap\\snap.dump") == 1) {
+    // —— 自检模式：解析结果写成绩单，然后退出（不建窗）——
+    char out[1024];
+    int p = 0;
+    putb(out, &p, "snap_bytes=", 11); puti(out, &p, n);
+    putb(out, &p, " ansi_bytes=", 12); puti(out, &p, rc);
+    putb(out, &p, " utf8_rc=", 9); puti(out, &p, rc);
+    putb(out, &p, "\n", 1);
+    putkv(out, &p, "tasks_open=", kv_int(txt, tlen, "tasks_open"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "cand=", kv_int(txt, tlen, "cand"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "sec_danger=", kv_int(txt, tlen, "sec_danger"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "sec_warn=", kv_int(txt, tlen, "sec_warn"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "sec_info=", kv_int(txt, tlen, "sec_info"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "disk_c_free_x10=", kv_int(txt, tlen, "disk_c_free_x10"));
+    putb(out, &p, " ", 1);
+    putkv(out, &p, "disk_e_free_x10=", kv_int(txt, tlen, "disk_e_free_x10"));
+    putb(out, &p, "\n", 1);
+    putb(out, &p, "mem_time=", 9);
+    vs = kv_val(txt, tlen, "mem_time");
+    if (vs >= 0) { ve = kv_end(txt, tlen, vs); putb(out, &p, &txt[vs], ve - vs); }
+    putb(out, &p, "\n", 1);
+    putb(out, &p, "task_first=", 11);
+    vs = kv_val(txt, tlen, "task_first");
+    if (vs >= 0) { ve = kv_end(txt, tlen, vs); putb(out, &p, &txt[vs], ve - vs); }
+    putb(out, &p, "\n", 1);
+    std::file_write("E:\\FLINT-lab\\tmp\\row-probe\\enginesnap-dump.txt", out, p);
+    return 0;
+  }
+
+  wnd.cls = "ENGINESNAP";
+  wnd.w = 320;
+  wnd.ht = 150;
+  wnd.alpha = 236;
+  if (!ui_make(&wnd)) return 90;
+  h = wnd.h;
+  hf = ui_font_make(16);
+  last = GetTickCount();
+
+  while (running) {
+    clicked = 0;
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) { running = 0; }
+      if (m.message == 0x201) { down = 1; }
+      if (m.message == 0x202) { down = 0; clicked = 1; }
+      if (m.message == 0x204) { running = 0; }        // 右键退出
+      if (running == 1) { DispatchMessageA(&m); }     // 必须派发（否则 WM_PAINT 把内层循环卡死）
+    }
+    if (running == 0) { break; }
+
+    // —— 每 2 秒重读快照 ——
+    if (GetTickCount() - last >= 2000) {
+      n = std::file_read("C:\\Users\\20838\\Desktop\\.dsh-tools\\task-engine\\state-snapshot.txt", raw, 4000);
+      if (n > 0) { raw[n] = 0; } else { n = 0; raw[0] = 0; }
+      rc = utf8_to_ansi(raw, txt, 4000);
+      if (rc > 0) { tlen = rc - 1; } else { tlen = 0; txt[0] = 0; }
+      last = GetTickCount();
+    }
+
+    GetCursorPos(&pt);
+    GetWindowRect(h, &wr);
+    in.mx = pt.x - wr.l;
+    in.my = pt.y - wr.t;
+    in.down = down;
+    in.clicked = clicked;
+
+    dc = GetDC(h);
+    ui_font_use(dc, hf);
+    dr.dc = dc;
+    SetBkMode(dc, 1);
+    SetTextColor(dc, 0x00EBEBEB);
+
+    struct RECT bg;
+    bg.l = 0; bg.t = 0; bg.r = wnd.w; bg.b = wnd.ht;
+    ui_fill_rgb(dc, &bg, 0x00121010);
+
+    if (tlen > 0) {
+      // MEM <mem_time>
+      lx = 12; ly = 10;
+      seg_mk(&sg, "MEM ", 4);
+      ui_text(&dr, &sg, &lx, ly);
+      vs = kv_val(txt, tlen, "mem_time");
+      if (vs >= 0) { ve = kv_end(txt, tlen, vs); seg_mk(&sg, &txt[vs], ve - vs); ui_text(&dr, &sg, &lx, ly); }
+      // TASK <n> open
+      lx = 12; ly = 34;
+      seg_mk(&sg, "TASK ", 5);
+      ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, kv_int0(txt, tlen, "tasks_open"));
+      seg_mk(&sg, " open", 5);
+      ui_text(&dr, &sg, &lx, ly);
+      // CAND <n>
+      lx = 12; ly = 58;
+      seg_mk(&sg, "CAND ", 5);
+      ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, kv_int0(txt, tlen, "cand"));
+      // SEC danger/warn
+      lx = 12; ly = 82;
+      seg_mk(&sg, "SEC  danger ", 12);
+      ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, kv_int0(txt, tlen, "sec_danger"));
+      seg_mk(&sg, "  warn ", 7);
+      ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, kv_int0(txt, tlen, "sec_warn"));
+      // DISK C: x.y G  E: x.y G
+      lx = 12; ly = 106;
+      seg_mk(&sg, "DISK  C:", 8);
+      ui_text(&dr, &sg, &lx, ly);
+      mt = kv_int0(txt, tlen, "disk_c_free_x10");
+      ui_num(&dr, &lx, ly, mt / 10);
+      seg_mk(&sg, ".", 1); ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, mt % 10);
+      seg_mk(&sg, "G  E:", 5); ui_text(&dr, &sg, &lx, ly);
+      mt = kv_int0(txt, tlen, "disk_e_free_x10");
+      ui_num(&dr, &lx, ly, mt / 10);
+      seg_mk(&sg, ".", 1); ui_text(&dr, &sg, &lx, ly);
+      ui_num(&dr, &lx, ly, mt % 10);
+      seg_mk(&sg, "G", 1); ui_text(&dr, &sg, &lx, ly);
+    } else {
+      // 降级：快照缺失/读不到也不崩（显示提示即可）
+      lx = 12; ly = 34;
+      seg_mk(&sg, "snapshot missing", 16);
+      ui_text(&dr, &sg, &lx, ly);
+    }
+
+    ReleaseDC(h, dc);
+    if (clicked == 1) { c_clicks = c_clicks + 1; }
+    Sleep(16);
+  }
+  return 0;
+}

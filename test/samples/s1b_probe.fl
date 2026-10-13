@@ -1,0 +1,21 @@
+// s1b_probe.fl — IAT 跨组交错回归（S1 变体：kernel32 夹在 user32 声明中间）
+// 声明序 user32 → kernel32 → user32：组 0=kernel32(ExitProcess,GetTickCount)，
+// 组 1=user32(GetSystemMetrics,GetActiveWindow)。旧实现 api_slot 按声明序记 →
+// GS↔GT 互相错路由（GS 会拿到 GetTickCount 的开机毫秒数）。
+// 判据（确定性，三路互相独立）：
+//   GS(0)=SM_CXSCREEN≈1920（>0 且 <60000）；错路由=开机毫秒 >60000 → 90
+//   GT()=开机毫秒（>60000）；错路由≈1920 → 91
+//   GAW()=0（控制台进程无活动窗口）；错路由=GS≈1920 → 92
+api user32 int GetSystemMetrics(int);
+api kernel32 int GetTickCount();
+api user32 int GetActiveWindow();
+
+int main() {
+  int gsm = GetSystemMetrics(0);
+  int gtc = GetTickCount();
+  int gaw = GetActiveWindow();
+  if (gsm <= 0 || gsm > 60000) return 90;
+  if (gtc < 60000) return 91;
+  if (gaw != 0) return 92;
+  return 0;
+}

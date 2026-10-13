@@ -1,0 +1,3 @@
+// nb21.fl — B2v 负例：循环 include 必须报错（-8），不能被去重静默吞掉
+include "nb21a.fl"
+int main() { return 42; }

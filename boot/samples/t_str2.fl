@@ -1,0 +1,9 @@
+// t_str2.fl — B2i char* 下标 + 字符串字面量自检：期望输出 abcdefghij 与退出码 42
+int main() {
+  char *s = "abcdefghij";
+  int i = 0;
+  int n = 10;
+  while (i < n) { print([s[i]]); i = i + 1; }
+  print(["\n"]);
+  return 42;
+}

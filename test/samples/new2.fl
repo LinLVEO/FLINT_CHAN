@@ -1,0 +1,7 @@
+// new2.fl — own 槽清零防线：声明前提前 return，出口清理须跳过 0 槽（防 free 垃圾地址）
+int main() {
+  if (1) return 77;               // 声明前提前退出
+  int *own p = new int;
+  *(p) = 1;
+  return 0;
+}

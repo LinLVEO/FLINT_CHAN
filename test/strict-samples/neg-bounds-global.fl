@@ -1,0 +1,6 @@
+// neg-bounds-global.fl -- -strict ④b: 常量下标越界（全局数组）
+int g[4];
+int main() {
+  g[0] = 1;
+  return g[4];
+}

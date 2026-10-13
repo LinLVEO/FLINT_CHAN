@@ -1,0 +1,594 @@
+// b1_parse.fl — FLINT 自举 parser 自测驱动（B2f：struct + 指针）
+// 任务卡 T-20260908-020937（B1b）/ 184922（B2a）/ 200831（B2c）/ 202511（B2d）/ 204628（B2e）/ 205631（B2f）
+// 自测：tokenize → parse_program → 解释执行（含 if/while/比较/逻辑/递归调用/数组/struct/指针）断言返回值；
+//       B2c 多函数「解析形状」断言（函数数/main 下标/调用节点数）保留
+// 退出码 0 = 全部通过；1..N = 第 N 项失败
+include "../lib_parse.fl"
+
+// 每样本运行环境（数组全由 main 分配；struct 指针只作参数/局部值，字段用 int*）
+struct RunCtx {
+  int *kinds;
+  int *poss;
+  int *lens;
+  int *vals;
+  int *nk;
+  int *nl;
+  int *nr;
+  int *nv;
+  int *nty;
+  int *vps;
+  int *vls;
+  int *vsp;
+  int *vslots;
+  int *vad;
+  int *blk;
+  int *vars;
+  int *fpos;
+  int *flen;
+  int *fnargs;
+  int *fpty;
+  int *fvc;
+  int *fbody;
+  // 第四刀（卡 T-20260921-232138）：`lib_parse.fl` 的 struct Parse 新增提升计划表 ⇒ 本驱动必须同步接线
+  int *preg_n; int *preg_slot; int *pmark;
+  int *args;
+  int *sflat;
+  int *aflat;
+  int *spool;
+  int sp;              // 解释器帧栈顶（run_sample 每次归零）
+}
+
+// 解释器帧：v = 变量数组根；base = 本次调用的槽基址；sp = 共享栈顶（*sp = 下一空闲槽）
+// ⚠️ 每函数帧必须**按调用分配**——固定用 fvar_base 会让递归的内层覆盖外层变量（B2d 实证 fib 崩）
+struct Vars { int *v; int base; int *sp; int ret; int has_ret; }
+
+// 表达式求值（含比较/逻辑/调用/递归）
+int ev(struct Ast *a, struct Parse *p, int idx, struct Vars *vs) {
+  int *kd = a->kind;
+  int *ll = a->l;
+  int *rr = a->r;
+  int *vv = a->val;
+  int k = kd[idx];
+  if (k == 0) return vv[idx];
+  if (k == 6) {
+    int *v = vs->v;
+    int b = vs->base;
+    return v[b + vv[idx]];
+  }
+  if (k == 23) {                       // B2i 本地 int 数组下标读（升序基址 = 槽 slot+n-1）
+    int *v = vs->v;
+    int b = vs->base;
+    return v[b + ll[idx] - ev(a, p, rr[idx], vs)];
+  }
+  if (k == 25) {                       // B2e 裸数组名 = 地址（槽号即解释器地址）
+    int b = vs->base;
+    return b + vv[idx];
+  }
+  if (k == 26) {                       // B2e 指针形参读 = 槽里存的地址
+    int *v = vs->v;
+    int b = vs->base;
+    return v[b + vv[idx]];
+  }
+  if (k == 28) {                       // B2i 指针下标读（机器升序 ↔ 槽号降序）
+    int *v = vs->v;
+    int b = vs->base;
+    int addr = v[b + ll[idx]];
+    return v[addr - ev(a, p, rr[idx], vs)];
+  }
+  if (k == 30) {                       // B2f 本地 struct 字段读（字段 j 在槽 slot+j）
+    int *v = vs->v;
+    int b = vs->base;
+    return v[b + ll[idx] + vv[idx] / 8];
+  }
+  if (k == 32) {                       // B2f 指针 -> 字段读
+    int *v = vs->v;
+    int b = vs->base;
+    int addr = v[b + ll[idx]];
+    return v[addr + vv[idx] / 8];
+  }
+  if (k == 37) {                       // B2f char* 下标读（解释器地址 = 槽号；机器升序 ↔ 槽号降序）
+    int *v = vs->v;
+    int b = vs->base;
+    int addr = v[b + ll[idx]];
+    return v[addr - ev(a, p, rr[idx], vs)];
+  }
+  if (k == 39) {                       // B2f 本地 char 数组下标读（升序基址 = 槽 slot+n-1）
+    int *v = vs->v;
+    int b = vs->base;
+    return v[b + ll[idx] - ev(a, p, rr[idx], vs)];
+  }
+  if (k == 41) {                      // B2g 字符串字面量（解释器无字节内存 → 返回池偏移作伪地址）
+    return vv[idx];
+  }
+  if (k == 42) {                      // B2g char 标量读
+    int *v = vs->v;
+    return v[vs->base + vv[idx]];
+  }
+  if (k == 5) return 0 - ev(a, p, ll[idx], vs);
+  if (k == 20) {                       // 逻辑非
+    int x = ev(a, p, ll[idx], vs);
+    if (x == 0) return 1;
+    return 0;
+  }
+  if (k == 21) {                       // 逻辑与（短路）
+    int x = ev(a, p, ll[idx], vs);
+    if (x == 0) return 0;
+    int y = ev(a, p, rr[idx], vs);
+    if (y == 0) return 0;
+    return 1;
+  }
+  if (k == 22) {                       // 逻辑或（短路）
+    int x = ev(a, p, ll[idx], vs);
+    if (x != 0) return 1;
+    int y = ev(a, p, rr[idx], vs);
+    if (y != 0) return 1;
+    return 0;
+  }
+  if (k == 10) {                       // 调用（含递归）
+    int fi = vv[idx];
+    int *ar = a->args;
+    int base = ll[idx];
+    int argc = rr[idx];
+    int av0 = 0; int av1 = 0; int av2 = 0; int av3 = 0;
+    if (argc > 0) av0 = ev(a, p, ar[base], vs);
+    if (argc > 1) av1 = ev(a, p, ar[base + 1], vs);
+    if (argc > 2) av2 = ev(a, p, ar[base + 2], vs);
+    if (argc > 3) av3 = ev(a, p, ar[base + 3], vs);
+    int *fc = p->fvar_cnt;
+    int *fbd = p->fbody;
+    int *sp = vs->sp;
+    struct Vars nv;
+    nv.v = vs->v;
+    nv.sp = sp;
+    nv.base = sp[0];                     // 按调用分配帧（递归安全）
+    sp[0] = sp[0] + fc[fi];
+    nv.ret = 0;
+    nv.has_ret = 0;
+    int *nvp = nv.v;
+    if (argc > 0) nvp[nv.base + 0] = av0;
+    if (argc > 1) nvp[nv.base + 1] = av1;
+    if (argc > 2) nvp[nv.base + 2] = av2;
+    if (argc > 3) nvp[nv.base + 3] = av3;
+    ex_block(a, p, fbd[fi], &nv);
+    int res = nv.ret;
+    sp[0] = nv.base;                     // 归还帧
+    return res;
+  }
+  int lv = ev(a, p, ll[idx], vs);
+  int rv = ev(a, p, rr[idx], vs);
+  if (k == 1) return lv + rv;
+  if (k == 2) return lv - rv;
+  if (k == 3) return lv * rv;
+  if (k == 4) return lv / rv;
+  if (k == 11) { if (lv == rv) return 1; return 0; }
+  if (k == 12) { if (lv != rv) return 1; return 0; }
+  if (k == 13) { if (lv < rv) return 1; return 0; }
+  if (k == 14) { if (lv <= rv) return 1; return 0; }
+  if (k == 15) { if (lv > rv) return 1; return 0; }
+  if (lv >= rv) return 1;
+  return 0;
+}
+
+// 语句块执行：返回 1 = 块内已 return（停止后续语句）
+int ex_block(struct Ast *a, struct Parse *p, int node, struct Vars *vs) {
+  int *ll = a->l;
+  int *rr = a->r;
+  int *blk = p->blk;
+  int base = ll[node];
+  int cnt = rr[node];
+  int i = 0;
+  int stop = 0;
+  while (i < cnt && stop == 0) {
+    int r = ex_stmt(a, p, blk[base + i], vs);
+    if (r != 0) stop = 1;
+    i = i + 1;
+  }
+  return stop;
+}
+
+// 单语句执行：返回 1 = 已 return
+int ex_stmt(struct Ast *a, struct Parse *p, int idx, struct Vars *vs) {
+  int *kd = a->kind;
+  int *ll = a->l;
+  int *rr = a->r;
+  int *vv = a->val;
+  int k = kd[idx];
+  if (k == 7 || k == 8) {                       // 赋值 / 声明+初始化
+    if (rr[idx] >= 0) {
+      int *v = vs->v;
+      v[vs->base + ll[idx]] = ev(a, p, rr[idx], vs);
+    }
+    return 0;
+  }
+  if (k == 24) {                                // B2i 本地 int 数组下标写（升序）
+    int *v = vs->v;
+    int val = ev(a, p, vv[idx], vs);
+    v[vs->base + ll[idx] - ev(a, p, rr[idx], vs)] = val;
+    return 0;
+  }
+  if (k == 29) {                                // B2i 指针下标写（升序）
+    int *v = vs->v;
+    int addr = v[vs->base + ll[idx]];
+    int val = ev(a, p, vv[idx], vs);
+    v[addr - ev(a, p, rr[idx], vs)] = val;
+    return 0;
+  }
+  if (k == 31) {                                // B2f 本地 struct 字段写
+    int *v = vs->v;
+    int val = ev(a, p, rr[idx], vs);
+    v[vs->base + ll[idx] + vv[idx] / 8] = val;
+    return 0;
+  }
+  if (k == 33) {                                // B2f 指针 -> 字段写
+    int *v = vs->v;
+    int addr = v[vs->base + ll[idx]];
+    int val = ev(a, p, rr[idx], vs);
+    v[addr + vv[idx] / 8] = val;
+    return 0;
+  }
+  if (k == 43) {                                // B2g char 标量写
+    int *v = vs->v;
+    v[vs->base + ll[idx]] = ev(a, p, rr[idx], vs);
+    return 0;
+  }
+  if (k == 35 || k == 36) {                     // B2f 指针变量赋值 / 声明+初始化
+    int *v = vs->v;
+    v[vs->base + ll[idx]] = ev(a, p, rr[idx], vs);
+    return 0;
+  }
+  if (k == 38) {                                // B2f char* 下标写
+    int *v = vs->v;
+    int addr = v[vs->base + ll[idx]];
+    int val = ev(a, p, vv[idx], vs);
+    v[addr - ev(a, p, rr[idx], vs)] = val;
+    return 0;
+  }
+  if (k == 40) {                                // B2f 本地 char 数组下标写
+    int *v = vs->v;
+    int val = ev(a, p, vv[idx], vs);
+    v[vs->base + ll[idx] - ev(a, p, rr[idx], vs)] = val;
+    return 0;
+  }
+  if (k == 9) {                                 // return
+    vs->ret = ev(a, p, ll[idx], vs);
+    vs->has_ret = 1;
+    return 1;
+  }
+  if (k == 10) { ev(a, p, idx, vs); return 0; } // B2g：表达式语句（print 展开）
+  if (k == 19) return ex_block(a, p, idx, vs);  // 块
+  if (k == 17) {                                // if
+    int c = ev(a, p, ll[idx], vs);
+    if (c != 0) return ex_block(a, p, rr[idx], vs);
+    int eb = vv[idx];
+    if (eb >= 0) return ex_block(a, p, eb, vs);
+    return 0;
+  }
+  if (k == 18) {                                // while
+    int going = 1;
+    int ret = 0;
+    while (going == 1) {
+      int c = ev(a, p, ll[idx], vs);
+      if (c == 0) {
+        going = 0;
+      } else {
+        int r = ex_block(a, p, rr[idx], vs);
+        if (r != 0) { going = 0; ret = 1; }
+      }
+    }
+    return ret;
+  }
+  return 0;
+}
+
+// 执行函数（含顶层 main）：按调用分配帧 → 跑函数体 → 归还帧
+int call_fn(struct Ast *a, struct Parse *p, int fidx, struct Vars *vs) {
+  int *fc = p->fvar_cnt;
+  int *fbd = p->fbody;
+  int *sp = vs->sp;
+  struct Vars nv;
+  nv.v = vs->v;
+  nv.sp = sp;
+  nv.base = sp[0];
+  sp[0] = sp[0] + fc[fidx];
+  nv.ret = 0;
+  nv.has_ret = 0;
+  ex_block(a, p, fbd[fidx], &nv);
+  int r = nv.ret;
+  sp[0] = nv.base;
+  return r;
+}
+
+// 组装 Parse（B2d：块表/函数体表接线）
+int setup_parse(struct Parse *pa, struct RunCtx *rc, struct TokOut *to, char *src) {
+  int cnt = to->count;
+  pa->src = src;
+  pa->ks = to->kinds;
+  pa->ps = to->pos;
+  pa->ls = to->lens;
+  pa->vs = to->vals;
+  pa->n = cnt;
+  pa->i = 0;
+  pa->vps = rc->vps;
+  pa->vls = rc->vls;
+  pa->vsp = rc->vsp;
+  pa->vslots = rc->vslots;
+  pa->vad = rc->vad;
+  pa->nvars = 0;
+  pa->vbase = 0;
+  pa->nslots = 0;
+  pa->maxslots = 0;
+  pa->sbase = 0;
+  pa->blk = rc->blk;
+  pa->nblk = 0;
+  pa->fpos = rc->fpos;
+  pa->flen = rc->flen;
+  pa->fnargs = rc->fnargs;
+  pa->fpty = rc->fpty;
+  pa->fvar_cnt = rc->fvc;
+  pa->fbody = rc->fbody;
+  pa->preg_n = rc->preg_n;
+  pa->preg_slot = rc->preg_slot;
+  pa->pmark = rc->pmark;
+  pa->nfuncs = 0;
+  pa->main_idx = -1;
+  pa->args = rc->args;
+  pa->nargs = 0;
+  pa->sflat = rc->sflat;
+  pa->aflat = rc->aflat;
+  pa->spool = rc->spool;
+  pa->spcur = 0;
+  return 0;
+}
+
+// 跑单样本：tokenize + parse + 解释执行。返回 0 = 通过；100/200 见下；300=值不符
+int run_sample(char *src, int expect, struct RunCtx *rc) {
+  int n = 0;
+  while (src[n] != 0) n = n + 1;
+  struct TokOut to;
+  to.kinds = rc->kinds;
+  to.pos = rc->poss;
+  to.lens = rc->lens;
+  to.vals = rc->vals;
+  to.cap = 128;
+  int cnt = tokenize(src, n, &to);
+  if (cnt <= 0) return 100;
+  struct Ast a;
+  a.kind = rc->nk;
+  a.l = rc->nl;
+  a.r = rc->nr;
+  a.val = rc->nv;
+  a.args = rc->args;
+  a.ty = rc->nty;
+  a.cap = 512;
+  a.cnt = 0;
+  struct Parse pa;
+  setup_parse(&pa, rc, &to, src);
+  int ns = parse_program(&pa, &a);
+  if (ns < 0) return 200;
+  struct Vars vs;
+  vs.v = rc->vars;
+  vs.sp = &rc->sp;
+  vs.base = 0;
+  vs.ret = 0;
+  vs.has_ret = 0;
+  rc->sp = 0;
+  int got = call_fn(&a, &pa, pa.main_idx, &vs);
+  if (got != expect) { print(["got=", got, " exp=", expect, "\n"]); return 300; }
+  return 0;
+}
+
+// B2c：多函数「解析形状」期望值（≤4 参约束 → 打包 struct）
+struct Shape { int nf; int mi; int calls; }
+
+// 解析形状断言：函数数 / main 下标 / 调用节点数
+int run_shape(char *src, struct Shape *sh, struct RunCtx *rc) {
+  int n = 0;
+  while (src[n] != 0) n = n + 1;
+  struct TokOut to;
+  to.kinds = rc->kinds;
+  to.pos = rc->poss;
+  to.lens = rc->lens;
+  to.vals = rc->vals;
+  to.cap = 128;
+  int cnt = tokenize(src, n, &to);
+  if (cnt <= 0) return 100;
+  struct Ast a;
+  a.kind = rc->nk;
+  a.l = rc->nl;
+  a.r = rc->nr;
+  a.val = rc->nv;
+  a.args = rc->args;
+  a.ty = rc->nty;
+  a.cap = 512;
+  a.cnt = 0;
+  struct Parse pa;
+  setup_parse(&pa, rc, &to, src);
+  int ns = parse_program(&pa, &a);
+  if (ns < 0) return 200;
+  if (pa.nfuncs != sh->nf) return 400;
+  if (pa.main_idx != sh->mi) return 401;
+  int *kd = a.kind;
+  int calls = 0;
+  int i = 0;
+  while (i < a.cnt) {
+    if (kd[i] == 10) calls = calls + 1;
+    i = i + 1;
+  }
+  if (calls != sh->calls) return 402;
+  return 0;
+}
+
+// —— 自测驱动（B1/B2a 表达式与变量 + B2c 多函数 + B2d 控制流）——
+int main() {
+  int kinds[128]; int poss[128]; int lens[128]; int vals[128];
+  int nk[512]; int nl[512]; int nr[512]; int nv[512]; int nty[512];
+  int vps[64]; int vls[64]; int vsp[64]; int vslots[64]; int vad[64];
+  int blk[512];
+  int vars[256];
+  int fpos[32]; int flen[32]; int fnargs[32]; int fpty[32];
+  int fvc[32]; int fbody[32];
+  int preg_n[32]; int preg_slot[128];        // 第四刀：≤32 函数 × 每函数 4 项
+  int pmark[512];                            // 第四刀：节点引用标记（与 nk/nl/... 同尺寸）
+  int args[128];
+  int sflat[4096];                           // 2026-09-27：1024 → 4096（同 b1_parse.fl：字段上限 64→128
+                                             //   后旧容量不够；与 lib_parse.fl 的字段区守卫同尺寸）
+  int aflat[256];
+  char spool[2048];
+  struct RunCtx rc;
+  rc.kinds = kinds;
+  rc.poss = poss;
+  rc.lens = lens;
+  rc.vals = vals;
+  rc.nk = nk;
+  rc.nl = nl;
+  rc.nr = nr;
+  rc.nv = nv;
+  rc.nty = nty;
+  rc.vps = vps;
+  rc.vls = vls;
+  rc.vsp = vsp;
+  rc.vslots = vslots;
+  rc.vad = vad;
+  rc.blk = blk;
+  rc.vars = vars;
+  rc.fpos = fpos;
+  rc.flen = flen;
+  rc.fnargs = fnargs;
+  rc.fpty = fpty;
+  rc.fvc = fvc;
+  rc.fbody = fbody;
+  rc.preg_n = preg_n;
+  rc.preg_slot = preg_slot;
+  rc.pmark = pmark;
+  rc.args = args;
+  rc.sflat = sflat;
+  rc.aflat = aflat;
+  rc.spool = spool;
+
+  // —— B1 纯表达式回归 ——
+  int r = run_sample("int main() { return 42; }", 42, &rc);
+  if (r != 0) return 1;
+  r = run_sample("int main() { return 1+2*3; }", 7, &rc);
+  if (r != 0) return 2;
+  r = run_sample("int main() { return (1+2)*3; }", 9, &rc);
+  if (r != 0) return 3;
+  r = run_sample("int main() { return 10-4-3; }", 3, &rc);
+  if (r != 0) return 4;
+  r = run_sample("int main() { return -5+2; }", -3, &rc);
+  if (r != 0) return 5;
+  r = run_sample("int main() { return 20/3; }", 6, &rc);
+  if (r != 0) return 6;
+
+  // —— B2a 变量 + 多语句 ——
+  r = run_sample("int main() { int a; a = 42; return a; }", 42, &rc);
+  if (r != 0) return 7;
+  r = run_sample("int main() { int a = 3; int b = 4; return a * b; }", 12, &rc);
+  if (r != 0) return 8;
+  r = run_sample("int main() { int a = 10; a = a + 5; return a; }", 15, &rc);
+  if (r != 0) return 9;
+  r = run_sample("int main() { int a = 1; int b = 2; int c = 3; c = a + b * c; return c; }", 7, &rc);
+  if (r != 0) return 10;
+  r = run_sample("int main() { int s = 0; s = s + 1; s = s + 2; s = s + 3; return s; }", 6, &rc);
+  if (r != 0) return 11;
+  r = run_sample("int main() { int x = 7; int y = 2; return x / y; }", 3, &rc);
+  if (r != 0) return 12;
+  r = run_sample("int main() { int a = -5; a = 0 - a; return a; }", 5, &rc);
+  if (r != 0) return 13;
+  r = run_sample("int main() { int a = 2; int b = 3; return (a + b) * 2; }", 10, &rc);
+  if (r != 0) return 14;
+
+  // —— B2c 多函数（含递归）——
+  r = run_sample("int sq(int x) { return x * x; } int main() { return sq(6) + 6; }", 42, &rc);
+  if (r != 0) return 15;
+  r = run_sample("int add(int a, int b) { return a + b; } int main() { return add(40, 2); }", 42, &rc);
+  if (r != 0) return 16;
+  r = run_sample("int inc(int x) { return x + 1; } int main() { return inc(inc(inc(39))); }", 42, &rc);
+  if (r != 0) return 17;
+
+  // —— B2d 控制流 ——
+  r = run_sample("int main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", 45, &rc);
+  if (r != 0) { print(["item 18 r=", r, "\n"]); return 18; }                                          // while 求和 0..9
+  r = run_sample("int fib(int n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2); } int main() { return fib(10); }", 55, &rc);
+  if (r != 0) { print(["item 19 r=", r, "\n"]); return 19; }                                          // 递归 + if
+  r = run_sample("int main() { if (1 < 2) return 42; return 0; }", 42, &rc);
+  if (r != 0) { print(["item 20 r=", r, "\n"]); return 20; }                                          // if 真分支
+  r = run_sample("int main() { if (0) return 1; else return 42; }", 42, &rc);
+  if (r != 0) { print(["item 21 r=", r, "\n"]); return 21; }                                          // else 分支
+  r = run_sample("int main() { int x = 6; int y = 7; if (x < y && y > 0) { return x * y; } return 0; }", 42, &rc);
+  if (r != 0) { print(["item 22 r=", r, "\n"]); return 22; }                                          // 逻辑与
+  r = run_sample("int main() { int a = 40; if (!(a < 0)) { return a + 2; } return 0; }", 42, &rc);
+  if (r != 0) { print(["item 23 r=", r, "\n"]); return 23; }                                          // 逻辑非
+  r = run_sample("int main() { int i = 0; int n = 0; while (i < 5) { int j = 0; while (j < 3) { n = n + 1; j = j + 1; } i = i + 1; } return n; }", 15, &rc);
+  if (r != 0) { print(["item 24 r=", r, "\n"]); return 24; }                                          // 嵌套循环
+  r = run_sample("int main() { int i = 0; while (1) { i = i + 1; if (i > 41) return i; } return 0; }", 42, &rc);
+  if (r != 0) { print(["item 25 r=", r, "\n"]); return 25; }                                          // while(1) + return 跳出
+
+  // —— B2c 解析形状 ——
+  struct Shape sh;
+  sh.nf = 2; sh.mi = 1; sh.calls = 1;
+  r = run_shape("int sq(int x) { return x * x; } int main() { return sq(6) + 6; }", &sh, &rc);
+  if (r != 0) return 26;
+  sh.nf = 2; sh.mi = 0; sh.calls = 1;
+  r = run_shape("int main() { return g(42); } int g(int x) { return x; }", &sh, &rc);
+  if (r != 0) return 27;                                          // 前向调用
+  sh.nf = 2; sh.mi = 1; sh.calls = 3;
+  r = run_shape("int inc(int x) { return x + 1; } int main() { return inc(inc(inc(39))); }", &sh, &rc);
+  if (r != 0) return 28;                                          // 嵌套调用 3 个节点
+
+  // —— B2e 数组 ——
+  r = run_sample("int main() { int a[3]; a[0] = 10; a[1] = 20; a[2] = 12; return a[0] + a[1] + a[2]; }", 42, &rc);
+  if (r != 0) { print(["item 29 r=", r, "\n"]); return 29; }      // 声明 + 下标读写
+  r = run_sample("int main() { int a[4]; int i = 0; while (i < 4) { a[i] = i * 3; i = i + 1; } return a[0] + a[1] + a[2] + a[3] + 24; }", 42, &rc);
+  if (r != 0) { print(["item 30 r=", r, "\n"]); return 30; }      // 循环填数组
+  r = run_sample("int main() { int a[5]; int i = 2; a[i + 1] = 40; a[i - 1] = 2; return a[3] + a[1]; }", 42, &rc);
+  if (r != 0) { print(["item 31 r=", r, "\n"]); return 31; }      // 下标是表达式
+  r = run_sample("int idx(int k) { return k; } int main() { int a[3]; a[idx(2)] = 42; return a[2]; }", 42, &rc);
+  if (r != 0) { print(["item 32 r=", r, "\n"]); return 32; }      // 下标是调用
+  r = run_sample("int sum3(int a[]) { return a[0] + a[1] + a[2]; } int main() { int b[3]; b[0] = 10; b[1] = 20; b[2] = 12; return sum3(b); }", 42, &rc);
+  if (r != 0) { print(["item 33 r=", r, "\n"]); return 33; }      // 数组传参（读）
+  r = run_sample("int fill(int p[]) { p[0] = 40; p[1] = 2; return 0; } int main() { int a[2]; return fill(a) + a[0] + a[1]; }", 42, &rc);
+  if (r != 0) { print(["item 34 r=", r, "\n"]); return 34; }      // 数组传参（写回）
+  r = run_sample("int add2(int *p) { return p[0] + p[1]; } int main() { int a[2]; a[0] = 40; a[1] = 2; return add2(a); }", 42, &rc);
+  if (r != 0) { print(["item 35 r=", r, "\n"]); return 35; }      // int *p 形参形态
+  r = run_sample("int acc(int p[], int n) { int i = 0; int s = 0; while (i < n) { s = s + p[i]; i = i + 1; } return s; } int main() { int a[5]; a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4; a[4] = 5; return acc(a, 5) + 27; }", 42, &rc);
+  if (r != 0) { print(["item 36 r=", r, "\n"]); return 36; }      // 指针形参 + 循环求和
+  r = run_sample("int g(int n) { int a[3]; a[0] = n; if (n < 2) return a[0]; return g(n - 1) + g(n - 2); } int main() { return g(10); }", 55, &rc);
+  if (r != 0) { print(["item 37 r=", r, "\n"]); return 37; }      // 递归 + 每调用一帧数组
+  r = run_sample("int main() { int a[100]; int i = 0; while (i < 100) { a[i] = i; i = i + 1; } return a[42] + a[0]; }", 42, &rc);
+  if (r != 0) { print(["item 38 r=", r, "\n"]); return 38; }      // 大数组（槽 >14 → disp32）
+  r = run_sample("int main() { int a[0]; return 0; }", 0, &rc);
+  if (r != 200) { print(["item 39 r=", r, "\n"]); return 39; }    // 负例：长度 0
+  r = run_sample("int main() { int n = 3; int a[n]; return 0; }", 0, &rc);
+  if (r != 200) { print(["item 40 r=", r, "\n"]); return 40; }    // 负例：长度非常量
+  r = run_sample("int main() { int a[3]; a = 1; return 0; }", 0, &rc);
+  if (r != 200) { print(["item 41 r=", r, "\n"]); return 41; }    // 负例：数组名整体赋值
+  r = run_sample("int fill(int p[]) { p[0] = 40; p[1] = 2; return 0; } int main() { int a[2]; return fill(a) + a[0] + a[1]; }", 42, &rc);
+  if (r != 0) { print(["item 42 r=", r, "\n"]); return 42; }      // 传参写回后本地读一致
+  r = run_sample("int sum2(int p[]) { return p[0] + p[1]; } int sum3(int p[]) { return sum2(p) + p[2]; } int main() { int a[3]; a[0] = 10; a[1] = 20; a[2] = 12; return sum3(a); }", 42, &rc);
+  if (r != 0) { print(["item 43 r=", r, "\n"]); return 43; }      // 指针形参向下透传
+
+  // —— B2f struct + 指针 ——
+  r = run_sample("struct P { int x; int y; } int main() { struct P v; v.x = 40; v.y = 2; return v.x + v.y; }", 42, &rc);
+  if (r != 0) { print(["item 44 r=", r, "\n"]); return 44; }      // 局部 struct 字段读写
+  r = run_sample("struct P { int x; int y; } int setp(struct P *p, int a, int b) { p->x = a; p->y = b; return 0; } int main() { struct P v; return setp(&v, 40, 2) + v.x + v.y; }", 42, &rc);
+  if (r != 0) { print(["item 45 r=", r, "\n"]); return 45; }      // &取址 + struct* 形参写字段
+  r = run_sample("struct Box { int *data; int n; } int main() { int a[3]; struct Box b; b.data = a; b.n = 3; int *d = b.data; d[0] = 10; d[1] = 20; d[2] = 12; return d[0] + d[1] + d[2]; }", 42, &rc);
+  if (r != 0) { print(["item 46 r=", r, "\n"]); return 46; }      // 指针字段存地址 + 局部化下标
+  r = run_sample("int main() { int a[3]; int *p = a; p[0] = 10; p[1] = 20; p[2] = 12; return a[0] + a[1] + a[2]; }", 42, &rc);
+  if (r != 0) { print(["item 47 r=", r, "\n"]); return 47; }      // int* 局部指针 + 下标写回
+  r = run_sample("int main() { char buf[4]; char *p = buf; buf[0] = 1; buf[1] = 2; buf[3] = 5; p[2] = 30; return buf[0] + buf[1] + buf[2] + buf[3] + 4; }", 42, &rc);
+  if (r != 0) { print(["item 48 r=", r, "\n"]); return 48; }      // char 数组 + char* 字节下标
+  r = run_sample("struct Box { int *data; int n; } int fill(struct Box *b) { int *d = b->data; int i = 0; while (i < b->n) { d[i] = i * 10; i = i + 1; } return 0; } int main() { int a[4]; struct Box b; b.data = a; b.n = 4; return fill(&b) + a[1] + a[2] + a[3] - 18; }", 42, &rc);
+  if (r != 0) { print(["item 49 r=", r, "\n"]); return 49; }      // -> 字段读 + 循环写数组
+  r = run_sample("struct Inner { int v; } struct Outer { struct Inner *in; int k; } int main() { struct Inner i; struct Outer o; i.v = 40; o.in = &i; o.k = 2; struct Inner *ip = o.in; return ip->v + o.k; }", 42, &rc);
+  if (r != 0) { print(["item 50 r=", r, "\n"]); return 50; }      // struct* 字段 + 指针局部
+  r = run_sample("struct Node { int val; int *next; } int main() { int a[2]; struct Node n; n.val = 40; n.next = a; int *q = n.next; q[0] = 2; return n.val + q[0]; }", 42, &rc);
+  if (r != 0) { print(["item 51 r=", r, "\n"]); return 51; }      // int 字段 + int* 字段
+  r = run_sample("int main() { struct P v; return 0; }", 0, &rc);
+  if (r != 200) { print(["item 52 r=", r, "\n"]); return 52; }    // 负例：struct 未声明
+  r = run_sample("struct P { int x; } int main() { struct P v; v.y = 1; return 0; }", 0, &rc);
+  if (r != 200) { print(["item 53 r=", r, "\n"]); return 53; }    // 负例：字段不存在
+  r = run_sample("struct P { int x; int x; } int main() { return 0; }", 0, &rc);
+  if (r != 200) { print(["item 54 r=", r, "\n"]); return 54; }    // 负例：重复字段
+  return 0;
+}

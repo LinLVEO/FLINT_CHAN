@@ -1,0 +1,548 @@
+// main.fl — FLGUI demo（M2）：真窗（label / button / checkbox / 分隔线 / 滑块 / 进度条 / 只读文本域）＋ dump.on 无头 dump 模式
+//
+// 编译：真 flint `flint.exe main.fl -o flgui_demo.exe` ｜ boot `b1_emit.exe main.fl`（产物落在源旁）
+// 开关（沿用 m2_float 惯例：文件不存在 = 开关不生效，不需要预先建目录）：
+//   E:\FLINT-lab\tmp\flgui\dump.on 存在 ⇒ **不建窗、不占屏**，合成 9 帧（点按钮 / 点勾选框 / 拖滑块）
+//     把每帧状态 dump 成文本走 stdout，最后 exit 42 —— 供 test\flgui-verify.ps1 双端逐字节对账
+// 真窗模式：ULW 图层窗口（D5），右键 = 退出
+//   M4c：真窗走**键盘档**建窗（`gui_win_make_kbd`）—— 只有这一档的真按键才翻译得出 WM_CHAR（可编辑域才打得进字）；
+//        无头 dump 模式不建窗 ⇒ 既有 dump 基线不受影响（唯一变量 = 真窗那条路）。
+// 演示关系：拖动滑块 → 下面的进度条跟着走（同一个值，一条 immediate-mode 数据流）
+// 交付纪律：界面交付不截图，用户直接看实体
+// M4c：真窗键盘账本改走 **stdout**（见 kb_print 的注释：M4b 那份"每帧覆写文件"的账本让判据打摆，已废）
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+include "flgui_win32.fl"
+
+// 「由产物自己算出的坐标」暂存（判据不许手写常量：期望值算错是本项目踩过三次的坑）
+int g_hit_x;
+int g_hit_y;
+int g_quit;
+int g_rprev;
+int g_rx;
+int g_ry;
+int g_rw;
+int g_rh;
+// M4c：键盘账本的"上一次打过的值"（只在变化时打一行，见 kb_print）——
+//   全局只开 int 标量、初值一律**字面量**（全局初始化写表达式 `0 - 1` 在 boot 侧编不过：语言边界）
+int kb_first = 1;
+int kb_l = 0;
+int kb_f = 0;
+int kb_s = 0;
+int kb_p = 0;
+int kb_d = 0;
+int kb_c = 0;
+int kb_x = 0;
+// M4c 诊断：本帧**喂进控件的那个 `in.key`**（账本 `I=` 栏）—— 用它区分"控件收到的是谁"与"消息里来的是谁"
+int in_key_last = 0;
+// M4c 诊断：可编辑框本帧的返回值（账本 `R=` 栏）：0 无 / 1 回车确认 / 2 Esc 取消 —— 直接告诉你走了哪条路
+int g_editret = 0;
+// M4c 收尾诊断（**真窗专有**，无头 dump 一行都不打 ⇒ 基线不受影响）：
+//   把"光标命令的 x"与"**用真 DC 量出来的文本宽度**"摆在一起 ⇒ 两条尺子的差当场变成数字。
+//   为什么需要它：用户手打反馈"修复前光标偏**右**、修复后偏**左**" ⇒ 真实绘制宽度落在 7n 与 8n 之间
+//   ⇒ **"每字符平均宽度 × 字符数"这个模型本身就不够准**，必须按**整串**量（本函数就是在量这个）。
+int cv_first = 1;
+int cv_last_cx = 0;
+int cv_last_tl = 0;
+// M4c：是否无头 dump 模式（1 = 是）。给"只该在 dump 里画"的辅助元素用（见 demo_frame 里的内容镜像行）
+int g_dump = 0;
+// M4f：**真窗专有**的两处动画状态（无头 dump 那条分支一行都不碰 ⇒ 老基线逐字节不动）
+//   g_ashow = 进度条"缓动跟随"的当前显示值（滑块跟手 = 输入 → 数值的滤波）
+//   g_fade  = 标题淡入淡出的三角波进度（0..256）
+int g_ashow = 0;
+int g_fade = 0;
+// M4g：**真窗专有**的"位移 ＋ 缩放"状态（同样只在 `g_dump == 0` 分支里读写 ⇒ 无头基线不受影响）
+//   ① 右键菜单：`g_mtx/g_mty` = 目标点（点击处），显示位置/宽度由 gui_anim 进度从"偏上偏左 + 窄"滑/张到目标
+//   ② 缩放面板：`g_panel_open` = 目标状态，`g_from_h` = **切换那一刻的显示高度**（连点两次也不跳），
+//      `g_ph` = 当前显示高度 ⇒ 高度 = gui_lerp(g_from_h, 目标, 进度)：**同一个式子同时管"展开"和"收起"**
+int g_mtx = 0;
+int g_mty = 0;
+int g_mt = 0;
+int g_popw_base = 0;              // 弹层基准宽度（gui_init 后从 ctx 读，别在算式里写死 120）
+int g_panel_open = 0;
+int g_from_h = 0;
+int g_ph = 0;
+int g_pt = 0;
+int g_px = 0;
+int g_py = 0;
+int g_pw = 0;
+
+// 找第一条指定 kind 的命令：中心写 g_hit_x/g_hit_y，矩形写 g_rx..g_rh
+int demo_find(int kind) {
+  int i = 0;
+  g_hit_x = 0;
+  g_hit_y = 0;
+  g_rx = 0; g_ry = 0; g_rw = 0; g_rh = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) {
+      g_rx = gui_cmd_x[i];
+      g_ry = gui_cmd_y[i];
+      g_rw = gui_cmd_w[i];
+      g_rh = gui_cmd_h[i];
+      g_hit_x = g_rx + g_rw / 2;
+      g_hit_y = g_ry + g_rh / 2;
+      return 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 找**第 n 条**指定 kind 的命令（n 从 1 数）：中心写 g_hit_x/g_hit_y，矩形写 g_rx..g_rh
+// ⚠️ 为什么要有它：同日踩过一次 —— 拿 `demo_find(14)`（第一条 = 只读文本域）的坐标去点**第二条**（可编辑框），
+//    点在框外 ⇒ 聚焦根本没发生，而 dump 里"看起来正常"（只是没有光标条）。凡"同名不同物"的控件都要按序号取。
+int demo_find_nth(int kind, int n) {
+  int i = 0;
+  int seen = 0;
+  g_hit_x = 0;
+  g_hit_y = 0;
+  g_rx = 0; g_ry = 0; g_rw = 0; g_rh = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) {
+      seen = seen + 1;
+      if (seen == n) {
+        g_rx = gui_cmd_x[i];
+        g_ry = gui_cmd_y[i];
+        g_rw = gui_cmd_w[i];
+        g_rh = gui_cmd_h[i];
+        g_hit_x = g_rx + g_rw / 2;
+        g_hit_y = g_ry + g_rh / 2;
+        return 1;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// M4c：真窗键盘账本 —— 走 **stdout**（与无头 dump 同一条路），**只在状态变化时打一行**。
+//   为什么废掉 M4b 那份"定长记录写文件"的账本（原 kb_tpl_fill/kbline/kb_log）：它每帧 CREATE_ALWAYS
+//     **覆写**同一个 34 字节记录 ⇒ 探针读到的经常是"半截记录"或空文件（kb-probe.ps1 实测 focus=? / TIMEOUT）
+//     —— 那是**判据在打摆**，不是"没通过"（同族：`探针内容要比被测位移高` 那种"自己写歪的判据"）。
+//   stdout 是**追加**的、一行一次写完 ⇒ 探针读"最后一条完整行"就能稳定判定，不用赌读时机。
+//   格式（逐字段命名，探针**按字段名解析**、不认字节偏移 —— 定长偏移那套踩过整行串位）：
+//     `KB L=<len> F=<focus> P=<pending> D=<down_n> C=<char_n> N=<null_n> S=<scan> Z=<scan0_n> Q=<lp0_n> T=<text>`
+//     D = WM_KEYDOWN 条数、C = WM_CHAR 条数、N = 其中 hwnd==0（**线程消息**）的条数
+//     S = 最近一条 WM_KEYDOWN 的**扫描码字节**（'O' 应为 24）、Z = 扫描码为 0 的条数、Q = lParam 整个为 0 的条数
+//     ⇒ **"消息到没到"、"什么身份"、"带没带扫描码"、"翻没翻出字符"四件事能分开判**（对半切）。
+//   另：真窗起窗后打一次 `BOX <x> <y> <w> <h>`（可编辑框的客户区矩形）⇒ 探针按真实几何算点击点，
+//     不再手写 506,394 这种常量（坐标写死是本项目踩过的坑）。
+int kb_sum(char *t) {
+  int i = 0;
+  int s = 0;
+  while (t[i] != 0) {
+    s = s + t[i];
+    i = i + 1;
+    if (i >= 64) { return s; }
+  }
+  return s;
+}
+
+int kb_print(struct GuiCtx *c) {
+  int l = 0;
+  int f = 0;
+  int s = 0;
+  l = gui_edit_size(0);
+  f = gui_edit_focused(c);
+  s = kb_sum(gui_edit_text(0));
+  // 只在"会变的几项"上做去重（**别把每一项诊断都塞进去**：诊断计数总是跟着 down/char 一起动，
+  //   串成十几层 if 既读不动也容易改错；这一层只要保证"状态没变就不重复打"）。
+  if (kb_first == 0) {
+    if (l == kb_l) {
+      if (f == kb_f) {
+        if (s == kb_s) {
+          if (gui_key_pending == kb_p) {
+            if (gui_key_down_n == kb_d) {
+              if (gui_key_char_n == kb_c) {
+                if (gui_key_tr_n == kb_x) { return 0; }   // 七项都没变 ⇒ 不重复打
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  kb_first = 0;
+  kb_l = l;
+  kb_f = f;
+  kb_s = s;
+  kb_p = gui_key_pending;
+  kb_d = gui_key_down_n;
+  kb_c = gui_key_char_n;
+  kb_x = gui_key_tr_n;
+  print(["KB L=", l, " F=", f, " P=", gui_key_pending, " D=", gui_key_down_n, " C=", gui_key_char_n, " X=", gui_key_tr_n, " B=", gui_key_fb_n, " M=", gui_key_vk_last, " G=", gui_key_vk_used, " I=", in_key_last, " R=", g_editret, " N=", gui_key_null_n, " S=", gui_key_scan_last, " Z=", gui_key_scan0_n, " Q=", gui_key_lp0_n, " T=", gui_edit_text(0), "\n"]);
+  return 1;
+}
+
+// M4o（2026-09-28）：**焦点链账本**（真窗专有 —— 只在真窗分支调用，无头 dump 走不到 ⇒ 基线不受影响）。
+//   为什么必须有这一行：`test\samples\flgui15.fl` 是**脚本化输入**（直接写 `in.key`），它证明不了
+//   "真 WM_KEYDOWN 的 Tab 到得了库"、"Shift 真的被解成反向"（同族老账：脚本化输入看不见平台层缺口，
+//   真滚轮那次就是这么漏的）⇒ 真按键那半由 `apps\flgui_demo\tab-probe.ps1` 读这一行判。
+//   一行一次、只在**序号变化**时打（与 kb_print 同一套去重口径）；`id` = 焦点控件 id、`edit` = 编辑焦点槽；
+//   `sh` = **消息驱动 Shift 态**（M4o 的平台层修正，见 `flgui_win32.fl` 的 `struct GuiWin.shift`）——
+//      真按键探针就是靠它抓到"Shift+Tab 被当成 Tab"（当时 `sh=1` 却走了前进）、以及"Shift 抬起来了
+//      这一格却没清掉"（`sh` 一直是 1 ⇒ 下一次单独的 Tab 又被当成 Shift+Tab，idx 从 4 退到 3）。
+//   ⚠️ 初值必须是**字面量**：boot 的全局初始化不吃算式（写 `0 - 2` 会 `parse err=-47` 把编译打断 ——
+//     本刀实测；`0` 够用：第一帧 `ix = -1 ≠ 0` ⇒ 开局那行基线账照打，之后按"变了才打"去重）。
+int kb_focus_last = 0;
+
+int focus_print(struct GuiCtx *c, int sh) {
+  // 焦点序号与清单数**直接读池**（不另立 getter：函数预算只剩 1 格，见 lib\flgui.fl 上方那段）：
+  //   k=1 = 序号 + 1（0 = 没有焦点；`-1` 才是"无"的对外口径）｜k=2 = 上一帧登记到的可聚焦控件数。
+  int ix = gui_pool_at(gui_focus_key(), 1) - 1;
+  int cnt = gui_pool_at(gui_focus_key(), 2);
+  if (ix == kb_focus_last) { return 0; }
+  kb_focus_last = ix;
+  print(["FOC idx=", ix, " cnt=", cnt, " id=", gui_focus_get(c), " edit=", gui_edit_focused(c), " sh=", sh, "\n"]);
+  return 1;
+}
+
+// 真窗专有的"光标 / 文本"对账（M4c 收尾；**只在真窗那条分支调用**，无头 dump 不调用 ⇒ 基线不受影响）。
+// 输出一行 `CV caret=… text_x=… drawn=… ext=… delta=… adx100=…`：
+//   caret   = 光标命令（kind 15）的 x
+//   text_x  = 可编辑框文本命令（kind 5）的 x
+//   drawn   = 该文本命令**实际画出的字节数**（可能被盒宽截断 < 编辑缓冲里的量）
+//   ext     = 用 **surf 的真 DC + 真字体**量出的 `drawn` 个字节的宽度（`GetTextExtentPoint32A`）
+//   delta   = caret − (text_x + ext)：**>0 = 光标偏右、<0 = 光标偏左、=0 = 正落在字尾**
+//   adx100  = ext × 100 / drawn（每字符宽 ×100，用来看真字宽到底是 7.0 还是 7.x）
+//   ms      = 本帧时间戳（毫秒，平台层 `gui_win_input` 注入）—— **"时间通道"在真窗那半的判据就靠它**
+//             （探针断言：非 0、且随墙钟不回退 ⇒ 证明真时间是平台层给的，不是内核猜的）
+// 状态没变就不重复打（与 kb_print 同一套去重口径）。
+int cv_print(struct GuiCtx *c, struct Surf *sf, int *hf) {
+  struct SZ sz;
+  int i = 0;
+  int cx = 0 - 1;
+  int tx = 0;
+  int tl = 0;
+  int n = 0;
+  cx = 0 - 1;
+  tx = 0;
+  tl = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 15) { cx = gui_cmd_x[i]; }
+    if (gui_cmd_kind[i] == 5) { tx = gui_cmd_x[i]; tl = gui_cmd_tlen[i]; }
+    i = i + 1;
+  }
+  if (cv_first == 0) {
+    if (cx == cv_last_cx) { if (tl == cv_last_tl) { return 0; } }
+  }
+  cv_first = 0;
+  cv_last_cx = cx;
+  cv_last_tl = tl;
+  n = gui_edit_size(0);
+  if (tl > 0) {
+    ui_font_use(sf->dc, hf);
+    GetTextExtentPoint32A(sf->dc, gui_edit_text(0), tl, &sz);
+    print(["CV caret=", cx, " text_x=", tx, " drawn=", tl, " buf=", n, " ext=", sz.cx, " delta=", cx - (tx + sz.cx), " adx100=", sz.cx * 100 / tl, " ms=", c->ms, "\n"]);
+  } else {
+    print(["CV caret=", cx, " text_x=", tx, " drawn=0 buf=", n, " ext=0 delta=", cx - tx, " adx100=0 ms=", c->ms, "\n"]);
+  }
+  return 0;
+}
+
+// M4f：淡入淡出的颜色 = **逐通道**整数插值。
+//   为什么必须逐通道：颜色是 COLORREF `0x00BBGGRR`，把整个 int 丢给 gui_lerp 会把 R/B 串到一起
+//   （低位字节借位/进位直接改变另一个通道）；拆成 R/G/B 各自插值再拼回去才是"变色"。
+//   ⚠️ 本版命令表带的只有 COLORREF、**没有透明度成员** ⇒ "淡入淡出"落在"改值"这一档（属 M4f 三样之一）。
+int demo_fade_col(struct GuiCtx *c, int t) {
+  int a = c->theme_text;
+  int b = c->theme_fill;
+  int r0 = a & 0xFF;
+  int g0 = (a >> 8) & 0xFF;
+  int b0 = (a >> 16) & 0xFF;
+  int r1 = b & 0xFF;
+  int g1 = (b >> 8) & 0xFF;
+  int b1 = (b >> 16) & 0xFF;
+  return gui_lerp(r0, r1, t) | (gui_lerp(g0, g1, t) << 8) | (gui_lerp(b0, b1, t) << 16);
+}
+
+// 一帧的业务（真窗与无头 dump **共用同一条代码路径**）；返回 1 = 本帧按钮被点击
+// 4 参上限：两个"输出"走 int* 载体（total 点击计数 / sld 滑块值）
+int demo_frame(struct GuiCtx *c, struct GuiInput *in, int *total, int *sld) {
+  char b[16];
+  struct GuiRect pr;                       // M4g：缩放面板的矩形（**显式矩形** ⇒ 用 gui_item_at 画，不动布局游标）
+  int hit = 0;
+  int i = 0;
+  gui_begin(c, in);
+  // M4f：真窗里标题**逐帧换色**（"淡入淡出"）；无头 dump 走原样 `gui_label` ⇒ 命令表一字不动。
+  //   进度 = gui_anim（按注入时间算、按 anim_pct 缩放时长）；到位后把标志字段写回 0 ⇒ 往复"呼吸"
+  //   （不是停在终点）。三角波：0..128..0 再摊到 0..256 ⇒ 颜色走 主题文字色 → 琥珀 → 回到文字色。
+  //   ⚠️ 画法与 gui_label 同序（先 put 文本 → 再 item_rect → 再 clip 判定 → 再 push），别调换。
+  if (g_dump == 1) {
+    gui_label(c, "FLGUI M2");
+  } else {
+    g_fade = gui_anim(c, gui_id("anim_fade"), 900);
+    if (g_fade >= 256) { gui_pool_put(gui_id("anim_fade"), 3, 0); }
+    if (g_fade > 128) { g_fade = 256 - g_fade; }
+    g_fade = g_fade * 2;
+    gui_text_put_col(c, "FLGUI M2", demo_fade_col(c, g_fade));
+    gui_item_rect(c, gui_text_w("FLGUI M2"), c->line_h);
+    if (gui_clip_visible(c)) { gui_push(c, 5); }
+  }
+  if (gui_button(c, "click")) {
+    hit = 1;
+    *total = *total + 1;
+  }
+  gui_checkbox(c, "check");
+  std::itoa(*total, b);
+  gui_label(c, b);
+  gui_separator(c);
+  *sld = gui_slider(c, "sld", *sld, 100);
+  // M4f：真窗里这条进度条**缓动追随**滑块值 —— 这就是"滑块跟手"（输入 → 数值的滤波）：
+  //   拖动中滑块本体的已选段即时跟手，而这条条子滞后一点平滑过去，一眼能看出滤波在起作用。
+  //   无头 dump 仍用原值 ⇒ 命令表一字不动（同标题那条分支的口径）。
+  if (g_dump == 1) {
+    gui_progressbar(c, "pb", *sld, 100);
+  } else {
+    g_ashow = gui_lerp(g_ashow, *sld, gui_anim(c, gui_id("anim_sld"), 160));
+    gui_progressbar(c, "pb", g_ashow, 100);
+  }
+  // ---- M4g ①：展开/收起的**缩放面板**（按钮切换；面板本体在帧末以覆盖层画出，见本函数末尾）----
+  //   为什么"高度从 g_from_h 出发"而不是"open ? 正向 : 反向"：反向写法在**首帧**（进度还没动）会
+  //   把"收起"算成"展开"（256−0 = 256）；从"那一刻的显示高度"出发则两边都天然正确、也不怕连点。
+  if (g_dump == 0) {
+    if (gui_button(c, "anim")) {
+      g_from_h = g_ph;                              // 记录切换瞬间的显示高度
+      g_panel_open = 1 - g_panel_open;
+      gui_pool_put(gui_id("anim_panel"), 3, 0);     // M4f 定的"重启动画"口径（标志写回 0）
+    }
+    g_pt = gui_anim(c, gui_id("anim_panel"), 260);
+    if (g_panel_open == 1) { g_ph = gui_lerp(g_from_h, 46, g_pt); }
+    else { g_ph = gui_lerp(g_from_h, 0, g_pt); }
+    // 面板几何**读按钮自己的矩形**（刚画完 ⇒ cur_i* 就是它），不写死坐标
+    g_px = c->lay_x;
+    g_pw = c->lay_w;
+    g_py = c->cur_iy + c->cur_ih + 4;
+  }
+  gui_scroll_begin(c, "list", 40);
+  i = 0;
+  while (i < 5) {
+    if (i == 0) { gui_label(c, "row 0"); }
+    if (i == 1) { gui_label(c, "row 1"); }
+    if (i == 2) { gui_label(c, "row 2"); }
+    if (i == 3) { gui_label(c, "row 3"); }
+    if (i == 4) { gui_label(c, "row 4"); }
+    i = i + 1;
+  }
+  gui_scroll_end(c);
+  gui_textfield(c, "read-only field");
+  g_editret = gui_textfield_edit(c, 0, 16);   // M4b：可编辑文本域（点进去打字；回车确认 / Esc 取消）；M4c 把返回值记账
+  // M4c：**只在无头 dump 模式**画这行"当前内容镜像"（当年是为 dump 判据加的）。真窗里它是纯干扰 ——
+  //   用户手打验收时第一反应就是"我打的字怎么跑到下一行去了"（框里一份、下一行一份）。
+  //   收到 `g_dump` 开关里 ⇒ 真窗不画；dump 模式照旧 ⇒ 既有 dump 基线**一字不动**。
+  if (g_dump == 1) { gui_label(c, gui_edit_text(0)); }
+  // ---- M4g ①：缩放面板的**覆盖层**（画在最后一批 ⇒ 盖在滚动列表上；收缩到 0 时一条命令都不发）----
+  //   用 `gui_item_at`（M3 的"直接钉死当前项矩形"）而不是 gui_next_rect/item_rect：**完全不动布局游标**，
+  //   所以这个覆盖层不会把后面控件的排布带歪（同族纪律见 lib\FLGUI.md §1.6）。
+  if (g_dump == 0) {
+    if (g_ph > 0) {
+      pr.x = g_px; pr.y = g_py; pr.w = g_pw; pr.h = g_ph;
+      gui_item_at(c, &pr);
+      gui_text_put(c, "");
+      if (gui_clip_visible(c)) { gui_push(c, 1); }               // kind 1 = 面板填充
+      if (g_ph >= c->line_h + 6) {                               // 高度够才画字（免得露出半个字）
+        pr.y = g_py + 4; pr.h = c->line_h;
+        gui_item_at(c, &pr);
+        gui_text_put(c, "scale panel");
+        if (gui_clip_visible(c)) { gui_push(c, 5); }
+      }
+    }
+  }
+  // ---- M4g ②：右键菜单"滑入 ＋ 宽度缩放"（真窗专有；dump 模式弹层从不打开 ⇒ 命令表一字不动）----
+  //   位置/宽度都从"偏差一点点"缓动到目标：位移 = 从目标点左上 26/14 px 滑过来；缩放 = 宽度 55% → 100%。
+  //   `gui_popup_open` 只写池标志与 ctx 的 popup_x/y（**不是 toggle**）⇒ 每帧重设位置是合法的。
+  if (g_dump == 0) {
+    if (gui_pool_get(gui_id("menu")) != 0) {
+      g_mt = gui_anim(c, gui_id("anim_menu"), 140);
+      c->popup_w = gui_lerp(g_popw_base * 55 / 100, g_popw_base, g_mt);
+      gui_popup_open(c, "menu", gui_lerp(g_mtx - 26, g_mtx, g_mt), gui_lerp(g_mty - 14, g_mty, g_mt));
+    }
+  }
+  // ---- M4i ①：右键菜单**整段淡入（含文本）** —— 这条只有"离屏层"做得到 ----
+  //   层边界 = `gui_alpha_push/pop` 之间的命令（kind 20/21）；本 app 用 `gui_win_render_layered`
+  //   传了层表面 ⇒ 渲染端把整段先画进离屏 DIB（文本也在里面），再整块按层 alpha 混回主表面。
+  //   淡入进度**复用** M4g 的滑入进度 `g_mt`（同一进度驱动位移/缩放/透明度 ⇒ 不会不同相）。
+  //   ⚠️ 只在**真窗**分支压/弹（dump 模式命令表一字不动 ⇒ 老基线安全，同 M4f/M4g 那套口径）。
+  //   ⚠️ 停在"全开"时 g_mt = 256 ⇒ alpha = 255 ⇒ 渲染端**不走离屏**（稳态零额外开销）。
+  if (g_dump == 0) { gui_alpha_push(c, g_mt * 255 / 256); }
+  if (gui_popup_begin(c, "menu", 2) == 1) {
+    if (gui_popup_item(c, "reset")) { *total = 0; *sld = 0; gui_pool_set(gui_id("check"), 0); }
+    if (gui_popup_item(c, "quit")) { g_quit = 1; }
+  }
+  gui_popup_end(c);
+  if (g_dump == 0) { gui_alpha_pop(c); }
+  gui_end(c);
+  return hit;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct Surf sf;
+  struct Surf lay;                 // M4i：**离屏层**表面（建一次、每帧复用；所有权在 app —— 句柄不许进全局）
+  int *hf;
+  int total = 0;
+  int sld = 40;
+  int dumpf = 0;
+  int dump_mode = 0;
+  int bx = 0;
+  int by = 0;
+  int cx = 0;
+  int cy = 0;
+  int sx = 0;
+  int sy = 0;
+  int sw = 0;
+  int ex = 0;                      // M4b：可编辑框的中心（由 demo_find(14) 自报的矩形算出来）
+  int ey = 0;
+
+  gui_init(&c);
+  c.lay_w = 160;
+  c.lay_h = 214;
+  g_popw_base = c.popup_w;        // M4g：弹层基准宽度从 ctx 读（**别在算式里写死 120** —— 那是 gui_init 的默认值）
+  // M4c：账本不再需要"初始化模板"（旧 kb_tpl_fill 已废）；真窗开局那行账在下方真窗分支里打。
+  //   ⚠️ 这里**不能**打账（会多一行进无头 dump 的 stdout ⇒ 既有 dump 基线当场变），无头模式一行都不该多。
+  // M4：字体建一次（原先这里 ui_font_make(14)，口径没写清"建几次"）
+  // ⚠️⚠️ **2026-09-23 真 bug 修复**（用户"打多了光标跑偏"的**真因**）：这一行原写作 `gui_win_font_init(14);`
+  //   —— **返回值被丢掉**，而真窗渲染时把**未初始化的局部 `hf`** 交给 `gui_win_render(&sf, &c, hf)`
+  //   ⇒ `ui_font_use` 拿到的不是有效字体句柄 ⇒ **DC 保持默认的 stock 比例字体** ⇒ 画出来的字是**比例宽度**
+  //   （实测逐字增量 8,10,8,5,4,8,8,4…，'i'/'t'/'r' 明显窄），而光标按"等宽 7px/字符"算 ⇒ 必然对不上
+  //   （这也是"修复前偏右、修复后偏左"的原因：8px 模型比真实略宽、7px 模型比真实略窄）。
+  //   判据（无头对账看不见"用哪个字体画"）：`cv_print` 的真窗诊断行 `CV … ext=… delta=…` —— 修好后
+  //   `ext` 恒为 `7 × drawn`、`delta` 恒 0。教训：**"命令表/dump 全绿"证明不了"画的时候用了什么字体"**。
+  hf = gui_win_font_init(14);
+  gui_win_dpi_apply(&c);          // M4：从真窗口环境读 DPI 写进 ctx（本机 96 ⇒ 缩放恒等）
+
+  // ⚠️ CreateFileA 失败返回 INVALID_HANDLE_VALUE = -1（不是 0）：判断写 `!= 0 - 1`
+  dumpf = CreateFileA("E:\\FLINT-lab\\tmp\\flgui\\dump.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (dumpf != 0 - 1) {
+    dump_mode = 1;
+    g_dump = 1;                   // M4c：给"只该在 dump 里画"的辅助元素看（见 demo_frame 的内容镜像行）
+    CloseHandle(dumpf);
+  }
+
+  // ======================= 无头 dump 模式（验证脚本用）=======================
+  if (dump_mode == 1) {
+    // M4d：无头 dump 模式喂**固定时间戳序列**（0 起、每帧 +16）—— 内核不取时 ⇒ dump 仍然逐字节确定、基线钉得住。
+    in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.key = 0; in.ms = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 1：无输入 → 布局落定
+    gui_dump(&c);
+    if (demo_find(2) == 1) { bx = g_hit_x; by = g_hit_y; }     // 按钮常态
+    if (demo_find(8) == 1) { cx = g_hit_x; cy = g_hit_y; }     // 未勾选框描边
+    if (demo_find(11) == 1) { sx = g_rx; sy = g_ry; sw = g_rw; }   // 滑块轨道
+
+    in.mx = bx; in.my = by; in.down = 1; in.pressed = 1; in.released = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 2：按钮按下
+    gui_dump(&c);
+    in.down = 0; in.pressed = 0; in.released = 1;
+    demo_frame(&c, &in, &total, &sld);   // 帧 3：原地抬起 → 点击成立
+    gui_dump(&c);
+
+    in.mx = cx; in.my = cy; in.down = 1; in.pressed = 1; in.released = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 4：勾选框按下
+    gui_dump(&c);
+    in.down = 0; in.pressed = 0; in.released = 1;
+    demo_frame(&c, &in, &total, &sld);   // 帧 5：原地抬起 → 勾选态进池
+    gui_dump(&c);
+
+    in.mx = sx + sw / 5; in.my = sy + 2; in.down = 1; in.pressed = 1; in.released = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 6：滑块按下（约 20%）
+    gui_dump(&c);
+    in.mx = sx + sw / 5 * 4; in.pressed = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 7：按住拖到约 80%（跟手）
+    gui_dump(&c);
+    in.down = 0; in.released = 1;
+    demo_frame(&c, &in, &total, &sld);   // 帧 8：抬手
+    gui_dump(&c);
+
+    in.mx = 0; in.my = 0; in.released = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 9：无输入 → 计数/勾选态/滑块值都该跨帧存活
+    gui_dump(&c);
+
+    // ---- M4b：可编辑文本域的账本（无头也走一遍：点进去 → 打 3 个字符 → 退格 → 回车确认）----
+    // ⚠️ 坐标必须**读"最近一帧命令表里那条盒命令"**（demo_frame 返回后命令表就是这一帧的），
+    //    不能在别的帧里取 —— 命令表是**每帧重建**的（踩过：拿着帧 9 的坐标去点帧 10，点在框外、聚焦根本没发生）。
+    demo_find_nth(14, 2);                // 第二条 kind 14 = **可编辑框**（第一条是只读文本域）
+    ex = g_rx + g_rw / 2; ey = g_ry + g_rh / 2;
+    in.mx = ex; in.my = ey; in.down = 1; in.pressed = 1; in.released = 0; in.key = 0;
+    demo_frame(&c, &in, &total, &sld);   // 帧 10：点进可编辑框 ⇒ 聚焦（下一帧 dump 里应看到 kind 15 光标条）
+    print(["F10 focus=", gui_edit_focused(&c), " ex=", ex, " ey=", ey, " rect=", g_rx, ",", g_ry, ",", g_rw, ",", g_rh, "\n"]);
+    gui_dump(&c);
+    in.down = 0; in.pressed = 0;
+    in.key = 111; demo_frame(&c, &in, &total, &sld);   // 帧 11：'o'
+    in.key = 107; demo_frame(&c, &in, &total, &sld);   // 帧 12：'k'
+    in.key = 33;  demo_frame(&c, &in, &total, &sld);   // 帧 13：'!' ⇒ "ok!"
+    gui_dump(&c);
+    in.key = 8;   demo_frame(&c, &in, &total, &sld);   // 帧 14：退格 ⇒ "ok"
+    gui_dump(&c);
+    in.key = 13;  demo_frame(&c, &in, &total, &sld);   // 帧 15：回车确认 ⇒ 失焦
+    gui_dump(&c);
+    print(["EDIT len=", gui_edit_size(0), " text=", gui_edit_text(0), "\n"]);
+    print(["text=", gui_edit_text(0), "\n"]);          // 单独一行：真输入探针（kb-probe.ps1）直接按行抓内容
+    print(["focus=", gui_edit_focused(&c), "\n"]);      // 回车后应为 -1（失焦）
+    in.key = 0;
+    print(["TOTAL clicks=", total, " check=", gui_pool_get(gui_id("check")) & 1, " sld=", sld, "\n"]);
+    return 42;
+  }
+
+  // ======================= 真窗模式 =======================
+  g.cls = "FLGUIM2DEMO";
+  g.x = 420;
+  g.y = 200;
+  g.w = c.lay_w + c.pad * 2;
+  // M4g：真窗多一个"anim"按钮（+24px）与覆盖式缩放面板 ⇒ 窗口跟着长高 28px。
+  //   ⚠️ 只动**真窗**这一侧的 lay_h（库只存不读它，窗口高度由 g.h 决定）⇒ 无头 dump 的布局一字不动。
+  c.lay_h = c.lay_h + 28;
+  g.h = c.lay_h;
+  g.alpha = 235;
+  // M4c：真窗用**键盘档**建窗（去掉 WS_EX_NOACTIVATE）—— 这样点击可编辑框后真按键能翻出 WM_CHAR；
+  //   默认档（gui_win_make）保持"纯后台、不抢焦点"不变，浮窗那类用法继续走它。
+  if (!gui_win_make_kbd(&g)) { return 90; }
+  if (!gui_win_surf(&sf, &g, 6)) { return 91; }
+  // M4i：离屏层表面（几何跟随主表面）。**建一次、每帧复用**（每帧 CreateDIBSection 会攒 GDI 对象）。
+  if (gui_win_layer(&lay, &sf) == 0) { return 92; }
+  // M4g：**动画开/关 A/B 开关**（文件存在 = 关；沿用 `dump.on` 那套"文件即开关"惯例，不建目录）。
+  //   为什么要留它：真窗的 CPU/帧率必须是**可归因**的数字 —— "动画花了多少" = 开与关两次量出来的差；
+  //   它同时就是 `anim_pct = 0`（关动画 = 可访问性通道）在真应用里的入口。
+  //   ⚠️ 只查在**真窗分支**里（dump 模式下存在这个文件也不许改变 dump ⇒ 老基线安全）。
+  dumpf = CreateFileA("E:\\FLINT-lab\\tmp\\flgui\\noanim.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (dumpf != 0 - 1) { gui_anim_set(&c, 0); CloseHandle(dumpf); }
+  kb_print(&c);                   // M4c：开局先打一行基线账（让探针一启动就有"当前状态"可读）
+  while (1) {
+    if (gui_win_pump(&g, &in) == 0) { break; }
+    if ((GetAsyncKeyState(2) & 0x8000) != 0) {   // 右键按下沿 → 在光标处开菜单（退出走菜单 quit 项）
+      if (g_rprev == 0) {
+        g_mtx = in.mx; g_mty = in.my;            // M4g：记下目标点（菜单从它的左上方"滑入"）
+        gui_pool_put(gui_id("anim_menu"), 3, 0); // M4f 定的重启口径 ⇒ **每开一次都重放一次滑入**
+        gui_popup_open(&c, "menu", in.mx, in.my);
+      }
+      g_rprev = 1;
+    } else {
+      g_rprev = 0;
+    }
+    if (g_quit == 1) { break; }
+    gui_win_input(&g, &in);
+    in_key_last = in.key;         // M4c 诊断：本帧喂给控件的键（见 kb_print 的 I= 栏）
+    demo_frame(&c, &in, &total, &sld);
+    // M4c：起窗后**先打一次可编辑框的客户区矩形**（探针按真实几何算点击点，不手写坐标常量）
+    if (g.frames == 0) {
+      if (demo_find_nth(14, 2) == 1) {
+        print(["BOX ", g_rx, " ", g_ry, " ", g_rw, " ", g_rh, "\n"]);
+      }
+    }
+    gui_win_render_layered(&sf, &c, hf, &lay);
+    gui_win_show(&sf);
+    kb_print(&c);                 // M4c：状态有变化才打一行（见 kb_print 注释）
+    focus_print(&c, g.shift);     // M4o：焦点链账本（真窗专有；tab-probe.ps1 读它）
+    cv_print(&c, &sf, hf);        // M4c 收尾诊断：光标 x vs 真 DC 量出的文本宽度（**真窗专有**）
+    // M4g：真窗"帧率账"每 60 帧一行（`F <帧号> ms=<本帧注入时间戳>`）——
+    //   外部量 fps 就靠它：**fps = Δ帧数 / Δms**（用产物自己打的注入时间戳，不用墙钟，也不用改判据）。
+    //   无头 dump 走不到这一行 ⇒ 老基线不受影响（同"真窗专有"那套口径）。
+    if (g.frames % 60 == 0) { print(["F ", g.frames, " ms=", c.ms, "\n"]); }
+    g.frames = g.frames + 1;
+    gui_win_frame_wait(&c);       // M4e：**唯一"等完这一帧"入口**（按 `c.frame_fps` 档位限速；默认 60fps；
+                                  //   周期 <15ms 的档走 DwmFlush 跟屏。原先这里写死 gui_win_wait(16) —— 固定值在
+                                  //   定时器粒度变化时会翻车，见 lib\FLGUI.md §5.7）
+  }
+  return 0;
+}

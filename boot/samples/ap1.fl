@@ -1,0 +1,10 @@
+// ap1.fl — B2g：api 声明 + 外部调用（GetStdHandle/WriteFile 写控制台，5 参走栈）
+api kernel32 ptr GetStdHandle(int);
+api kernel32 int WriteFile(int, int, int, int, int);
+int main() {
+  int *h = GetStdHandle(-11);
+  char *s = "boot api ok\n";
+  int w = 0;
+  int r = WriteFile(h, s, 12, &w, 0);
+  return w + 30;
+}

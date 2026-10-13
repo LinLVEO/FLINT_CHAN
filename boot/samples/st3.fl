@@ -1,0 +1,2 @@
+struct Box { int *data; int n; }
+int main() { int a[3]; struct Box b; b.data = a; b.n = 3; int *d = b.data; d[0] = 10; d[1] = 20; d[2] = 12; return d[0] + d[1] + d[2]; }

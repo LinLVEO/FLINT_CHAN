@@ -1,0 +1,148 @@
+// acc2.fl -- 2026-09-22 (card T-20260922-033446, 6th knife A2 = "fusion tier eats array-element rhs")
+//   ⚠️ NEGATIVE RESULT: the tier was WITHDRAWN after measurement. It folded `s = s <op> a[idx]` from
+//   `mov eax,[rbp+rax*8-off]` + `<op> rXd,eax` into ONE `<op> rXd,[rbp+rax*8-off]`, i.e. the ruler's k2
+//   loop body went 13 -> 12 instructions -- and k2 got 14% SLOWER (boot 208232 -> 237691 ticks, min of 3
+//   rounds, same-session alternating A/B with SHA256-pinned b1_emit: prev 0672384B = 208595 vs new
+//   2766F1C1 = 237685/244041), while apps\m2_float stayed BYTE-IDENTICAL (no such idiom there = zero gain).
+//   An LCS pass over both objdumps showed the emitted code differed ONLY in those two instructions, so the
+//   slowdown is attributable to the fusion itself (load-op fused into the loop's dependency chain; the
+//   suspected mechanism is store-to-load forwarding against the slot just written by the 5th knife B
+//   in-place update -- NOT proven, recorded as a hypothesis). Lesson: instruction count is not speed.
+//   This sample is KEPT (and registered) as a plain VALUE-REGRESSION sample: it pins that all these forms
+//   still compute the right values under the reverted (= current) emitters, in both compilers.
+//   PRECONDITIONS worth pinning (each has its own cell below):
+//     (a) the target `s` must be PROMOTED to a pool register (otherwise no fusion tier runs at all);
+//     (b) rhs = LOCAL int array read (kind 23) -- pointer arrays (bit 16) and struct fields (bit 64) differ;
+//     (c) index must NOT be address-class (bit 16's dead statement) -- that path keeps the old
+//         `shl eax,0x3` + `lea rcx` scaling, so the form check can count those bytes;
+//     (d) an index with a call must still be evaluated exactly ONCE (bit 128 pins the call count = 1).
+// Grid = form x target x PREMISE:
+//   bit 1    the k2 shape: `s = s + a[(j + 1) & 3]` (expression index over a promoted variable)
+//   bit 2    index forms: literal `a[2]`, promoted variable `a[i]`, expression `a[(i + 1) & 3]`
+//   bit 4    the other five ops (sub is direction sensitive; imul uses the `0F AF /r` memory form)
+//   bit 8    big frame: array base past 128 bytes => the SIB disp32 branch
+//   bit 16   control: POINTER array read as rhs (`s = s + p[i]`), plus a never-executed ADDRESS-CLASS
+//            index read `a[p]` whose old-path bytes the form check counts
+//   bit 32   control: array read on the LEFT (`s = a[(i+1)&3] + s`) -- the spine bottom is not the target
+//   bit 64   control: rhs = struct field read (kind 30)
+//   bit 128  impure index (call): the call count must still be exactly ONE
+// expected 42 (all 8 bits lit)
+
+int g_c2 = 0;
+int c2_idx() { g_c2 = g_c2 + 1; return 1; }
+
+int c2_k2shape(int n) {           // bit 1: the k2 shape -- expression index over a promoted var
+  int a[4];
+  int i = 0;
+  int j = 0;
+  int s = 0;
+  a[0] = 3; a[1] = 5; a[2] = 7; a[3] = 11;
+  while (i < n) {
+    s = s + a[(j + 1) & 3];       // indices 1,2,3,0,1,2 => 5+7+11+3+5+7
+    j = j + 1;
+    i = i + 1;
+  }
+  return s;                       // 38
+}
+int c2_idxforms() {               // bit 2: literal / promoted variable / expression index
+  int a[4];
+  int i = 0;
+  int s = 0;
+  a[0] = 10; a[1] = 20; a[2] = 30; a[3] = 40;
+  s = s + a[2];                   // literal: 30
+  i = 3;
+  s = s + a[i];                   // promoted variable: 40
+  i = 0;
+  s = s + a[(i + 1) & 3];         // expression: 20
+  return s;                       // 90
+}
+int c2_ops() {                    // bit 4: the other five ops (sub direction / imul memory form)
+  int a[4];
+  int s = 0;
+  a[0] = 100; a[1] = 50; a[2] = 7; a[3] = 3;
+  s = 200;
+  s = s - a[0];                   // 100
+  s = s * a[3];                   // 300
+  s = s & a[2];                   // 300 & 7 = 4
+  s = s | a[1];                   // 4 | 50 = 54
+  s = s ^ a[0];                   // 54 ^ 100 = 82
+  return s;                       // 82
+}
+int c2_big() {                    // bit 8: big frame => SIB disp32 branch
+  int pad[30];
+  int a[4];
+  int i = 0;
+  int s = 0;
+  pad[0] = 1; pad[29] = 2;
+  a[0] = 1; a[1] = 2; a[2] = 4; a[3] = 8;
+  i = 2;
+  s = s + a[i];                   // 4
+  s = s + a[3];                   // 12
+  return s + pad[0] + pad[29];    // 15
+}
+int c2_ptr_ctrl(int *p) {         // bit 16a: pointer array rhs -- NOT this tier (old/generic path)
+  int i = 0;
+  int s = 0;
+  while (i < 3) { p[i] = i * 2 + 1; i = i + 1; }   // 1,3,5
+  i = 0;
+  s = 10;
+  while (i < 3) { s = s + p[i]; i = i + 1; }       // 10+9
+  return s;                       // 19
+}
+int c2_addr_ctrl(int zero) {      // bit 16b: address-class index MUST fall back (dead statement)
+  int a[4];
+  int s = 0;
+  int x = 7;
+  int *p = &x;
+  a[0] = 1; a[1] = 2;
+  s = 5;
+  if (zero == 1) { s = s + a[p]; }   // emitted, never executed => old-path bytes must remain
+  s = s + a[0];                      // 1
+  return s;                       // 6
+}
+int c2_left_ctrl(int n) {         // bit 32: array read on the LEFT => unfused, value still correct
+  int a[4];
+  int i = 0;
+  int s = 0;
+  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+  while (i < n) {
+    s = a[(i + 1) & 3] + s;        // indices 1,2,3,0,1 => 2+3+4+1+2
+    i = i + 1;
+  }
+  return s;                       // 12
+}
+struct C2S { int v; int w; }        // NOTE: no trailing `;` -- FLINT rejects `struct X { … };` (boot -183)
+int c2_struct_ctrl() {            // bit 64: struct field rhs -- NOT this tier (generic branch)
+  int a[4];
+  int s = 0;
+  struct C2S q;
+  a[0] = 5;
+  q.v = 9;
+  s = s + a[0];                   // 5 (local array => new tier)
+  s = s + q.v;                    // 14 (kind 30 => generic branch)
+  return s;                       // 14
+}
+int c2_impure() {                 // bit 128: impure index -- the call must still happen exactly ONCE
+  int a[4];
+  int s = 0;
+  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+  s = 7;
+  s = s + a[c2_idx()];            // index 1 => a[1] = 2, g_c2 = 1
+  return s * 10 + g_c2;           // 91 (90 would mean the call went missing)
+}
+int main() {
+  int arr[3];
+  int r = 0;
+  arr[0] = 1; arr[1] = 2; arr[2] = 3;
+  if (c2_k2shape(6) == 38) { r = r | 1; }
+  if (c2_idxforms() == 90) { r = r | 2; }
+  if (c2_ops() == 82) { r = r | 4; }
+  if (c2_big() == 15) { r = r | 8; }
+  if (c2_ptr_ctrl(arr) == 19) { r = r | 16; }
+  if (c2_addr_ctrl(r - r) == 6) { r = r | 16; }
+  if (c2_left_ctrl(5) == 12) { r = r | 32; }
+  if (c2_struct_ctrl() == 14) { r = r | 64; }
+  if (c2_impure() == 91) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

@@ -1,0 +1,6 @@
+// bit16.fl — hex 字面量 0x 家族 + 清位模式：f=0x0F(15) & ~0x01 = 14
+int main() {
+  int f = 0x0F;
+  f = f & ~0x01;
+  return f;   // 14
+}

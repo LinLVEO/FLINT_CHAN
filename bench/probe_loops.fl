@@ -1,0 +1,41 @@
+// probe_loops.fl —— 循环形态探针（窥孔第二档的**结构判据**：不看时间，看发射出来的形状）
+// 立卡：T-20260919-010437（周期0）
+// 用途：编译后对 main 反汇编，数"回边条数"与"循环体指令数"：
+//   · 可重复求值的条件（纯变量比较）→ **应只有 1 条回边**（反转成尾巴判，每轮一条跳转）
+//   · 条件不纯（含函数调用/自增）→ **应保持 2 条跳转**（头部判 + 无条件回头，退回旧结构）
+//   · `for` 的 continue 语义不受影响（跳增量、再判条件）
+// 判据由 循环形态.ps1 自动核对（本文件只负责把这几种形状编出来）。
+api kernel32 int GetTickCount();
+
+int pure_cond_while(int n) {
+  int i = 0;
+  while (i < n) { i = i + 1; }
+  return i;
+}
+
+int pure_cond_for(int n) {
+  int s = 0;
+  int i = 0;
+  for (i = 0; i < n; i = i + 1) { s = s + i; }
+  return s;
+}
+
+int impure_cond_while(int n) {
+  int i = 0;
+  while (GetTickCount() > 0) { i = i + 1; if (i > n) { return i; } }
+  return i;
+}
+
+int cond_with_inc(int n) {
+  int i = 0;
+  while (i++ < n) { }
+  return i;
+}
+
+int main() {
+  int a = pure_cond_while(5);
+  int b = pure_cond_for(5);
+  int c = impure_cond_while(5);
+  int d = cond_with_inc(5);
+  return (a + b + c + d) & 255;
+}

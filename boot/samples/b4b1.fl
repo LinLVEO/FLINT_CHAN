@@ -1,0 +1,19 @@
+// b4b1 — B4b：char 值返回（2026-09-09 用户拍板语义：返回处截断到 0..255，对齐 SPEC 第 165 行与 C）
+char f() { return 'a'; }          // 97
+char g(int x) { return x; }       // 透传实参
+char h() { return 300; }          // 44（返回处就截断）
+char neg() { return -1; }         // 255
+char nest() { return f(); }       // char 函数返回 char 调用
+
+int main() {
+  int a = f();                    // 97
+  int x = h();                    // 44 ← 关键：int 承接也拿不到 300（截断发生在 return，不是存储处）
+  char c = h();                   // 44
+  int y = f() + 1;                // 98（表达式按 int 语义）
+  int z = g(200);                 // 200（在字节范围内）
+  int w = nest();                 // 97
+  int n = neg();                  // 255
+  int eq = 0;
+  if (f() == 97) { eq = 1; }      // 比较走 int 语义
+  return (a - 97) + (x - 44) + (c - 44) + (y - 98) + (z - 200) + (w - 97) + (n - 255) + (eq - 1) + 42;
+}

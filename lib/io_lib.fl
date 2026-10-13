@@ -1,0 +1,137 @@
+// io_lib.fl — FLINT 标准库（第三批）：文件读写（整文件）
+// 用法：include "io_lib.fl"（B2x 起免相对路径；也可 include "../../lib/io_lib.fl"）
+// 命名：2026-09-09 用户拍板（方案 A：std::file_read / file_write / file_exists / file_size）
+// 视角：读 = 外→程序（返回读到的字节数）；写 = 程序→外（返回是否成功）
+// 自包含：不依赖其它库（api 声明可放库顶部，驱动会前移到单元头部）
+// 边界：整文件一次性读写；>4GB 文件未支持（GetFileSize 低 32 位）；无流式句柄（待命名后再加）
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int ReadFile(int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+api kernel32 int GetFileSize(int, int);
+api kernel32 int SetFilePointer(int, int, int, int);
+
+// 读整个文件到 buf（最多 cap 字节）；返回实际读到的字节数；-1 = 打不开/读失败
+// 不补 NUL（字节精确，二进制安全）——要当字符串用请自行留位并补 0
+int std::file_read(char *path, char *buf, int cap) {
+  int got = 0;
+  int *h = CreateFileA(path, 0x80000000, 0, 0, 3, 0x80, 0);   // GENERIC_READ / OPEN_EXISTING
+  if (h == 0) return -1;
+  int r = ReadFile(h, buf, cap, &got, 0);
+  CloseHandle(h);
+  if (r == 0) return -1;
+  return got;
+}
+
+// 写 len 字节到 path（覆盖已有内容，文件不存在则新建）；1 = 全部写入，0 = 失败
+int std::file_write(char *path, char *buf, int len) {
+  int wrote = 0;
+  int *h = CreateFileA(path, 0x40000000, 0, 0, 2, 0x80, 0);   // GENERIC_WRITE / CREATE_ALWAYS
+  if (h == 0) return 0;
+  int r = WriteFile(h, buf, len, &wrote, 0);
+  CloseHandle(h);
+  if (r == 0) return 0;
+  if (wrote != len) return 0;
+  return 1;
+}
+
+// 文件是否存在（可读句柄 + 大小有效）；1 = 存在，0 = 不存在/不可读
+int std::file_exists(char *path) {
+  int *h = CreateFileA(path, 0x80000000, 0, 0, 3, 0x80, 0);
+  if (h == 0) return 0;
+  int sz = GetFileSize(h, 0);
+  CloseHandle(h);
+  if (sz < 0) return 0;          // INVALID_FILE_SIZE(0xFFFFFFFF) 按有符号 = -1
+  return 1;
+}
+
+// 文件大小（字节）；-1 = 打不开/不可读
+int std::file_size(char *path) {
+  int *h = CreateFileA(path, 0x80000000, 0, 0, 3, 0x80, 0);
+  if (h == 0) return -1;
+  int sz = GetFileSize(h, 0);
+  CloseHandle(h);
+  if (sz < 0) return -1;
+  return sz;
+}
+
+// ================= 流式 io（B2z，2026-09-09 用户拍板：命名参考 C++ iostream） =================
+// C++ 的 fstream 是对象（f.open()/f.read()），FLINT 无类 → 用「句柄结构体 + 自由函数」对应：
+//   fstream 对象 = struct FileSt；f.open() = std::open(&f, …)；其余同名（read/write/seek/tell/eof）
+// 视角不变：读 = 外→程序（返回读到的字节数）、写 = 程序→外（返回写入的字节数）
+
+// 文件句柄（h == 0 = 未打开）
+struct FileSt { int *h; }
+
+// 打开：mode 0=读 1=写（覆盖）2=追加；1=成功，0=失败
+int std::open(struct FileSt *f, char *path, int mode) {
+  if (mode == 0) {
+    f->h = CreateFileA(path, 0x80000000, 0, 0, 3, 0x80, 0);        // READ / OPEN_EXISTING
+    if (f->h == 0) return 0;
+    return 1;
+  }
+  if (mode == 1) {
+    f->h = CreateFileA(path, 0x40000000, 0, 0, 2, 0x80, 0);        // WRITE / CREATE_ALWAYS
+    if (f->h == 0) return 0;
+    return 1;
+  }
+  f->h = CreateFileA(path, 0x40000000, 0, 0, 4, 0x80, 0);          // WRITE / OPEN_ALWAYS
+  if (f->h == 0) return 0;
+  SetFilePointer(f->h, 0, 0, 2);                                    // 追加：移到文件尾（FILE_END）
+  return 1;
+}
+
+// 关闭（幂等：已关闭再调返回 0）；1=成功，0=失败/未打开
+int std::close(struct FileSt *f) {
+  if (f->h == 0) return 0;
+  int r = CloseHandle(f->h);
+  f->h = 0;
+  if (r == 0) return 0;
+  return 1;
+}
+
+// 读最多 len 字节；返回实际读到的字节数（0 = 到文件尾），-1 = 失败/未打开
+int std::read(struct FileSt *f, char *buf, int len) {
+  int got = 0;
+  if (f->h == 0) return -1;
+  int r = ReadFile(f->h, buf, len, &got, 0);
+  if (r == 0) return -1;
+  return got;
+}
+
+// 写 len 字节；返回实际写入的字节数，-1 = 失败/未打开
+int std::write(struct FileSt *f, char *buf, int len) {
+  int wrote = 0;
+  if (f->h == 0) return -1;
+  int r = WriteFile(f->h, buf, len, &wrote, 0);
+  if (r == 0) return -1;
+  return wrote;
+}
+
+// 定位：whence 0=文件头 1=当前位置 2=文件尾（对齐 C++ beg/cur/end）；返回新位置，-1=失败
+// 边界：>4GB 位置未支持（SetFilePointer 低 32 位；-1 与 INVALID_SET_FILE_POINTER 不区分）
+int std::seek(struct FileSt *f, int off, int whence) {
+  if (f->h == 0) return -1;
+  int p = SetFilePointer(f->h, off, 0, whence);
+  if (p < 0) return -1;
+  return p;
+}
+
+// 当前读写位置；-1 = 失败/未打开
+int std::tell(struct FileSt *f) {
+  if (f->h == 0) return -1;
+  int p = SetFilePointer(f->h, 0, 0, 1);        // FILE_CURRENT
+  if (p < 0) return -1;
+  return p;
+}
+
+// 是否已到文件尾（读位置 ≥ 文件大小）；1=到尾 0=没到 -1=失败/未打开
+int std::eof(struct FileSt *f) {
+  if (f->h == 0) return -1;
+  int sz = GetFileSize(f->h, 0);
+  if (sz < 0) return -1;
+  int p = SetFilePointer(f->h, 0, 0, 1);
+  if (p < 0) return -1;
+  if (p >= sz) return 1;
+  return 0;
+}

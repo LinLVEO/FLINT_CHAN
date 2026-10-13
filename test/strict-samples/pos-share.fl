@@ -1,0 +1,8 @@
+// pos-share.fl -- -strict 正例：share 拷贝初始化（q 是写目标，不许被当成"读未初始化变量"）
+int main() {
+  int *share a = new int;
+  if (*(a - 8) != 1) return 90;
+  int *share b = a;
+  if (*(b - 8) != 2) return 91;
+  return 0;
+}

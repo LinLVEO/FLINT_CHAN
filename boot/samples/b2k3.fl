@@ -1,0 +1,43 @@
+// b2k3：struct char 标量字段（B2k）——C 布局（1 字节 / 对齐 1）+ 邻字段不互蚀 + 字节读写
+//   布局：a@0（char）b@4（int）c@8（char）p@16（指针）d@24（char）e@28（int）
+struct S { char a; int b; char c; int *p; char d; int e; }
+int bumpc(struct S *pv) {
+  pv->a = 41;
+  char q = pv->a++;
+  int r = 0;
+  if (q == 41 && pv->a == 42) { r = 1; }
+  pv->c = 40;
+  pv->c += 2;
+  if (pv->c == 42 && pv->b == 42) { r = r + 2; }
+  return r;                                        // 3
+}
+int main() {
+  int ok = 0;
+  struct S v;
+  v.b = 42;
+  v.e = 43;
+  v.a = 200;
+  v.c = 255;
+  v.d = 1;
+  if (v.b == 42 && v.e == 43) { ok += 1; }          // char 写只写 1 字节，不蚀邻字段
+  if (v.a == 200 && v.c == 255 && v.d == 1) { ok += 1; }
+
+  v.a += 55;                                        // 200 + 55 = 255
+  if (v.a == 255 && v.b == 42) { ok += 1; }
+  v.a += 1;                                         // 回绕 → 0（字节截断）
+  if (v.a == 0 && v.b == 42) { ok += 1; }
+
+  char *pa = &v.a;
+  char *pc = &v.c;
+  char *pd = &v.d;
+  if (pc - pa == 8) { ok += 1; }                    // a@0 → c@8（b 占 4 字节）
+  if (pd - pc == 16) { ok += 1; }                   // c@8 → d@24（指针字段 8 字节）
+  int *pb = &v.b;
+  int *pe = &v.e;
+  if (pe - pb == 24) { ok += 1; }                   // b@4 → e@28
+
+  if (bumpc(&v) == 3) { ok += 1; }
+
+  if (ok == 8) { return 42; }
+  return ok;
+}

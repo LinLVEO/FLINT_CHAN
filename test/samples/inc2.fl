@@ -1,0 +1,5 @@
+// inc2.fl — 前缀 return ++x 返回新值 6
+int main() {
+  int x = 5;
+  return ++x;   // 值 = 新值 6
+}

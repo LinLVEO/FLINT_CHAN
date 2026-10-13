@@ -1,0 +1,12 @@
+// pos-apiaddr.fl -- -strict 正例：API 的 int 形参收地址（Win32 常规写法）
+//   api 形参按约定只能声明成 int（句柄、缓冲地址都往 int 里塞）⇒ **API 调用不在检查范围**，
+//   否则会把所有真程序全拦下。
+api kernel32 int GetModuleHandleA(int);
+int main() {
+  char msg[8];
+  msg[0] = 65;
+  msg[1] = 0;
+  int h = GetModuleHandleA(msg);
+  if (h == 0) return 1;
+  return 0;
+}

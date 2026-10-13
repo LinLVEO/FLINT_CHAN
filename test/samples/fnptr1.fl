@@ -1,0 +1,98 @@
+// fnptr1.fl —— v1.3.2 函数指针（C 风格语法 `int (*fp)(int)`）成绩单：16 项位掩码 = 65535
+// 覆盖：间接调用基本/换目标/参数顺序/4 参 GP 全用/double 双通道（XMM+GP 并行计数）/
+//       指针返回/void 返回/char 形参与返回/结构体指针形参/判空与比较/变量互赋/
+//       函数指针**形参**（回调注册）并在被调方通过形参间接调用。
+// 退出码 = 各项位之和（哪一位没亮就是哪一项错）。
+
+struct P { int x; int y; }
+int gval = 0;
+
+int dbl(int v)      { return v + v; }
+int triple(int v)   { return v * 3; }
+int sub(int a, int b) { return a - b; }          // 参数顺序敏感（a-b ≠ b-a）
+int sum4(int a, int b, int c, int d) { return a + b + c + d; }
+double half(double d) { return d / 2.0; }        // double 形参与返回（XMM 通道）
+double mixf(int a, double b, int c) { return a + b + c; }   // 混合：GP/XMM 并行计数
+char nextc(char c) { return c + 1; }
+int *pick2(int *a, int i) { return &a[i]; }      // 指针返回（64 位 rax）
+void setter(int v) { gval = v; }                 // void 返回
+int area(struct P *p) { return p->x * p->y; }    // 结构体指针形参（GP 通道）
+
+// 函数指针形参 + 在被调方通过它间接调用（回调注册的最小模型）
+int apply(int (*cb)(int), int v) { return cb(v); }
+
+int main() {
+  int r = 0;
+
+  // ① 基本：声明 + = &函数名 + 间接调用
+  int (*fp)(int) = &dbl;
+  if (fp(21) == 42) r |= 1;
+
+  // ② 换目标：同一个变量指向别的函数（地址是运行时值，不是回填死的）
+  fp = &triple;
+  if (fp(5) == 15) r |= 2;
+
+  // ③ 两个参数 + **参数顺序**（sub(9,4)=5；若顺序错位会得 -5）
+  int (*dif)(int, int) = &sub;
+  if (dif(9, 4) == 5) r |= 4;
+
+  // ④ 4 个参数全用 GP（rcx/rdx/r8/r9 一个不落）
+  int (*s4)(int, int, int, int) = &sum4;
+  if (s4(1, 2, 3, 4) == 10) r |= 8;
+
+  // ⑤ double 形参 + double 返回（值走 XMM0）
+  double (*hf)(double) = &half;
+  if (hf(5.0) == 2.5) r |= 16;
+
+  // ⑥ 混合形参：int, double, int → GP 与 XMM 两套序列**并行计数**（rcx / xmm0 / rdx）
+  double (*mf)(int, double, int) = &mixf;
+  if (mf(2, 0.5, 3) == 5.5) r |= 32;
+
+  // ⑦ 返回指针（64 位 rax 全宽）——函数指针的返回类型也带指向类型
+  int arr[3];
+  arr[0] = 11; arr[1] = 22; arr[2] = 33;
+  int *(*pk)(int *, int) = &pick2;
+  int *pp = pk(arr, 1);
+  if (*pp == 22) r |= 64;
+
+  // ⑧ void 返回 + 通过全局观察副作用
+  void (*st)(int) = &setter;
+  st(7);
+  if (gval == 7) r |= 128;
+
+  // ⑨ char 形参与 char 返回（char 走 GP 低 8 位，返回侧截断到 0..255）
+  char (*nc)(char) = &nextc;
+  if (nc('a') == 'b') r |= 256;
+
+  // ⑩ 结构体指针形参
+  struct P q;
+  q.x = 3; q.y = 4;
+  int (*ar)(struct P *) = &area;
+  if (ar(&q) == 12) r |= 512;
+
+  // ⑪ 判空与比较（64 位地址比较，不是 32 位截断）
+  int (*z)(int) = &triple;
+  if (z != 0 && z == &triple) r |= 1024;
+
+  // ⑫ 函数指针变量互赋（签名一致才允许）
+  int (*cp)(int) = fp;
+  if (cp(5) == 15) r |= 2048;
+
+  // ⑬ 函数指针**当实参**传给函数指针形参
+  if (apply(&dbl, 21) == 42) r |= 4096;
+
+  // ⑭ 同一个形参换一个函数（回调注册 + 被调方间接调用）
+  if (apply(&triple, 5) == 15) r |= 8192;
+
+  // ⑮ 形参是 double 的函数指针走 XMM 通道
+  double (*hf2)(double) = &half;
+  if (apply_h(hf2, 9.0) == 4.5) r |= 16384;
+
+  // ⑯ 间接调用结果当表达式用（参与运算 + 作实参）
+  if (fp(2) + 1 == 7) r |= 32768;
+
+  return r;
+}
+
+// ⑮ 用的辅助函数：函数指针形参是 double 版本（放在 main 之后，顺带考前向引用）
+double apply_h(double (*cb)(double), double v) { return cb(v); }

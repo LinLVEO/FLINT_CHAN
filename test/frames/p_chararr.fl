@@ -1,0 +1,7 @@
+// p_chararr.fl — frame probe: char buffer local
+int main() {
+  char b[24];
+  b[0] = 65;
+  b[23] = 90;
+  return b[0] + b[23];
+}

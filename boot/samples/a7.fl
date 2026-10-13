@@ -1,0 +1,2 @@
+int g(int n) { int a[3]; a[0] = n; if (n < 2) return a[0]; return g(n - 1) + g(n - 2); }
+int main() { return g(10); }

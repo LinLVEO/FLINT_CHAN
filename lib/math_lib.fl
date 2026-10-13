@@ -1,0 +1,34 @@
+// math_lib.fl — FLINT 标准库（第二批）：整数数学
+// 用法：include "../../lib/math_lib.fl"（路径相对本文件目录解析）
+// 命名：2026-09-09 用户拍板（std::abs / min / max / clamp / percent，前四个与 C++ std 同名）
+
+// 绝对值（INT32_MIN 返回自身，与 C 同）
+int std::abs(int n) {
+  if (n < 0) { return -n; }
+  return n;
+}
+
+// 取小
+int std::min(int a, int b) {
+  if (a < b) { return a; }
+  return b;
+}
+
+// 取大
+int std::max(int a, int b) {
+  if (a > b) { return a; }
+  return b;
+}
+
+// 夹到 [lo, hi]（lo > hi 时 lo 优先，与 C++ std::clamp 同）
+int std::clamp(int v, int lo, int hi) {
+  if (v < lo) { return lo; }
+  if (v > hi) { return hi; }
+  return v;
+}
+
+// 百分比 0..100（total <= 0 → 0）
+int std::percent(int part, int total) {
+  if (total <= 0) { return 0; }
+  return part * 100 / total;
+}

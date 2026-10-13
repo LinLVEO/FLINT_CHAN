@@ -1,0 +1,12 @@
+// rtptr3.fl — v1.0.6 函数返回指针：可返回 0 的工厂（NULL 语义）+ 条件直返 + 64 位判真
+int *maybe(int flag, int *t) { if (flag != 0) return t; return 0; }
+int main() {
+  int v = 5;
+  int *p;
+  p = maybe(0, &v);
+  if (p != 0) return 1;        // 返回 0 判真（64 位 test/cmp）
+  p = maybe(1, &v);
+  if (p == 0) return 2;
+  if (p != &v) return 3;       // 地址往返一致
+  return *p;                   // 5
+}

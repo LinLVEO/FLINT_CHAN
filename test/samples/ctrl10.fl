@@ -1,0 +1,14 @@
+// ctrl10.fl — 质数判断 97（第 25 个质数，验证除法+循环+break 思路前身）
+int main() {
+  int n = 97;
+  int d = 2;
+  int is_prime = 1;
+  while (d * d <= n) {
+    if (n % d == 0) {
+      is_prime = 0;
+      d = n;      // 提前结束循环的土办法（无 break 关键字）
+    }
+    d = d + 1;
+  }
+  return is_prime;   // 97 是质数 → 1
+}

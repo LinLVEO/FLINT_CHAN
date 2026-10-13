@@ -1,0 +1,24 @@
+// sh2.fl — v0.9 share 生命周期链 + own 并存：拷贝链计数逐级验证，互不干扰
+int mk() {
+  int *share a = new int;   // rc=1
+  *(a) = 42;
+  int *share b = a;         // rc=2
+  if (*(b) != 42) return 91;
+  int *share c = b;         // rc=3
+  if (*(a - 8) != 3) return 92;
+  if (*(c - 8) != 3) return 93;
+  return 0;                 // c,b 出口各 -1，a 出口 1→0 free
+}
+int main() {
+  if (mk() != 0) return 90;
+  if (mk() != 0) return 95;         // 二次调用（重复分配/释放闭环）
+  int *own u = new int;          // own 与 share 并存
+  int *share s = new int;
+  *(u) = 7;
+  *(s) = 9;
+  if (*(u - 8) != 1) return 96;     // own 对象 rc 保持 1
+  if (*(s - 8) != 1) return 97;
+  if (*(u) != 7) return 98;
+  if (*(s) != 9) return 99;
+  return 0;
+}

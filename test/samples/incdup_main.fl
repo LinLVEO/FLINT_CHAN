@@ -1,0 +1,5 @@
+// incdup_main.fl — B2v：同一文件用两种写法 include（应只展开一次）
+// 修前：重复定义 incdup_val → 编译失败；修后：退出码 42
+include "incdup_lib.fl"
+include "./incdup_lib.fl"
+int main() { return incdup_val(); }

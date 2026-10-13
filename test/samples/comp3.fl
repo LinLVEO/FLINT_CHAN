@@ -1,0 +1,5 @@
+// comp3.fl — 复合赋值作为表达式值 = 新值：a=5; return a += 3; = 8
+int main() {
+  int a = 5;
+  return a += 3;   // 8
+}

@@ -1,0 +1,16 @@
+void inc_all(int *p, int n) {
+  int i;
+  i = 0;
+  while (i < n) {
+    p[i] = p[i] + 1;
+    i = i + 1;
+  }
+}
+int main() {
+  int a[3];
+  a[0] = 5;
+  a[1] = 6;
+  a[2] = 7;
+  inc_all(a, 3);
+  return a[0] + a[1] + a[2];
+}

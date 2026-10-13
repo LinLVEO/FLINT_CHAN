@@ -1,0 +1,157 @@
+// flgui11.fl — FLGUI M4h：**不透明度 / 状态栈**的无头契约样本（不建窗）
+// 这一刀给命令流加了**状态命令**：kind `20` = 压不透明度 / `21` = 出栈（与裁剪 `6`/`7` 同形）。
+// 判据钉两件事（这就是本刀的"形状"）：
+//   ① **每条命令自带生效 alpha**（`gui_cmd_a`，在 `gui_push` 那一刻解析）⇒ **渲染端无状态**：
+//      读路径唯一、错误只剩"写错栈"一种 —— 所以判据能在无头样本里**逐条命令**钉住，不必去猜状态机。
+//   ② 栈本身的纪律：8 层上限 / 没压过不许弹 / **每帧归零**（跨帧不残留）/ 值夹取 / 不动布局游标 / 20-21 配对。
+// 位掩码 20 位，全亮 = 1048575 → return 42。
+//   bit 1     默认（空栈）时命令自带 alpha = 255
+//   bit 2     空栈 `gui_alpha_cur` = 255
+//   bit 3     压 128 的返回值 = 128
+//   bit 4     命令流第 0 条是 kind 20，且它的载荷 = 128
+//   bit 5     其后第一条真命令自带 alpha = 128
+//   bit 6     压栈后 `gui_alpha_cur` = 128
+//   bit 7     下一帧（没压）`gui_alpha_cur` 回到 255 ⇒ **每帧归零**
+//   bit 8     下一帧第一条命令自带 alpha = 255
+//   bit 9     下一帧 `alpha_n` = 0
+//   bit 10    嵌套（压 128 → 压 64）：命令表 `[2]` 自带 64
+//   bit 11    弹一次返回值 = 128
+//   bit 12    弹后画的命令自带 128
+//   bit 13    再弹返回值 = 255（空栈）
+//   bit 14    再弹后画的命令自带 255
+//   bit 15    夹取：push(-5) → 0
+//   bit 16    夹取：push(300) → 255
+//   bit 17    空栈 pop ⇒ 返回 0 且 `err` = 32（响亮报错，不静默）
+//   bit 18    8 层满后第 9 次 push ⇒ 返回 0、`err` = 48、**栈顶仍是第 8 层的 80**（绝不越写）
+//   bit 19    压 / 弹不动布局游标（cur_x / row_y / row_h 三项原样）
+//   bit 20    该帧命令流里 kind 20 与 21 **条数相等**（各 2 条）
+include "flgui_widgets.fl"
+
+// 合成输入（8 个字段全填；`ms` = 本帧注入时间 —— 内核不取时）
+int f11_in(struct GuiInput *in, int ms) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0; in->wheel = 0; in->key = 0; in->ms = ms;
+  return ms;
+}
+
+// 数本帧命令流里某个 kind 的条数（配对判据用）
+int f11_count(int kind) {
+  int i = 0;
+  int n = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int rr = 0;
+  int ret = 0;
+  int n20 = 0;
+  int n21 = 0;
+  int sx = 0;
+  int sy = 0;
+  int sh = 0;
+  int k = 0;
+
+  gui_init(&c);
+
+  // ================= 一、默认（空栈）⇒ 不透明 =================
+  f11_in(&in, 0);
+  gui_begin(&c, &in);
+  gui_label(&c, "a11");
+  gui_end(&c);
+  if (gui_cmd_a[0] == 255) { rr = rr | 1; }
+  if (gui_alpha_cur(&c) == 255) { rr = rr | 2; }
+
+  // ================= 二、压 128 ⇒ 该帧之后的命令都带 128 =================
+  f11_in(&in, 0);
+  gui_begin(&c, &in);
+  ret = gui_alpha_push(&c, 128);
+  gui_label(&c, "a11");
+  gui_end(&c);
+  if (ret == 128) { rr = rr | 4; }
+  if (gui_cmd_kind[0] == 20) { if (gui_cmd_a[0] == 128) { rr = rr | 8; } }
+  if (gui_cmd_a[1] == 128) { rr = rr | 16; }
+  if (gui_alpha_cur(&c) == 128) { rr = rr | 32; }
+
+  // ================= 三、跨帧不残留（上一帧压过 ≠ 这一帧还压着）=================
+  f11_in(&in, 16);
+  gui_begin(&c, &in);
+  if (gui_alpha_cur(&c) == 255) { rr = rr | 64; }
+  gui_label(&c, "a11");
+  gui_end(&c);
+  if (gui_cmd_a[0] == 255) { rr = rr | 128; }
+  if (c.alpha_n == 0) { rr = rr | 256; }
+
+  // ================= 四、嵌套与弹出 =================
+  f11_in(&in, 32);
+  gui_begin(&c, &in);
+  gui_alpha_push(&c, 128);
+  gui_alpha_push(&c, 64);
+  gui_label(&c, "a11");
+  if (gui_cmd_a[2] == 64) { rr = rr | 512; }              // 命令流 = 20,20,5
+  ret = gui_alpha_pop(&c);
+  if (ret == 128) { rr = rr | 1024; }
+  gui_label(&c, "b11");
+  if (gui_cmd_a[gui_cmd_n - 1] == 128) { rr = rr | 2048; }
+  ret = gui_alpha_pop(&c);
+  if (ret == 255) { rr = rr | 4096; }
+  gui_label(&c, "c11");
+  if (gui_cmd_a[gui_cmd_n - 1] == 255) { rr = rr | 8192; }
+  gui_end(&c);
+
+  // ================= 五、值夹取（负数 → 0；超上限 → 255）=================
+  f11_in(&in, 48);
+  gui_begin(&c, &in);
+  ret = gui_alpha_push(&c, 0 - 5);
+  if (ret == 0) { rr = rr | 16384; }
+  gui_alpha_pop(&c);
+  ret = gui_alpha_push(&c, 300);
+  if (ret == 255) { rr = rr | 32768; }
+  gui_alpha_pop(&c);
+  gui_end(&c);
+
+  // ================= 六、空栈 pop ⇒ 响亮报错（err |= 32）=================
+  f11_in(&in, 64);
+  gui_begin(&c, &in);
+  ret = gui_alpha_pop(&c);
+  if (ret == 0) { if (c.err == 32) { rr = rr | 65536; } }
+  gui_end(&c);
+
+  // ================= 七、8 层上限：第 9 次只计数、绝不越写 =================
+  f11_in(&in, 80);
+  gui_begin(&c, &in);
+  k = 0;
+  while (k < 8) {
+    gui_alpha_push(&c, 10 + k * 10);                      // 10,20,...,80
+    k = k + 1;
+  }
+  ret = gui_alpha_push(&c, 90);
+  if (ret == 0 && c.err == 48 && gui_alpha_cur(&c) == 80) { rr = rr | 131072; }
+  gui_end(&c);
+
+  // ================= 八、压 / 弹不动布局游标 ＋ 20-21 配对 =================
+  f11_in(&in, 96);
+  gui_begin(&c, &in);
+  gui_label(&c, "x11");                                   // 先排一个控件，让游标有值
+  sx = c.cur_x; sy = c.row_y; sh = c.row_h;
+  gui_alpha_push(&c, 200);
+  gui_alpha_push(&c, 200);
+  gui_alpha_pop(&c);
+  gui_alpha_pop(&c);
+  if (c.cur_x == sx && c.row_y == sy && c.row_h == sh) { rr = rr | 262144; }
+  n20 = f11_count(20);
+  n21 = f11_count(21);
+  if (n20 == 2 && n21 == 2) { rr = rr | 524288; }
+  gui_end(&c);
+
+  print(["FLGUI11 default_a=", 255, " pushed=", 128, " cur=", gui_alpha_cur(&c),
+         " n20=", n20, " n21=", n21, " err=", c.err, " r=", rr, "\n"]);
+  gui_dump(&c);
+
+  if (rr == 1048575) { return 42; }
+  return rr;
+}

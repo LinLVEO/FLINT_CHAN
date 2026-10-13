@@ -1,0 +1,347 @@
+// flgui17.fl — FLGUI M4q（2026-09-28，卡 T-20260928-223422）：**多字体档（标题 / 正文 / 说明）**的无头契约。
+//
+// 无头口径（照 flgui1~16）：**不建字体、不建窗** —— 档栈、命令流形状、按档字宽全部用
+//   "合成输入喂 gui_begin ＋ 读回命令表/状态池"判。
+//   ⚠️ 真字宽那半**不在本样本里**（本样本 `gui_char_adv` 恒 8 = 无头默认）：
+//      真 GDI 量宽对账在门的第 8 段（外部裁判跑 `tmp\m4q\font-tier-probe.fl`，期望值由 PowerShell
+//      用 `GetTextExtentPoint32A` 现算）。本样本的"按档字宽"验的是**接线**：
+//      池里 k=2/k=3 两档宽度由本样本**显式注入**（9 / 5），再看光标条是不是真按当前档取。
+//
+// 位掩码 22 位（值 = 1 << (n-1)），全亮 = 4194303 → return 42。
+//   bit 1  不压档：**0 条** kind 22/23（不切档 ⇒ 一条状态命令都不发）
+//   bit 2  push(0) 不弹：payload = 0、池里栈深 = 1
+//   bit 3  push(2) 不弹：payload = 2 ＋ 栈深 = 1（栈顶真的换了档）
+//   bit 4  嵌套三层 push(0)/push(2)/push(1)：payload 序列 = 0,2,1
+//   bit 5  pop 逐个恢复：payload = 2,0（**恢复的是"被压住的那一档"**，不是固定值）
+//   bit 6  三次 pop 之后：栈空（池 k=1 = 0）＋ 最后一次返回 1（基准）
+//   bit 7  空栈 pop：返回 1（基准）＋ err | 128
+//   bit 8  越界档 5：返回 1（当基准）＋ err | 64 ＋ payload = 1
+//   bit 9  越界档 −1：同上（负档不许漏成"第 3 档"）
+//   bit 10 压满 8 级仍成功；**第 9 次** err | 128 且栈深仍 = 8（计数不越写）
+//   bit 11 8 级后连续 pop 8 次：最后一次返回 1 且栈空（回到基准）
+//   bit 12 第 9 次 pop：err | 128
+//   bit 13 每帧归零：上一帧压了不弹 ⇒ 下一帧 gui_begin 之后栈深 = 0（不串档）
+//   bit 14 命令表形状：压/弹各一条、载荷 = 该命令之后生效的档
+//   bit 15 显式压基准档(1)+弹 ⇒ **绘制类命令逐字段摘要与"完全不压"那一帧相同**
+//   bit 16 且那一帧 22/23 条数 = 2（不是"空表比空表"）
+//   bit 17 光标尺子·标题档（池 k=2 = 9）⇒ 光标 x = 文本 x + 3×9
+//   bit 18 光标尺子·基准档（无头 gui_char_adv = 8）⇒ 光标 x = 文本 x + 3×8
+//   bit 19 光标尺子·说明档（池 k=3 = 5）⇒ 光标 x = 文本 x + 3×5
+//   bit 20 池 k=0 **恒 0**（POOLSUM 零扰动的前提）＋ 压/弹不改动 k=2/k=3（只有平台层写它们）
+//   bit 21 压过档的帧与不压的帧 **POOLSUM 相同**（状态池摘要零扰动）
+//   bit 22 该档**没量到**（池 k=2 = 0）⇒ 光标回落到基准宽（不是 0、也不是别的档）
+include "flgui_widgets.fl"
+
+// ===== 位掩码账 =====
+int f17_res = 0;
+
+// ===== 本帧读回 =====
+int f17_n22 = 0;                 // kind 22（档压栈）条数
+int f17_n23 = 0;                 // kind 23（档出栈）条数
+int f17_pay[6];                  // 22/23 的载荷序列（按出现顺序，最多记 6 条）
+int f17_npay = 0;
+int f17_depth = 0;               // 池里档栈的深度（读 k=1 的高位）
+int f17_cx = 0;                  // 光标条 x（kind 15）
+int f17_tx = 0;                  // 光标前面那条文本命令的 x（kind 5）
+int f17_tn = 0;                  // 那条文本命令的字节数
+int f17_found = 0;               // 本帧有没有抓到「文本 + 光标」配对
+int f17_dig = 0;                 // 绘制类命令（kind < 20）的逐字段摘要
+int f17_psum = 0;                // gui_pool_sum()
+int f17_ret = 0;                 // 上一次 push/pop 的返回值
+int f17_fk = 0;                  // 档态伪 key（gui_hash("__flgui_font") ^ "FONT"）
+
+// 光标尺子反推：adv = (光标 x − 文本 x) / 文本字节数（本样本文本恒 3 字节 ⇒ 整除、无歧义）
+int f17_adv = 0;
+
+int f17_setup(struct GuiCtx *c, struct GuiInput *in) {
+  gui_init(c);
+  c->lay_w = 120;
+  c->lay_h = 200;
+  in->mx = 0; in->my = 0;
+  in->down = 0; in->pressed = 0; in->released = 0;
+  in->wheel = 0; in->key = 0; in->ms = 0;
+  // 3 字节文本（光标 = 文本末尾那一列 ⇒ 判据与 3 有关，避免"n=0 时任何尺子都对"的假绿）
+  gui_edit_init(0, "ABC", 8);
+  // **两档实测字宽**由本样本注入（真值来自平台层 `gui_win_font_tier` 的 GDI 量宽；无头量不到）
+  //   ⚠️ 两个数与"基准 8"都不同（9 / 5）⇒ 判据能分辨"用了哪把尺子"
+  gui_pool_put(f17_fk, 2, 9);
+  gui_pool_put(f17_fk, 3, 5);
+  return 0;
+}
+
+// 场景：一行标签 ＋ 一个可编辑文本域（光标条 kind 15 就在这里）
+int f17_scene(struct GuiCtx *c) {
+  gui_label(c, "T");
+  gui_edit_focus(c, 0);
+  gui_textfield_edit(c, 0, 8);
+  return 0;
+}
+
+// 绘制类命令的逐字段摘要（**只摘 kind < 20** ⇒ 状态命令 22/23 不进摘要：
+//   "压基准档"与"完全不压"两帧的**画东西的部分**因此必须逐字段相同）
+int f17_digest() {
+  int i = 0;
+  int h = 1;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] < 20) {
+      h = (h * 31 + gui_cmd_kind[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_x[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_y[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_w[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_h[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_toff[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_tlen[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_col[i]) & 0x7FFFFFFF;
+      h = (h * 31 + gui_cmd_a[i]) & 0x7FFFFFFF;
+    }
+    i = i + 1;
+  }
+  return h;
+}
+
+// 读回本帧的命令表（22/23 条数与载荷、光标/文本配对、摘要、池账）
+int f17_scan() {
+  int i = 0;
+  int lt = 0;
+  f17_n22 = 0; f17_n23 = 0; f17_npay = 0;
+  f17_cx = 0 - 1; f17_tx = 0; f17_tn = 0; f17_found = 0;
+  f17_dig = f17_digest();
+  f17_psum = gui_pool_sum();
+  f17_depth = gui_pool_at(f17_fk, 1) / 65536;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 22) {
+      f17_n22 = f17_n22 + 1;
+      if (f17_npay < 6) { f17_pay[f17_npay] = gui_cmd_w[i]; f17_npay = f17_npay + 1; }
+    }
+    if (gui_cmd_kind[i] == 23) {
+      f17_n23 = f17_n23 + 1;
+      if (f17_npay < 6) { f17_pay[f17_npay] = gui_cmd_w[i]; f17_npay = f17_npay + 1; }
+    }
+    if (gui_cmd_kind[i] == 5) { lt = gui_cmd_x[i]; f17_tx = gui_cmd_x[i]; f17_tn = gui_cmd_tlen[i]; }
+    if (gui_cmd_kind[i] == 15) {
+      f17_cx = gui_cmd_x[i];
+      f17_found = 1;
+      f17_tx = lt;
+    }
+    i = i + 1;
+  }
+  // 尺子反推（tn = 3 ⇒ 整除）：没抓到配对时留 0（判据那边会因此红）
+  f17_adv = 0;
+  if (f17_found == 1) { if (f17_tn > 0) { f17_adv = (f17_cx - f17_tx) / f17_tn; } }
+  return 0;
+}
+
+// 走一帧并读回账。mode：
+//   0 = 不压档 ｜ 1 = push(1) + scene + pop ｜ 2 = push(0) + scene + pop ｜ 3 = push(2) + scene + pop
+//   ｜ 4 = push(0) + scene（**不弹**）｜ 5 = push(2) + scene（**不弹**）
+int f17_frame(struct GuiCtx *c, struct GuiInput *in, int mode) {
+  gui_begin(c, in);
+  if (mode == 1) { gui_font_push(c, 1); }
+  if (mode == 2) { gui_font_push(c, 0); }
+  if (mode == 3) { gui_font_push(c, 2); }
+  if (mode == 4) { gui_font_push(c, 0); }
+  if (mode == 5) { gui_font_push(c, 2); }
+  f17_scene(c);
+  if (mode == 1) { gui_font_pop(c); }
+  if (mode == 2) { gui_font_pop(c); }
+  if (mode == 3) { gui_font_pop(c); }
+  gui_end(c);
+  return f17_scan();
+}
+
+// 一帧的账（门里那段外部裁判读这一行）
+int f17_report(char *tag, struct GuiCtx *c) {
+  print(["F17 ", tag, " n22=", f17_n22, " n23=", f17_n23,
+         " p0=", f17_pay[0], " p1=", f17_pay[1], " p2=", f17_pay[2],
+         " p3=", f17_pay[3], " p4=", f17_pay[4], " p5=", f17_pay[5],
+         " depth=", f17_depth, " cx=", f17_cx, " tx=", f17_tx, " tn=", f17_tn,
+         " adv=", f17_adv, " found=", f17_found, " dig=", f17_dig,
+         " psum=", f17_psum, " err=", c->err, " ncmd=", gui_cmd_n, "\n"]);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int k = 0;
+  int d0 = 0;
+  int d1 = 0;
+  int ps0 = 0;
+  int ps1 = 0;
+
+  f17_fk = gui_hash("__flgui_font") ^ 0x464F4E54;
+
+  // ================= ① 不压档：0 条状态命令 ＋ 基准尺子 =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 0);
+  f17_report("A0", &c);
+  d0 = f17_dig;
+  ps0 = f17_psum;
+  // bit 1：不切档 ⇒ 一条 kind 22/23 都不发
+  if (f17_n22 == 0) { if (f17_n23 == 0) { if (f17_depth == 0) { f17_res = f17_res | 1; } } }
+  // bit 18：基准档（无头 gui_char_adv = 8）⇒ 光标 = 文本 x + 3×8
+  if (f17_found == 1) { if (f17_cx == f17_tx + 3 * 8) { f17_res = f17_res | 131072; } }
+
+  // ================= ② 显式压基准档(1)：绘制部分必须与 ① 逐字段相同 =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 1);
+  f17_report("A1", &c);
+  d1 = f17_dig;
+  ps1 = f17_psum;
+  // bit 15：绘制类命令逐字段摘要相同（压基准档 = 画出来的东西一个字节不变）
+  if (d1 == d0) { f17_res = f17_res | 16384; }
+  // bit 16：那一帧确实发了 2 条状态命令（不是"空表比空表"）＋ 载荷 = 1 / 1
+  if (f17_n22 == 1) { if (f17_n23 == 1) { if (f17_pay[0] == 1) { if (f17_pay[1] == 1) { f17_res = f17_res | 32768; } } } }
+  // bit 21：POOLSUM 与"不压"那一帧相同（状态池摘要零扰动）
+  if (ps1 == ps0) { f17_res = f17_res | 1048576; }
+
+  // ================= ③ push(0) 不弹：载荷 / 栈深 / **标题档尺子** =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 2);                          // 先确认"压+弹"那一帧的尺子与形状
+  f17_report("B0", &c);
+  // bit 17：标题档（池 k=2 = 9）⇒ 光标 = 文本 x + 3×9（**不是** 3×8）
+  if (f17_found == 1) { if (f17_cx == f17_tx + 3 * 9) { f17_res = f17_res | 65536; } }
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 4);                          // 压了不弹 ⇒ 帧末观察栈深
+  f17_report("B1", &c);
+  // bit 2：payload = 0 ＋ 栈深 = 1 ＋ 没有出栈命令
+  if (f17_n22 == 1) { if (f17_n23 == 0) { if (f17_pay[0] == 0) { if (f17_depth == 1) { f17_res = f17_res | 2; } } } }
+
+  // ================= ④ push(2)：说明档尺子 ＋ 栈顶换档 =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 3);
+  f17_report("C0", &c);
+  // bit 19：说明档（池 k=3 = 5）⇒ 光标 = 文本 x + 3×5
+  if (f17_found == 1) { if (f17_cx == f17_tx + 3 * 5) { f17_res = f17_res | 262144; } }
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 5);                          // 压 2 档不弹
+  f17_report("C1", &c);
+  // bit 3：payload = 2 ＋ 栈深 = 1
+  if (f17_n22 == 1) { if (f17_pay[0] == 2) { if (f17_depth == 1) { f17_res = f17_res | 4; } } }
+
+  // ================= ⑤ 嵌套三层 ＋ 逐个恢复 =================
+  f17_setup(&c, &in);
+  gui_begin(&c, &in);
+  gui_font_push(&c, 0);
+  gui_font_push(&c, 2);
+  f17_ret = gui_font_push(&c, 1);
+  f17_scene(&c);
+  gui_font_pop(&c);                               // 弹回 2
+  f17_scene(&c);
+  gui_font_pop(&c);                               // 弹回 0
+  f17_scene(&c);
+  f17_ret = gui_font_pop(&c);                     // 弹空 ⇒ 返回基准 1
+  gui_end(&c);
+  f17_scan();
+  f17_report("D0", &c);
+  // bit 4：三层压栈的载荷 = 0 / 2 / 1
+  if (f17_n22 == 3) { if (f17_pay[0] == 0) { if (f17_pay[1] == 2) { if (f17_pay[2] == 1) { f17_res = f17_res | 8; } } } }
+  // bit 5：弹出的载荷 = 2 / 0（恢复"被压住的那一档"）
+  if (f17_n23 == 3) { if (f17_pay[3] == 2) { if (f17_pay[4] == 0) { f17_res = f17_res | 16; } } }
+  // bit 6：全部弹完 ⇒ 栈空 ＋ 最后一次返回基准 1
+  if (f17_depth == 0) { if (f17_pay[5] == 1) { if (f17_ret == 1) { f17_res = f17_res | 32; } } }
+
+  // ================= ⑥ 空栈 pop / 越界档 =================
+  f17_setup(&c, &in);
+  c.err = 0;
+  gui_begin(&c, &in);
+  f17_ret = gui_font_pop(&c);                     // 空栈弹
+  gui_end(&c);
+  f17_scan();
+  f17_report("E0", &c);
+  // bit 7：返回基准 1 ＋ err | 128
+  if (f17_ret == 1) { if (c.err == 128) { f17_res = f17_res | 64; } }
+
+  f17_setup(&c, &in);
+  c.err = 0;
+  gui_begin(&c, &in);
+  f17_ret = gui_font_push(&c, 5);                 // 越界档（正）
+  gui_end(&c);
+  f17_scan();
+  f17_report("E1", &c);
+  // bit 8：返回基准 1 ＋ err | 64 ＋ payload = 1（压进去的是基准档）
+  if (f17_ret == 1) { if (c.err == 64) { if (f17_n22 == 1) { if (f17_pay[0] == 1) { f17_res = f17_res | 128; } } } }
+
+  f17_setup(&c, &in);
+  c.err = 0;
+  gui_begin(&c, &in);
+  f17_ret = gui_font_push(&c, 0 - 1);             // 越界档（负）
+  gui_end(&c);
+  f17_scan();
+  f17_report("E2", &c);
+  // bit 9：同上（负档不许漏成第 3 档）
+  if (f17_ret == 1) { if (c.err == 64) { if (f17_pay[0] == 1) { f17_res = f17_res | 256; } } }
+
+  // ================= ⑦ 8 级上限：第 9 次只计数、不越写 =================
+  f17_setup(&c, &in);
+  c.err = 0;
+  gui_begin(&c, &in);
+  k = 0;
+  while (k < 8) {
+    if (k / 2 * 2 == k) { gui_font_push(&c, 0); } else { gui_font_push(&c, 2); }
+    k = k + 1;
+  }
+  gui_font_push(&c, 0);                           // 第 9 次 ⇒ 应被拒
+  gui_end(&c);
+  f17_depth = gui_pool_at(f17_fk, 1) / 65536;
+  f17_report("F0", &c);
+  // bit 10：第 9 次 err | 128 ＋ 栈深仍 = 8（8 级全亮、没越写）
+  if (c.err == 128) { if (f17_depth == 8) { f17_res = f17_res | 512; } }
+
+  c.err = 0;
+  gui_begin(&c, &in);
+  k = 0;
+  while (k < 8) { f17_ret = gui_font_pop(&c); k = k + 1; }
+  gui_end(&c);
+  // bit 11：8 级后连弹 8 次 ⇒ 最后一次返回基准 1 且栈空
+  if (f17_ret == 1) { if (gui_pool_at(f17_fk, 1) / 65536 == 0) { f17_res = f17_res | 1024; } }
+  c.err = 0;
+  gui_begin(&c, &in);
+  gui_font_pop(&c);                               // 第 9 次弹
+  gui_end(&c);
+  // bit 12：err | 128
+  if (c.err == 128) { f17_res = f17_res | 2048; }
+
+  // ================= ⑧ 每帧归零（跨帧不串档）=================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 4);                          // 压了 0 档、**不弹**
+  d1 = gui_pool_at(f17_fk, 1) / 65536;            // 帧末：深度 1
+  gui_begin(&c, &in);                             // 下一帧开始
+  d0 = gui_pool_at(f17_fk, 1) / 65536;            // ⇒ 必须已被清 0
+  gui_end(&c);
+  f17_scan();
+  f17_report("G0", &c);
+  // bit 13：帧末 1、下一帧 begin 之后 0
+  if (d1 == 1) { if (d0 == 0) { f17_res = f17_res | 4096; } }
+
+  // ================= ⑨ 命令表形状：压/弹各一条、载荷 = 生效档 =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 2);
+  f17_report("H0", &c);
+  // bit 14：n22 = 1 / n23 = 1 ＋ 压的载荷 0 / 弹的载荷 1（弹回基准）
+  if (f17_n22 == 1) { if (f17_n23 == 1) { if (f17_pay[0] == 0) { if (f17_pay[1] == 1) { f17_res = f17_res | 8192; } } } }
+
+  // ================= ⑩ 没量到的档 ⇒ 回落基准宽 =================
+  f17_setup(&c, &in);
+  gui_pool_put(f17_fk, 2, 0);                     // 标题档**没量到**
+  f17_frame(&c, &in, 2);
+  f17_report("I0", &c);
+  // bit 22：光标回落基准 8（不是 0、也不是别的档的宽）
+  if (f17_found == 1) { if (f17_cx == f17_tx + 3 * 8) { f17_res = f17_res | 2097152; } }
+
+  // ================= ⑪ 池账：k=0 恒 0、两档宽度不被压/弹改动 =================
+  f17_setup(&c, &in);
+  f17_frame(&c, &in, 2);
+  f17_report("J0", &c);
+  // bit 20：k=0 恒 0 ＋ k=2/k=3 仍是注入值（只有平台层写它们，压/弹不许碰）
+  if (gui_pool_at(f17_fk, 0) == 0) {
+    if (gui_pool_at(f17_fk, 2) == 9) {
+      if (gui_pool_at(f17_fk, 3) == 5) { f17_res = f17_res | 524288; }
+    }
+  }
+
+  print(["M4Q res=", f17_res, " want=", 4194303, "\n"]);
+  if (f17_res == 4194303) { return 42; }
+  return f17_res;
+}

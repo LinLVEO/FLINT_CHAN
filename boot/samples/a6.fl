@@ -1,0 +1,1 @@
+int main() { int a[600]; int i = 0; while (i < 600) { a[i] = i; i = i + 1; } return a[42]; }

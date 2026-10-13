@@ -1,0 +1,13 @@
+struct S { char a; char b; int n; }
+int main() {
+  struct S s;
+  s.a = 65;
+  s.b = 66;
+  s.n = 999;
+  s.a = 0xAA;
+  s.b++;
+  if (s.n != 999) return 1;
+  if (s.b != 67) return 2;
+  if (s.a != 0xAA) return 3;
+  return s.a + s.b;
+}

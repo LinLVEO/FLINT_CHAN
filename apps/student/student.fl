@@ -1,0 +1,279 @@
+// student.fl — 学生管理系统（FLINT 演示应用）
+// 功能：1 添加  2 列出  3 查找  4 删除  5 统计  6 保存到文件  7 从文件读取  0 退出
+// 编译：E:\FLINT\flint.exe student.fl -o student.exe    （自举编译器同样能编：boot\b1_emit.exe student.fl）
+// 运行：run.bat（内部 chcp 65001，中文界面不乱码）；数据文件 students.txt 存在本目录
+//
+// FLINT 写法说明（这门语言现在的样子）：
+//   · 没有全局变量 → 所有状态挂在 struct Db 里，函数之间只传结构体指针
+//   · 没有"结构体数组" → 用平行数组（ids/scores/noffs/nlens）+ 一块共享字符池存姓名
+//   · struct 字段不能是 char* → 池指针用 int* 承载，用的时候落到 char* 局部
+//   · 没有 switch → if / else if 链；没有 scanf → 自己从 stdin 读一行
+include "io_lib.fl"
+include "num_lib.fl"
+include "fmt_lib.fl"
+include "math_lib.fl"
+
+api kernel32 ptr GetStdHandle(int);
+
+// —— 一条记录（姓名字节存共享池：noff = 偏移，nlen = 长度）——
+struct Rec { int id; int score; int noff; int nlen; }
+
+// —— 数据库：平行数组 + 字符池 ——
+struct Db { int *ids; int *scores; int *noffs; int *nlens; int *pool; int n; int cap; int used; int pcap; }
+
+// —— 输入缓冲（控制台一次一行；管道可能一次给多行 → 自己缓冲，逐行取）——
+struct In { int *buf; int len; int pos; int cap; }
+
+// 读一行到 out（去掉 \r\n）；返回长度；-1 = 输入结束
+int in_line(struct In *in, char *out, int cap) {
+  int *h = GetStdHandle(-10);                 // STD_INPUT_HANDLE
+  if (h == 0) return -1;
+  char *ib = in->buf;
+  int o = 0;
+  while (1) {
+    while (in->pos < in->len) {
+      char c = ib[in->pos];
+      in->pos = in->pos + 1;
+      if (c == 10) { out[o] = 0; return o; }
+      if (c != 13) {                            // 跳过 \r
+        if (o < cap - 1) { out[o] = c; o = o + 1; }
+      }
+    }
+    in->len = 0;
+    in->pos = 0;
+    int got = 0;
+    if (ReadFile(h, ib, in->cap, &got, 0) == 0) { out[o] = 0; if (o > 0) return o; return -1; }
+    if (got == 0) { out[o] = 0; if (o > 0) return o; return -1; }
+    in->len = got;
+  }
+}
+
+// 找学号下标；-1 = 没有
+int db_find(struct Db *d, int id) {
+  int i = 0;
+  while (i < d->n) {
+    if (d->ids[i] == id) return i;
+    i = i + 1;
+  }
+  return -1;
+}
+
+// 追加一条（姓名拷进池并补 0）；1 = 成功，0 = 名额满 / 池满
+int db_add(struct Db *d, struct Rec *r, char *name) {
+  if (d->n >= d->cap) return 0;
+  if (d->used + r->nlen + 1 > d->pcap) return 0;
+  char *pool = d->pool;
+  int off = d->used;
+  int i = 0;
+  while (i < r->nlen) { pool[off + i] = name[i]; i = i + 1; }
+  pool[off + i] = 0;
+  d->used = off + i + 1;
+  d->ids[d->n] = r->id;
+  d->scores[d->n] = r->score;
+  d->noffs[d->n] = off;
+  d->nlens[d->n] = r->nlen;
+  d->n = d->n + 1;
+  return 1;
+}
+
+// 删除第 idx 条（数组左移；池不回收，演示够用）；1 = 成功
+int db_del(struct Db *d, int idx) {
+  if (idx < 0 || idx >= d->n) return 0;
+  int i = idx;
+  while (i + 1 < d->n) {
+    d->ids[i] = d->ids[i + 1];
+    d->scores[i] = d->scores[i + 1];
+    d->noffs[i] = d->noffs[i + 1];
+    d->nlens[i] = d->nlens[i + 1];
+    i = i + 1;
+  }
+  d->n = d->n - 1;
+  return 1;
+}
+
+// 列出全部
+int db_list(struct Db *d) {
+  if (d->n == 0) { print(["（暂无学生）\n"]); return 0; }
+  print(["学号\t成绩\t姓名\n"]);
+  char *pool = d->pool;
+  int i = 0;
+  while (i < d->n) {
+    char *nm = pool + d->noffs[i];
+    print([d->ids[i], "\t", d->scores[i], "\t", nm, "\n"]);
+    i = i + 1;
+  }
+  print(["共 ", d->n, " 人\n"]);
+  return 0;
+}
+
+// 统计：人数 / 平均 / 最高 / 最低
+int db_stats(struct Db *d) {
+  if (d->n == 0) { print(["（暂无学生）\n"]); return 0; }
+  int sum = 0;
+  int hi = d->scores[0];
+  int lo = d->scores[0];
+  int i = 0;
+  while (i < d->n) {
+    sum = sum + d->scores[i];
+    hi = std::max(hi, d->scores[i]);
+    lo = std::min(lo, d->scores[i]);
+    i = i + 1;
+  }
+  print(["人数 ", d->n, "｜平均 ", sum / d->n, "｜最高 ", hi, "｜最低 ", lo, "\n"]);
+  return 0;
+}
+
+// 保存：每行 "学号 成绩 姓名\n"（用 std::fmt_* 拼缓冲）
+int db_save(struct Db *d, char *path) {
+  char out[4096];
+  int p = 0;
+  int i = 0;
+  while (i < d->n) {
+    p = std::fmt_int(out, p, d->ids[i]);
+    p = std::fmt_char(out, p, ' ');
+    p = std::fmt_int(out, p, d->scores[i]);
+    p = std::fmt_char(out, p, ' ');
+    char *pool = d->pool;
+    int off = d->noffs[i];
+    int len = d->nlens[i];
+    int k = 0;
+    while (k < len) { out[p] = pool[off + k]; p = p + 1; k = k + 1; }
+    p = std::fmt_char(out, p, 10);
+    i = i + 1;
+  }
+  if (std::file_write(path, out, p) == 1) return 1;
+  return 0;
+}
+
+// 读取：返回条数；-1 = 打不开
+int db_load(struct Db *d, char *path) {
+  char buf[4096];
+  int n = std::file_read(path, buf, 4095);
+  if (n < 0) return -1;
+  buf[n] = 0;
+  d->n = 0;
+  d->used = 0;
+  int i = 0;
+  while (i < n) {
+    char num[24];
+    int k = 0;
+    while (i < n && buf[i] != ' ' && k < 23) { num[k] = buf[i]; k = k + 1; i = i + 1; }
+    num[k] = 0;
+    if (i < n) { i = i + 1; }
+    int id = std::atoi(num);
+    k = 0;
+    while (i < n && buf[i] != ' ' && k < 23) { num[k] = buf[i]; k = k + 1; i = i + 1; }
+    num[k] = 0;
+    if (i < n) { i = i + 1; }
+    int sc = std::atoi(num);
+    char nm[64];
+    k = 0;
+    while (i < n && buf[i] != 10 && k < 63) { nm[k] = buf[i]; k = k + 1; i = i + 1; }
+    if (k > 0 && nm[k - 1] == 13) { k = k - 1; }
+    nm[k] = 0;
+    if (i < n) { i = i + 1; }
+    if (k > 0) {
+      struct Rec r;
+      r.id = id;
+      r.score = sc;
+      r.nlen = k;
+      r.noff = 0;
+      db_add(d, &r, nm);
+    }
+  }
+  return d->n;
+}
+
+int main() {
+  int ids[32];
+  int scores[32];
+  int noffs[32];
+  int nlens[32];
+  char pool[2048];
+  struct Db db;
+  db.ids = ids;
+  db.scores = scores;
+  db.noffs = noffs;
+  db.nlens = nlens;
+  db.pool = pool;
+  db.n = 0;
+  db.cap = 32;
+  db.used = 0;
+  db.pcap = 2048;
+  char line[128];
+  char nm[64];
+  char inbuf[256];
+  struct In in;
+  in.buf = inbuf;
+  in.len = 0;
+  in.pos = 0;
+  in.cap = 256;
+  int running = 1;
+  print(["\n==================================\n"]);
+  print(["     学生管理系统（FLINT 版）\n"]);
+  print(["==================================\n"]);
+  while (running) {
+    print(["\n1 添加  2 列出  3 查找  4 删除  5 统计  6 保存  7 读取  0 退出\n"]);
+    print(["请选择: "]);
+    in_line(&in, line, 128);
+    int cmd = std::atoi(line);
+    if (cmd == 0) {
+      running = 0;
+      print(["再见\n"]);
+    } else if (cmd == 1) {
+      print(["学号: "]);
+      in_line(&in, line, 128);
+      int id = std::atoi(line);
+      if (db_find(&db, id) >= 0) {
+        print(["该学号已存在\n"]);
+      } else {
+        print(["姓名: "]);
+        int nl = in_line(&in, nm, 64);
+        print(["成绩: "]);
+        in_line(&in, line, 128);
+        int sc = std::atoi(line);
+        struct Rec r;
+        r.id = id;
+        r.score = sc;
+        r.nlen = nl;
+        r.noff = 0;
+        if (db_add(&db, &r, nm) == 1) { print(["已添加\n"]); }
+        else { print(["添加失败（名额或姓名池已满）\n"]); }
+      }
+    } else if (cmd == 2) {
+      db_list(&db);
+    } else if (cmd == 3) {
+      print(["学号: "]);
+      in_line(&in, line, 128);
+      int id = std::atoi(line);
+      int idx = db_find(&db, id);
+      if (idx < 0) {
+        print(["未找到\n"]);
+      } else {
+        // 注意：main 里已有 char pool[]，boot 不允许函数内同名遮蔽 → 这里换个名
+        char *pl = db.pool;
+        char *np = pl + db.noffs[idx];
+        print(["学号 ", db.ids[idx], "｜成绩 ", db.scores[idx], "｜姓名 ", np, "\n"]);
+      }
+    } else if (cmd == 4) {
+      print(["学号: "]);
+      in_line(&in, line, 128);
+      int id = std::atoi(line);
+      int idx = db_find(&db, id);
+      if (idx < 0) { print(["未找到\n"]); }
+      else if (db_del(&db, idx) == 1) { print(["已删除\n"]); }
+    } else if (cmd == 5) {
+      db_stats(&db);
+    } else if (cmd == 6) {
+      if (db_save(&db, "students.txt") == 1) { print(["已保存到 students.txt\n"]); }
+      else { print(["保存失败\n"]); }
+    } else if (cmd == 7) {
+      int got = db_load(&db, "students.txt");
+      if (got < 0) { print(["打不开 students.txt（先保存一次）\n"]); }
+      else { print(["已读取 ", got, " 条\n"]); }
+    } else {
+      print(["无此选项\n"]);
+    }
+  }
+  return 0;
+}

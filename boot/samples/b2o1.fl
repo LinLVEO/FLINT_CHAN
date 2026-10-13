@@ -1,0 +1,37 @@
+// b2o1.fl — B2o：真实应用 hw.fl 的读数路径行为差分（**不依赖 WinRing0 的路径**；boot 与真 flint 必须同为 42）
+// 覆盖：GlobalMemoryStatusEx 的 64B 结构体布局 + 64 位拆解（>>30 & 3 掩码）+ GetDiskFreeSpaceA 簇换算 +
+//       GetSystemTimes 差值法（FILETIME lo/hi 字段对）
+// 说明：温度/频率/功耗要 WinRing0 驱动，本样本不碰；只验「普通 API 读数」这条路径两端一致。
+include "../../apps/m2_float/hw.fl"
+
+api kernel32 void Sleep(int);
+
+int main() {
+  int r = 0;
+
+  struct MEM m;
+  struct MemGb g;
+  int mp = hw_mem_snap(&m, &g);
+  if (mp >= 1 && mp <= 100) r |= 1;             // 内存占用 % 在合理区间
+  if (mp == g.pct) r |= 2;                      // 两条读数路径给出同一值
+  if (g.total >= 1 && g.total <= 1024) r |= 4;  // 总内存 GB 合理
+  if (g.used >= 0 && g.used <= g.total) r |= 8; // 已用 ≤ 总
+
+  struct MEM m2;
+  int mp2 = hw_mem_pct(&m2);
+  if (mp2 >= 1 && mp2 <= 100) r |= 16;          // 独立再取一次仍合理
+
+  struct DiskSt d;
+  struct DskGb dg;
+  int dp = hw_disk_snap(&d, &dg);
+  if (dp >= 1 && dp <= 100) r |= 32;            // 磁盘占用 % 合理
+
+  struct CpuSt cs;
+  hw_cpu_begin(&cs);
+  Sleep(1100);
+  int cp = hw_cpu_pct(&cs);
+  if (cp <= 100) r |= 64;                       // CPU 差值法：-1（无效）或 0..100 都算通道正常，垃圾值则不过
+
+  if (r == 127) return 42;
+  return r;
+}

@@ -1,0 +1,3 @@
+struct Q { int x; }
+struct P { struct Q q; }
+int main() { return 0; }

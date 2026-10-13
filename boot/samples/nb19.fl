@@ -1,0 +1,8 @@
+// nb19.fl — 负例：托管变量（own）在块内声明——真 flint 拒绝（决策 20 scope_nest），boot 必须同样拒绝
+int main() {
+  {
+    int *own p = new int;
+    *p = 1;
+  }
+  return 0;
+}

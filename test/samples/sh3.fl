@@ -1,0 +1,7 @@
+// sh3.fl — share 槽清零防线：声明前提前 return，出口清理跳过 0 槽
+int main() {
+  if (1) return 66;
+  int *share p = new int;
+  *(p) = 1;
+  return 0;
+}

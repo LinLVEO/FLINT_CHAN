@@ -1,0 +1,3 @@
+// b2v_a.fl — B2v include 去重样本：依赖 b2v_b.fl（菱形上游）
+include "b2v_b.fl"
+int b2v_a_val() { return b2v_b_val() + 2; }

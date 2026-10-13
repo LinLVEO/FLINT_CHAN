@@ -1,0 +1,23 @@
+// s3_frame.fl — v0.9.2 帧块布局修正回归（类型层顺带发现的潜伏 bug）
+// 旧实现：多槽块变量（struct/数组）基址 = 槽顶地址（rbp-off），字段/元素从基址向上走，
+//   与「槽从 rbp-8 向下连续分配」方向相反 → 字段穿进先前变量/调用方栈。
+//   main 走 ExitProcess 永不返回 + 测试无交叉干扰 → 侥幸掩盖；一旦：
+//   ① struct 局部变量出现在会 return 的普通函数 → 字段写进返回地址区 → 崩溃
+//   ② 数组与后续标量共存 → 元素覆盖标量
+struct Mix { int a; int b; int c; int *p; }   // 24B：int×3 + ptr 字段（C 布局 p@16）
+int f() {
+  struct Mix m;          // 唯一局部 → 旧布局基址 rbp-8，p@16 = rbp+8 = 返回地址！
+  m.a = 1;
+  m.p = "AB";            // 旧：写返回地址 → ret 即崩
+  return m.a;            // 新布局：块基址 rbp-24，字段全在自区内，正常 return
+}
+int main() {
+  int x = f();
+  if (x != 1) return 90;
+  int i = 7;             // 标量先
+  int a[2];              // 数组后：旧布局 a[0] 在 rbp-16、i 在 rbp-8，无重叠但 a[1] 穿 rbp+0
+  a[0] = i;
+  a[1] = i + 1;
+  if (a[0] != 7 || a[1] != 8) return 91;
+  return 0;
+}

@@ -1,0 +1,8 @@
+// inc3.fl — 后缀累加：x++ 三次后 return x = 8
+int main() {
+  int x = 5;
+  x++;
+  x++;
+  x++;
+  return x;     // 8
+}

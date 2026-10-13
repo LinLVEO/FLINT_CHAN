@@ -1,0 +1,33 @@
+// sys_probe.fl — M2 改义实证：FLINT 直读系统数据（不借任何旧程序接口）
+// CPU 占用 = GetSystemTimes 两次采样（1s 间隔）差值：total=kernel+user（kernel 含 idle），
+//   busy=total-idle，pct=busy*100/total —— 差值用低 32 位（1s 采样差 ~10^7 ticks < 2^31 安全）
+// 内存占用 = GlobalMemoryStatusEx 的 dwMemoryLoad（Windows 算好的 0-100，免 64 位除法）
+// 退出码 = cpu%*100 + mem%（验证值合理性）；1=total 异常 2=采样回绕（重跑）
+api kernel32 int GetSystemTimes(int, int, int);
+api kernel32 int GlobalMemoryStatusEx(int);
+api kernel32 void Sleep(int);
+
+struct FT { int lo; int hi; }          // FILETIME 8B（100ns ticks）
+struct MEM { int f0; int f1; int f2; int f3; int f4; int f5; int f6; int f7;
+             int f8; int f9; int f10; int f11; int f12; int f13; int f14; int f15; }  // 64B = MEMORYSTATUSEX
+
+int main() {
+  struct FT i1; struct FT k1; struct FT u1;
+  GetSystemTimes(&i1, &k1, &u1);
+  Sleep(1000);
+  struct FT i2; struct FT k2; struct FT u2;
+  GetSystemTimes(&i2, &k2, &u2);
+  int dk = k2.lo - k1.lo;   // kernel 差（含 idle）
+  int du = u2.lo - u1.lo;   // user 差
+  int di = i2.lo - i1.lo;   // idle 差
+  if (dk < 0 || du < 0 || di < 0) return 2;   // 低 32 位回绕（~429s 周期，重跑即可）
+  int total = dk + du;
+  if (total <= 0) return 1;
+  int busy = total - di;
+  int pct = busy * 100 / total;
+  struct MEM mem;
+  mem.f0 = 64;                              // dwLength = sizeof(MEMORYSTATUSEX)
+  GlobalMemoryStatusEx(&mem);
+  int mload = mem.f1;                       // dwMemoryLoad 0-100
+  return pct * 100 + mload;
+}

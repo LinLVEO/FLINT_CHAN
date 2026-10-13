@@ -1,0 +1,8 @@
+// new1.fl — v0.9 new int：堆对象分配（头部 8B refcount + int 负载）读写 + own 出口自动释放
+int main() {
+  int *own p = new int;
+  if (p == 0) return 90;          // 分配失败（64 位判真）
+  *(p) = 42;                      // 负载槽写
+  if (*(p) != 42) return 91;
+  return 0;
+}

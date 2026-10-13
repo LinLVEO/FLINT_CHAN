@@ -1,0 +1,13 @@
+// b4a2.fl — B4a for 语句（boot 侧差分）：init 多变量声明 + 体内同名遮蔽 + 空 init/inc
+int main() {
+  int s = 0;
+  for (int i = 0, j = 10; i < 3; i++) { s = s + j; }      // s = 30（init 多声明）
+  if (s != 30) return 1;
+  int k = 0;
+  for (; k < 4; ) { k = k + 1; }                          // 空 init / 空 inc
+  if (k != 4) return 2;
+  int m = 0;
+  for (int k = 0; k < 3; k++) { int s = 5; m = m + s; }   // 体内 s 遮蔽外层 s（外层 s 不变）
+  if (m != 15 || s != 30) return 3;
+  return 42;
+}

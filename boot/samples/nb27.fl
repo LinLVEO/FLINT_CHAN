@@ -1,0 +1,6 @@
+// nb27 — B3a 负例：同一作用域重复声明（对齐真 flint「变量 'x' 重复声明」）
+int main() {
+  int x = 1;
+  int x = 2;
+  return x;
+}

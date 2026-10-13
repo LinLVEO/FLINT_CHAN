@@ -1,0 +1,21 @@
+// dbgcond.fl -- gate sample for the -debug condition attribution (task card T-20260918-012105).
+//   The condition of an if/while/for is written on ITS OWN source line here, so the line table
+//   must give those bytes their own record: addr2line on the first condition instruction must
+//   report the condition's line, not the line of the statement before it.
+//   Layout matters: keep the `if` condition on line 4 alone (do not merge lines).
+int main() {
+  int a = 1;
+  int b = 2;
+  if (a < b) {
+    a = a + 1;
+  }
+  int i = 0;
+  while (i < 2) {
+    i = i + 1;
+  }
+  int j = 0;
+  for (j = 0; j < 1; j = j + 1) {
+    a = a + 1;
+  }
+  return a + i + j;
+}

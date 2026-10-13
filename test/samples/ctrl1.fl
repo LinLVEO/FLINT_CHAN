@@ -1,0 +1,11 @@
+// ctrl1.fl — if/else：a=10 大于 5 → 1
+int main() {
+  int a = 10;
+  int r = 0;
+  if (a > 5) {
+    r = 1;
+  } else {
+    r = 2;
+  }
+  return r;
+}

@@ -1,0 +1,154 @@
+// flgui2.fl — FLGUI M2 无头行为成绩单①：分隔线 / 滑块 / 进度条 / 只读文本域
+//   **不建窗**：合成输入喂 gui_begin，状态转移与 draw list 都 dump 成文本（stdout）→ test\flgui-verify.ps1 双端逐字节对账
+// 位图（全亮 = 42；命令序在本文件里是**契约**，按下标断言）：
+//   0 帧号 ｜1 分隔线 kind ｜2 分隔线宽 = 容器宽 ｜3 分隔线在首行(=`pad`) ｜4 分隔线无文本
+//   5 滑块轨道 x ｜6 滑块轨道 y = 分隔线下方(1+spacing) ｜7 滑块已选段宽 = 轨道宽×50/100 ｜8 滑块标签长
+//   9 进度条底 kind ｜10 进度条填充 = 条宽×50/100 ｜11 文本域盒 kind ｜12 文本域按盒宽截断 ｜13 文本域文字左内边距
+//   14 滑块点轨道 25% 处 → 值落 25 附近且不再是初值 ｜15 按下后 active = 滑块 id（令牌）
+//   16 **仍按住**把鼠标移到轨道右外侧 → 跟手夹到 max ｜17 **仍按住**再移到最左 → 夹到 0
+//   18 抬手后值保持 ｜19 抬手后 active 清空 ｜20 别处按下-抬起不改值 ｜21 别处交互后 active 仍空
+//   22 进度 0 ⇒ 不发填充命令 ｜23 进度 100 ⇒ 填满 ｜24 进度 >max ⇒ 夹到满（不溢出）
+include "flgui_widgets.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int r = 0;
+  int v = 50;
+  int v2 = 0;
+  int fills = 0;
+  int i = 0;
+  int sx = 0;
+  int sw = 0;
+  int sy = 0;
+  int fw = 0;
+  int sid = 0;
+
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 200;
+  sid = gui_id("s1");
+
+  // ================= 帧 1：无输入，四件控件各就各位 =================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.ms = 0;
+  gui_begin(&c, &in);
+  gui_separator(&c);
+  v = gui_slider(&c, "s1", v, 100);
+  gui_progressbar(&c, "pb", 50, 100);
+  gui_textfield(&c, "abcdefghijklmnopqrstuvwxyz");
+  gui_end(&c);
+  gui_dump(&c);
+
+  if (c.frame == 1) { r = r | 1; }
+  if (gui_cmd_kind[0] == 10) { r = r | 2; }
+  if (gui_cmd_w[0] == c.lay_w) { r = r | 4; }
+  if (gui_cmd_y[0] == c.pad) { r = r | 8; }
+  if (gui_cmd_tlen[0] == 0) { r = r | 16; }
+  if (gui_cmd_kind[1] == 11) { r = r | 32; }
+  if (gui_cmd_y[1] == c.pad + 1 + c.spacing) { r = r | 64; }
+  sx = gui_cmd_x[1];
+  sw = gui_cmd_w[1];
+  sy = gui_cmd_y[1];
+  if (gui_cmd_w[2] == sw * 50 / 100) { r = r | 128; }
+  if (gui_cmd_tlen[3] == 2) { r = r | 256; }
+  if (gui_cmd_kind[4] == 13) { r = r | 512; }
+  if (gui_cmd_w[5] == gui_cmd_w[4] * 50 / 100) { r = r | 1024; }
+  if (gui_cmd_kind[7] == 14) { r = r | 2048; }
+  fw = (gui_cmd_w[7] - c.pad * 2) / 8;
+  if (gui_cmd_tlen[8] == fw) { r = r | 4096; }              // 26 字节的串被截到装得下的字节数
+  if (fw < 26) { r = r | 8192; }
+  if (gui_cmd_x[8] == gui_cmd_x[7] + c.pad) { r = r | 16384; }
+
+  // ================= 帧 2：点轨道 25% 处（按下）=================
+  in.mx = sx + sw / 4;
+  in.my = sy + 2;
+  in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (v2 != 50) { if (v2 > 20) { if (v2 < 30) { r = r | 32768; } } }   // 25 附近（整数除法留容差）
+  if (c.active == sid) { r = r | 65536; }
+  v = v2;
+
+  // ================= 帧 3：**仍按住**，把鼠标移到轨道右外侧 → 跟手夹到 max（令牌在手，移出控件也不丢）=================
+  in.mx = sx + sw + 50;
+  in.down = 1; in.pressed = 0; in.released = 0;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (v2 == 100) { r = r | 524288; }
+  v = v2;
+
+  // ================= 帧 4：**仍按住**，再移到最左端 → 夹到 0 =================
+  in.mx = sx;
+  in.my = sy + 2;
+  in.down = 1; in.pressed = 0; in.released = 0;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (v2 == 0) { r = r | 1048576; }
+  v = v2;
+
+  // ================= 帧 5：抬手 → 值保持、令牌交回 =================
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (v2 == v) { r = r | 131072; }
+  if (c.active == 0) { r = r | 262144; }
+  v = v2;
+
+  // ================= 帧 6~7：在别处按下再抬起（负对照：值不该变、令牌不该被拿走）=================
+  in.mx = 0; in.my = 0; in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  v2 = gui_slider(&c, "s1", v, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (v2 == 0) { r = r | 2097152; }
+  if (c.active == 0) { r = r | 4194304; }
+
+  // ================= 帧 9：进度 0 ⇒ 不发填充命令 =================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0;
+  gui_begin(&c, &in);
+  gui_progressbar(&c, "pb", 0, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  fills = 0;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 12) { fills = fills + 1; }
+    i = i + 1;
+  }
+  if (fills == 0) { r = r | 8388608; }
+
+  // ================= 帧 10：进度 100 ⇒ 填满 =================
+  gui_begin(&c, &in);
+  gui_progressbar(&c, "pb", 100, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 12) { fills = i; }
+    i = i + 1;
+  }
+  if (gui_cmd_w[fills] == c.lay_w) { r = r | 16777216; }
+
+  // ================= 帧 11：进度 150 > max ⇒ 夹到满（不溢出容器）=================
+  gui_begin(&c, &in);
+  gui_progressbar(&c, "pb", 150, 100);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_cmd_w[fills] == c.lay_w) { r = r | 33554432; }
+
+  if (r == 67108863) { return 42; }
+  return r;
+}

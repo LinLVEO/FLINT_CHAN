@@ -1,0 +1,36 @@
+// memlib1.fl — mem_lib 验证：copy / set / eq（含 n=0、未触碰字节隔离）
+// 注意：FLINT 局部变量无默认值，缓冲先清零再断言「未触碰」位
+include "../../lib/mem_lib.fl"
+
+int main() {
+  int r = 0;
+  char a[8];
+  char b[8];
+  std::memset(a, 0, 8);
+  std::memset(b, 0, 8);
+
+  if (std::memset(a, 65, 4) == 4) r |= 1;
+  if (a[0] == 'A' && a[3] == 'A') r |= 2;
+  if (a[4] == 0) r |= 4;
+
+  if (std::memset(b, 66, 4) == 4) r |= 8;
+  if (std::memcmp(a, b, 4) == 0) r |= 16;
+
+  if (std::memcpy(b, a, 4) == 4) r |= 32;
+  if (std::memcmp(a, b, 4) == 1) r |= 64;
+
+  if (std::memcmp(a, b, 0) == 1) r |= 128;
+
+  if (std::memset(b, 0, 8) == 8) r |= 256;
+  if (b[0] == 0 && b[7] == 0) r |= 512;
+
+  std::memset(b, 0, 8);
+  if (std::memcpy(b, "xyz", 3) == 3) r |= 1024;
+  if (b[0] == 'x' && b[2] == 'z') r |= 2048;
+  if (b[3] == 0) r |= 4096;
+
+  if (std::memcmp(b, "abc", 3) == 0) r |= 8192;
+
+  if (r == 16383) return 42;
+  return r;
+}

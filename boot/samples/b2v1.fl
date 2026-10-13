@@ -1,0 +1,16 @@
+// b2v1.fl — B2v：重复 include 去重（同写法 + ./ 写法 + 菱形依赖 + 标准库两种写法）
+// 修前：b2v_b_val/incdup 重复定义 → 编译失败；修后：只展开一次，退出码 42
+include "b2v_a.fl"
+include "./b2v_a.fl"
+include "../../lib/num_lib.fl"
+include "../..//lib/num_lib.fl"
+int main() {
+  char b[12];
+  int r = 0;
+  if (b2v_a_val() == 42) r |= 1;
+  if (std::itoa(42, b) == 2) r |= 2;
+  if (b[0] == '4') r |= 4;
+  if (b[1] == '2') r |= 8;
+  if (r != 15) return 1;
+  return 42;
+}

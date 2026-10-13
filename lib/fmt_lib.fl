@@ -1,0 +1,71 @@
+// fmt_lib.fl — FLINT 标准库（第二批）：拼缓冲（位置游标式）
+// 用法：include "../../lib/fmt_lib.fl"（路径相对本文件目录解析）
+// 约定：buf + 写入位置 pos；每个函数返回新位置；末尾用 fmt_end 补结尾 0
+// 自包含：不依赖 num_lib —— include 无守卫，库间依赖会让用户重复 include 时撞重复定义
+// 命名：2026-09-09 用户拍板（std::fmt_str / fmt_int / fmt_hex / fmt_char / fmt_end）
+
+// 追加字符串，返回新位置
+int std::fmt_str(char *buf, int pos, char *s) {
+  int i = 0;
+  while (s[i] != 0) { buf[pos + i] = s[i]; i = i + 1; }
+  return pos + i;
+}
+
+// 追加十进制整数（含负号），返回新位置
+int std::fmt_int(char *buf, int pos, int n) {
+  char tmp[12];
+  int i = 0;
+  int neg = 0;
+  if (n < 0) { neg = 1; n = -n; }
+  if (n == 0) { tmp[0] = '0'; i = 1; }
+  while (n != 0) {
+    tmp[i] = '0' + n % 10;
+    n = n / 10;
+    i = i + 1;
+  }
+  int j = pos;
+  if (neg != 0) { buf[j] = '-'; j = j + 1; }
+  while (i > 0) {
+    i = i - 1;
+    buf[j] = tmp[i];
+    j = j + 1;
+  }
+  return j;
+}
+
+// 追加无符号 32 位十六进制（小写、无 0x 前缀），返回新位置
+int std::fmt_hex(char *buf, int pos, int n) {
+  char digits[16];
+  digits[0] = '0'; digits[1] = '1'; digits[2] = '2'; digits[3] = '3';
+  digits[4] = '4'; digits[5] = '5'; digits[6] = '6'; digits[7] = '7';
+  digits[8] = '8'; digits[9] = '9'; digits[10] = 'a'; digits[11] = 'b';
+  digits[12] = 'c'; digits[13] = 'd'; digits[14] = 'e'; digits[15] = 'f';
+  char tmp[8];
+  int i = 0;
+  int v = n;
+  if (v == 0) { tmp[0] = '0'; i = 1; }
+  while (v != 0 && i < 8) {
+    tmp[i] = digits[v & 15];
+    v = v >> 4;
+    i = i + 1;
+  }
+  int j = pos;
+  while (i > 0) {
+    i = i - 1;
+    buf[j] = tmp[i];
+    j = j + 1;
+  }
+  return j;
+}
+
+// 追加单字符，返回新位置
+int std::fmt_char(char *buf, int pos, int c) {
+  buf[pos] = c;
+  return pos + 1;
+}
+
+// 补结尾 0（buf 成为完整字符串），返回新位置
+int std::fmt_end(char *buf, int pos) {
+  buf[pos] = 0;
+  return pos;
+}

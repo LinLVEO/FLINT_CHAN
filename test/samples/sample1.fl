@@ -1,0 +1,12 @@
+// sample1.fl — tokenizer 测试样本：覆盖全部 token 类型
+int main() {
+  // 行注释测试
+  int a = 42;  /* 块注释 */
+  return a + 1 * 2 - 3 / 4 % 5;
+}
+
+/* 跨行
+   块注释 */
+int add(int x, int y) {
+  return x + y;
+}

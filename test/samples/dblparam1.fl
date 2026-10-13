@@ -1,0 +1,49 @@
+// v1.2.2 double 阶段2 第二步：函数**形参 double**（值走 XMM0-3，与 int 形参的 rcx/rdx/r8/r9 并行计数）
+// 位掩码 = 255（8 项，每项命中置 1<<k）——退出码即二进制成绩单，一眼看出哪一位没进去。
+//
+// ⚠️ 样本鉴别力设计（踩过坑后重写）：double 表达式的值**天然落在 xmm0**，所以「单 double 实参」的调用
+//    即使实现把参数错发到 GP 寄存器，被调函数读 xmm0 也会**凑巧读到正确值**（最后一次计算的残留）。
+//    因此每一项都把「通道错误」逼出来：
+//      ①②④ 多个 double 实参 / double 在前 int 在后 → xmm0 只能装一个，错位必现
+//      ③     第 1 个实参自身算了 double（写完 xmm0）→ 第 2 个参数必须来自**它自己的通道**
+//    实证：故意把 double 实参也塞进 GP 的变体编译器（tmp\variantB.exe）在本样本上退出码 240（红 ①②③④），
+//    而"只错一点"的实现在老版样本上能靠残留 xmm0 蒙过 6/8 项。
+double half(double x) { return x / 2.0; }              // 单 double 形参
+double mix(int a, double b) { return a + b; }          // int + double 混参（a→rcx、b→xmm0）
+double mix2(double a, int b) { return a * b; }         // double 在前、int 在后（a→xmm0、b→rcx）
+double take(double a, double b, double c, double d) { return a + b + c + d; }   // 4 个 double = XMM0-3
+double chain(double x) { return half(x) + half(x); }   // 形参转手给另一个 double 形参
+int gt(double x) { if (x > 1.5) return 1; return 0; }  // 形参参与 double 比较通路
+double fromint(int n) { return half(n); }              // int 实参 → double 形参（自动提升，C 语义）
+
+int main() {
+  int r = 0;
+
+  // ① 四个 double 形参 → XMM0-3 全用上，四个值互不相同（只用 xmm0 的实现 = 4×1.0 = 4 ≠ 10）
+  if (take(1.0, 2.0, 3.0, 4.0) == 10.0) r |= 1;
+
+  // ② 内层 double 调用结果当外层实参：half(2.0)=1.0 → 1+2+3+4 = 10
+  if (take(half(2.0), 2.0, 3.0, 4.0) == 10.0) r |= 2;
+
+  // ③ int+double 混参，且第 1 个实参自身算了 double（to_int(half(9)) 之后 xmm0 残留 4.5）：
+  //    正确 = 4 + 0.5 = 4.5 → 4；把 b 错发到 GP 的实现读到 xmm0 的 4.5 → 8.5 → 8
+  if (to_int(mix(to_int(half(9)), 0.5)) == 4) r |= 4;
+
+  // ④ double 在前、int 在后：1.5 * 4 = 6.0（位置与通道不能硬绑：b 必须来自 rcx 而不是 rdx）
+  if (mix2(1.5, 4) == 6.0) r |= 8;
+
+  // ⑤ 单 double 形参基本通路：5 / 2.0 = 2.5 → 2（形参根本没落槽的实现会得 0）
+  if (to_int(half(5)) == 2) r |= 16;
+
+  // ⑥ 形参转手（同通道再传一次）：half(3)+half(3) = 1.5+1.5 = 3.0
+  if (chain(3.0) == 3.0) r |= 32;
+
+  // ⑦ 形参走 double 比较：2.5 > 1.5 → 1
+  if (gt(2.5) == 1) r |= 64;
+
+  // ⑧ int 实参 → double 形参自动提升：7 / 2.0 = 3.5（**不能**退化成整数除 3）
+  if (fromint(7) == 3.5) r |= 128;
+
+  print(["dblparam 位掩码 = ", r, "\n"]);
+  return r;
+}

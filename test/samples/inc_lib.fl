@@ -1,0 +1,5 @@
+// inc_lib.fl — 被 include 的库：自带 api 声明 + 函数
+api kernel32 int GetTickCount(int);
+
+int inc_helper(int x) { return x * 2 + 1; }
+int inc_uptime(int d) { return GetTickCount(0) / d; }

@@ -1,0 +1,126 @@
+// mem1.fl -- 2026-09-22 (card T-20260922-021324, 3rd knife family 4 = right value as a DIRECT MEMORY OPERAND)
+//   sentinel for the "rv is a plain memory read with a compile-time address" tier.
+//   Old path: lv -> eax / push rax / rv -> eax / pop rcx / [xchg] / <op> eax,ecx -- 3~4 wasted instructions.
+//   Measured target (boot product of apps\m2_float, before this family): of the 48 xchg followed by `sub`,
+//   40 have an rv of the shape "int read at a frame-constant offset":
+//     local struct int field  = lea rcx,[rbp-off] + mov eax,[rcx+disp]   (kind 30)
+//     pointer -> int field    = mov rcx,[rbp-off] + mov eax,[rcx+disp]   (kind 32)
+//   Both addresses are computable at EMIT time => use them directly as memory operands:
+//     kind 30 => <op> eax,[rbp-(base-field)]
+//     kind 32 => keep the very same mov rcx,[rbp-off], then <op> eax,[rcx+disp]
+// PREMISE (measured, not assumed -- the A2 lesson: a sentinel must pin the premise too):
+//   the tier only fires when the LEFT value is a literal / non-promoted / non-leaf expression.
+//   If the left value is a PROMOTED variable (`s = s - v.a`), the A2 in-place-fusion tier handles the
+//   statement first (rv lands in eax, `sub rXd,eax`) and this tier never sees it -- so every grid cell
+//   below puts a LITERAL (or a non-promoted/array value) on the left, and the cells that intentionally
+//   keep `s - field` are marked as "fusion tier, correctness only".
+// Grid = form x target x PREMISE:
+//   bit 1    rv = LOCAL STRUCT int field, subtraction (direction sensitive: lv - mem, not mem - lv)
+//   bit 2    rv = POINTER -> int field, subtraction
+//   bit 4    the commutative family (+ * & | ^) with a memory rv (old path computed rv op lv)
+//   bit 8    disp32 on BOTH forms: composite offset past 128 for kind 30 (pad[60] in front) and a
+//            field 128 bytes into the struct for kind 32 ([rcx+disp32])
+//   bit 16   compound assignment (s -= v.b, fusion/em_apply path) stays correct next to the new tier
+//   bit 32   left value is NOT a leaf (array element / call result) with a memory rv
+//   bit 64   negative control: char widths (ty != 0) must fall back -- byte read is a movzx and the
+//            old path's xchg must stay (this is the cell that proves the ty guard)
+//   bit 128  negative control: rv IS an expression => must fall back (order kept)
+// expected 42 (all 8 bits lit)
+
+struct M4 { int a; int b; }
+struct M8 { int pad[32]; int v; }        // array field => v sits 128 bytes into the struct
+
+int m4_set(struct M4 *p, int a, int b) { p->a = a; p->b = b; return 0; }
+int m8_set(struct M8 *p, int x) { p->v = x; return 0; }
+int m4_hundred() { return 100; }
+
+int m4_sub_local() {              // bit 1: rv = local struct int field
+  struct M4 v;
+  int s = 0;
+  m4_set(&v, 7, 30);
+  s = 1000 - v.b;                 // 970   NEW TIER: mov eax,0x3e8 / sub eax,[rbp-d]
+  s = s - v.a;                    // 963   (s is not promoted here => also the new tier)
+  s = (500 - v.b) + (v.a - 3);    // 470 + 4 = 474
+  return s;                       // 474
+}
+int m4_sub_ptr(struct M4 *q) {    // bit 2: rv = pointer -> int field
+  int s = 0;
+  s = 2000 - q->b;                // 1970  NEW TIER: mov rcx,[rbp-off] / sub eax,[rcx+disp]
+  s = s - (3000 - q->a);          // 1970 - 2993 = -1023  (literal left => new tier again)
+  return s + 3000;                // 1977
+}
+int m4_commutative() {            // bit 4: + * & | ^ with a memory rv (literal left => new tier)
+  struct M4 v;
+  int s = 0;
+  m4_set(&v, 6, 5);
+  s = 100 + v.a;                  // 106
+  s = 7 * v.b;                    // 35   (imul eax,[mem])
+  s = 900 | v.a;                  // 906
+  s = 900 ^ v.a;                  // 902
+  s = 900 & v.a;                  // 4
+  return s;                       // 4
+}
+int m4_disp32(struct M4 *q, struct M8 *bp) {   // bit 8: disp32 on both forms
+  int pad[60];
+  struct M4 v;
+  int s = 0;
+  pad[0] = 1; pad[59] = 2;
+  m4_set(&v, 9, 40);
+  s = 700 - v.b;                  // 660  kind 30, composite offset past 128 => [rbp-disp32]
+  s = s - (600 - bp->v);          // 660 - 560 = 100   kind 32, field 128 in => [rcx+disp32]
+  s = s - (200 - q->b);           // 100 - 170 = -70   kind 32, small field => [rcx+disp8]
+  return s + pad[0] + pad[59];    // -70 + 1 + 2 = -67
+}
+int m4_compound() {               // bit 16: compound assignment (fusion/em_apply) stays correct
+  struct M4 v;
+  int s = 1000;
+  m4_set(&v, 3, 25);
+  s -= v.b;                       // 975
+  s = 2000 - v.a;                 // 1997  NEW TIER (literal left)
+  s += v.b;                       // 2022
+  return s;                       // 2022
+}
+int m4_nonleaf_lv() {             // bit 32: left value is not a leaf
+  struct M4 v;
+  int arr[3];
+  int i = 0;
+  int s = 0;
+  arr[0] = 500; arr[1] = 600; arr[2] = 700;
+  m4_set(&v, 4, 20);
+  while (i < 3) { s = s + (arr[i] - v.b); i = i + 1; }   // 480 + 580 + 680 = 1740
+  s = s + (m4_hundred() - v.a);   // 1740 + 96 = 1836   NEW TIER (call result on the left)
+  return s;                       // 1836
+}
+int m4_char_guard() {             // bit 64: char reads must fall back (byte width, ty != 0)
+  char ch[3];
+  int s = 100;
+  ch[0] = 5; ch[1] = 7; ch[2] = 9;
+  s = 100 - ch[0];                // 95   NEGATIVE CONTROL: old path keeps its xchg
+  s = 100 - ch[2];                // 91   NEGATIVE CONTROL
+  return s;                       // 91
+}
+int m4_neg() {                    // bit 128: rv is an expression
+  struct M4 v;
+  int s = 0;
+  m4_set(&v, 4, 30);
+  s = 1000 - (v.b + 1);           // 969  NEGATIVE CONTROL (rv = v.b + 1)
+  s = s - (v.b - 5);              // 944  NEGATIVE CONTROL (rv = v.b - 5)
+  return s;                       // 944
+}
+int main() {
+  struct M4 v;
+  struct M8 big;
+  int r = 0;
+  m4_set(&v, 7, 30);
+  m8_set(&big, 40);
+  if (m4_sub_local() == 474) { r = r | 1; }
+  if (m4_sub_ptr(&v) == 1977) { r = r | 2; }
+  if (m4_commutative() == 4) { r = r | 4; }
+  if (m4_disp32(&v, &big) == -67) { r = r | 8; }
+  if (m4_compound() == 2022) { r = r | 16; }
+  if (m4_nonleaf_lv() == 1836) { r = r | 32; }
+  if (m4_char_guard() == 91) { r = r | 64; }
+  if (m4_neg() == 944) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

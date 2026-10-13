@@ -1,0 +1,46 @@
+// b5a1.fl -- boot-side (双端) sample for lib\vec_lib.fl: generic vector, route V1.
+// Registered in boot\verify.ps1 as a positive case AND a 差分 case (boot vs real flint must
+// both give 42). Mechanism under test = 8-byte slot + pass-by-address, on the boot compiler.
+// Deliberately NO double: boot-side floating point is not wired yet (known boundary), so the
+// double round trip is covered on the real-flint side only (test\samples\vec1.fl bit4).
+include "vec_lib.fl"
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+
+int main() {
+  char *v = std::vec_new(1);
+  if (v == 0) { return 1; }
+
+  // int round trip
+  int a = -12345;
+  v = std::vec_push(v, &a);
+  int back = 0;
+  std::memcpy(&back, std::vec_get(v, 0), 8);
+  if (back != a) { return 2; }
+
+  // growth (cap 1 -> 2): element 0 must survive the move
+  int b = 777;
+  v = std::vec_push(v, &b);
+  int b0 = 0;
+  std::memcpy(&b0, std::vec_get(v, 0), 8);
+  if (b0 != a) { return 3; }
+  int b1 = 0;
+  std::memcpy(&b1, std::vec_get(v, 1), 8);
+  if (b1 != b) { return 4; }
+  if (std::vec_len(v) != 2) { return 5; }
+
+  // pointer round trip (MEM_TOP_DOWN -> above 4GB, so a 32-bit truncation would show)
+  int *hp = VirtualAlloc(0, 4096, 0x103000, 4);
+  if (hp == 0) { return 6; }
+  v = std::vec_push(v, &hp);
+  int *hq = 0;
+  std::memcpy(&hq, std::vec_get(v, 2), 8);
+  if (hq != hp) { return 7; }
+
+  // boundaries: past the end and negative both give 0; length is exact
+  if (std::vec_get(v, 3) != 0) { return 8; }
+  if (std::vec_get(v, 0 - 1) != 0) { return 9; }
+  if (std::vec_len(v) != 3) { return 10; }
+
+  std::vec_free(v);
+  return 42;
+}

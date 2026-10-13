@@ -1,0 +1,8 @@
+// var2.fl — 先声明后赋值 + 自增运算序列：x=1; x=x+1; x=x*10; = 20
+int main() {
+  int x;
+  x = 1;
+  x = x + 1;
+  x = x * 10;
+  return x;
+}

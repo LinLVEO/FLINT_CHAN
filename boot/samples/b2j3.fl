@@ -1,0 +1,15 @@
+// b2j3.fl — B2j 结构体字段 C 布局自检（int 4B/对齐4、指针 8B/对齐8、升序）
+//   struct S { int a; int *p; int b; int c; } → a@0 p@8 b@16 c@20
+//   断言 pc - pa = 20 字节（旧「向下 8 字节布局」会得到 -24）→ 期望 42
+struct S { int a; int *p; int b; int c; }
+int main() {
+  struct S s;
+  s.a = 1;
+  s.p = 0;
+  s.b = 2;
+  s.c = 39;
+  int *pa = &s.a;
+  int *pc = &s.c;
+  int d = pc - pa;
+  return s.a + s.b + s.c + d - 20;
+}

@@ -1,0 +1,68 @@
+// ui_text.fl — v1.0.5 char 应用消化实证：std::itoa → char 缓冲 → TextOutA 整串一次画
+//（替代 putnum 逐位 TextOutA 的 hack：数字文本现在 = 库函数 + 字节缓冲，UI 只画一次）
+// 链路 = ui1 自绘窗口骨架 + include char_lib.fl；自动退出 ~60 帧 → 退出码 7
+include "../../lib/num_lib.fl"
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 void PostQuitMessage(int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api kernel32 void Sleep(int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTTX";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0, "FLINTTX", "FLINT char text", 0x00CF0000, 100, 80, 360, 140, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  ShowWindow(h, 1);
+  // char 缓冲逐字节拼两行（"CPU xx" / "RAM xxx"），std::itoa 写数字段
+  char txt[24];
+  int L1, L2;
+  txt[0] = 'C'; txt[1] = 'P'; txt[2] = 'U'; txt[3] = ' ';
+  L1 = std::itoa(71, txt + 4);              // char* 指针算术传址 → 跨函数字节写
+  L1 = L1 + 4;
+  txt[8] = 'R'; txt[9] = 'A'; txt[10] = 'M'; txt[11] = ' ';
+  L2 = std::itoa(32767, txt + 12);
+  L2 = L2 + 12;
+  struct MSG m;
+  int running = 1;
+  int frame = 0;
+  int exitcode = 0;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) { running = 0; exitcode = 0; }
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      int *dc = GetDC(h);
+      TextOutA(dc, 20, 20, txt, L1);        // "CPU 71" 整串一次画
+      TextOutA(dc, 20, 44, txt + 8, L2);    // "RAM 32767" 整串一次画
+      ReleaseDC(h, dc);
+      frame++;
+      if (frame > 60) { exitcode = 7; running = 0; }
+      Sleep(16);
+    }
+  }
+  return exitcode;
+}

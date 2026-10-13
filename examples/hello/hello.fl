@@ -1,0 +1,13 @@
+// hello.fl -- the smallest FLINT program.
+//
+// Build:  flint.exe examples\hello\hello.fl        (writes hello.exe next to the source)
+// Run:    examples\hello\hello.exe
+//
+// Two things that surprise everyone at first:
+//   1. print takes an ARRAY of items:  print(["text", number, "\n"]);
+//   2. the exit code of the produced exe IS main's return value (handy for gates).
+int main() {
+  print(["hello, flint\n"]);
+  print(["2 + 3 = ", 2 + 3, "\n"]);
+  return 0;
+}

@@ -1,0 +1,82 @@
+// par1.fl -- 2026-09-22 (card T-20260921-232138, 4th knife A3-(2)): sentinel for "formals join the pool".
+// Criterion: after the prologue stores formal j into its frame slot, it also loads that slot into the
+//   formal's register (em_preg_load32, 32-bit so the slot's stale upper half is not dragged in)
+//   => loops stop re-reading the bound (n) from the frame every round.
+// Premise pinned too: the pool must have room (few locals); char/pointer formals must NOT be promoted.
+//   bit 1    single formal as the loop bound  (compare right operand = formal register)
+//   bit 2    four formals all used in arithmetic
+//   bit 4    a formal is ASSIGNED inside the body (goes to the register; the slot goes stale on purpose)
+//   bit 8    a formal passed as an argument (read from the register) + the callee's own formal promoted
+//   bit 16   cross-call survival: the call sits INSIDE the loop (a clobbered formal register shows up)
+//   bit 32   negative control: char formal + pointer formal are not promoted, values still right
+//   bit 64   big frame (>= 128) => formal slot via disp32 + save area via disp32
+//   bit 128  recursion with a promoted formal
+// expected 42 (all 8 bits lit)
+
+int p1_cnt(int n) {              // bit 1: formal as the loop bound
+  int i = 0;
+  while (i < n) { i = i + 1; }
+  return i;
+}
+int p1_add4(int a, int b, int c, int d) {   // bit 2: four formals in arithmetic
+  return a + b + c + d;
+}
+int p1_mut(int n) {              // bit 4: assigning to a formal
+  n = n - 3;
+  n = n * 2;
+  return n;
+}
+int p1_twice(int x) {            // bit 8: callee with a promoted formal (body is not inlinable)
+  int t = 0;
+  while (t < 1) { t = t + 1; }
+  return x * 2 + t - 1;
+}
+int p1_call(int n) {
+  int r = 0;
+  r = p1_twice(n);
+  return r;
+}
+int p1_keep(int n) {             // bit 16: multi-statement body => never inlined
+  int t = 0;
+  while (t < 3) { t = t + 1; }
+  return n + t;
+}
+int p1_loop(int n) {
+  int s = 0;
+  int i = 0;
+  while (i < 4) { s = s + p1_keep(n); i = i + 1; }
+  return s;
+}
+int p1_neg(char c, int *p) {     // bit 32: char/pointer formals must stay out of the pool
+  int r = 0;
+  if (c == 65) { r = r + 1; }
+  if (*p == 7) { r = r + 2; }
+  return r;
+}
+int p1_big(int n) {              // bit 64: big frame (20 array slots + locals)
+  int big[20];
+  int i = 0;
+  int s = 0;
+  while (i < 20) { big[i] = i; i = i + 1; }
+  i = 0;
+  while (i < 20) { s = s + big[i]; i = i + 1; }
+  return s + n;
+}
+int p1_rec(int n) {              // bit 128: recursion with a promoted formal
+  if (n <= 0) { return 0; }
+  return n + p1_rec(n - 1);
+}
+int main() {
+  int r = 0;
+  if (p1_cnt(5) == 5) { r = r | 1; }
+  if (p1_add4(1, 2, 3, 4) == 10) { r = r | 2; }
+  if (p1_mut(9) == 12) { r = r | 4; }
+  if (p1_call(21) == 42) { r = r | 8; }
+  if (p1_loop(7) == 40) { r = r | 16; }
+  int v = 7;
+  if (p1_neg(65, &v) == 3) { r = r | 32; }
+  if (p1_big(5) == 195) { r = r | 64; }
+  if (p1_rec(4) == 10) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

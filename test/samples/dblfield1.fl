@@ -1,0 +1,32 @@
+// v1.2.4 浮点阶段2 收尾（二）：结构体 double 字段
+// 位掩码 9 项 = 511。覆盖：double 字段读写 / 复合赋值 / 与 char·int 字段共存不互相踩 /
+//   字段作实参传入 double 形参 / to_int(字段)。
+// 布局口径：double 字段 8 字节、对齐 8（与 int* 字段同布局槽，真实 C 布局）；
+//   char 1 字节/对齐 1、int 4 字节/对齐 4 不变——第 6/7 项就是"没互相踩"的证据。
+double half(double x) { return x / 2.0; }
+
+struct Pt { char c; double x; double y; int tag; }
+
+int main() {
+  int r = 0;
+  struct Pt p;
+  p.c = 65;                        // 'A'
+  p.x = 1.25;
+  p.y = 2.5;
+  p.tag = 7;
+
+  if (p.x == 1.25) { r |= 1; }
+  if (p.y == 2.5) { r |= 2; }
+  if (p.x + p.y == 3.75) { r |= 4; }
+  p.x *= 4.0;                      // 5.0（字段复合赋值）
+  if (p.x == 5.0) { r |= 8; }
+  p.y += p.x;                      // 7.5
+  if (p.y == 7.5) { r |= 16; }
+  if (p.tag == 7) { r |= 32; }     // int 字段没被 double 写坏
+  if (p.c == 65) { r |= 64; }      // char 字段没被 double 写坏
+  if (half(p.y) == 3.75) { r |= 128; }   // 字段 → double 形参
+  if (to_int(p.x) == 5) { r |= 256; }
+
+  print(["p=(", p.x, ",", p.y, ") c=", p.c, " tag=", p.tag, " r=", r, "\n"]);
+  return r;   // 511
+}

@@ -1,0 +1,29 @@
+// sarp1.fl -- local struct with a fixed-length int array field: the frame must be big enough
+// for the WHOLE array.  boot used to size the frame from the field OFFSETS (C layout: 4 bytes
+// per int) while addressing array elements with an 8-byte stride, so the payload ran past the
+// frame into the caller's stack -> intermittent 0xC0000005 (card T-20260922-201154).
+//
+// Why 1300 (192*6 + 148): the array has 192 elements and every element is written with i*6.
+//   if the frame only covers the C-layout size (772 bytes = 96 slots) the tail of the array is
+//   written past the frame; those slots do not hold i*6 by the time the sum runs, so the sum
+//   cannot come out as 1296*... -- this is a value check, not just "does it crash".
+// Reference: struct S { int n; int a[192]; } -- n at byte 0, a at byte 4, elements 8 bytes apart
+//   => a[191] reaches 772 bytes => the frame needs 193 slots (0x620), same as real flint.
+struct S { int n; int a[192]; }
+
+int main() {
+  struct S s;
+  s.n = 1;
+  int i = 0;
+  while (i < 192) {
+    s.a[i] = i * 6;
+    i = i + 1;
+  }
+  int k = 1;
+  int sum = 0;
+  while (k < 192) {
+    sum = sum + s.a[k] / 6;
+    k = k + 1;
+  }
+  return sum + s.n;
+}

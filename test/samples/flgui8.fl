@@ -1,0 +1,63 @@
+// flgui8.fl — FLGUI M4e：**帧率档位**的无头契约样本（不建窗；只量内核侧"默认值/夹取/换算/不参与命令表"）
+// 为什么单开一个样本：
+//   · 档位的**默认值**是用户拍板过的（60fps）⇒ 必须有一条判据钉住，改默认值会被这一条当场抓住；
+//   · `0 = 不限速` 是个**特判分支**（周期 0 ⇒ 调用方不等）—— 特判只在"算周期"那一处，必须量到；
+//   · 档位**不许参与命令表**（同 M4d 时间注入那条纪律）：命令表逐字节变了就说明它漏进了布局/绘制；
+//   · 帧率与动画是**两个独立通道**（`frame_fps` / `anim_pct`）—— 互相不能串。
+// 判据（位掩码 12 位，全亮 = 4095 → return 42）：
+//   0 gui_init 默认 frame_fps == 60 ｜1 frame_fps=0（不限速）｜2 字段读回 0 ｜3 144 ｜4 字段读回 144
+//   5 负值 -5 夹到 0 ｜6 5000 夹到 1000 ｜7 gui_frame_ms(0)=0（不限速 ⇒ 不用等）
+//   8 gui_frame_ms(60)=16 ｜9 gui_frame_ms(144)=6（整数除法，真值 6.94 —— 高帧率档靠跟屏后端，见 §5.7）
+//   10 档位**不参与命令表**：改 fps 前后 cmdn 一字不变 ｜11 动画通道不受影响（anim_pct 仍 = 100）
+include "flgui_widgets.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int r = 0;
+  int n0 = 0;
+
+  gui_init(&c);
+  c.lay_w = 120;
+  c.lay_h = 80;
+
+  // ================= 一、默认值（用户拍板：60）=================
+  if (c.frame_fps == 60) { r = r | 1; }
+
+  // ================= 二、档位写入与夹取 =================
+  if (gui_frame_set(&c, 0) == 0) { r = r | 2; }          // 0 = 不限速
+  if (c.frame_fps == 0) { r = r | 4; }                   // **读回字段**：真写进去了
+  if (gui_frame_set(&c, 144) == 144) { r = r | 8; }
+  if (c.frame_fps == 144) { r = r | 16; }
+  if (gui_frame_set(&c, 0 - 5) == 0) { r = r | 32; }     // 负值夹到 0（不出现"负帧率"这种怪状态）
+  if (gui_frame_set(&c, 5000) == 1000) { r = r | 64; }   // 上限 1000（防手滑）
+
+  // ================= 三、周期换算（含 0 = 不限速的特判）=================
+  gui_frame_set(&c, 0);
+  if (gui_frame_ms(&c) == 0) { r = r | 128; }
+  gui_frame_set(&c, 60);
+  if (gui_frame_ms(&c) == 16) { r = r | 256; }           // 1000/60 = 16（整数）
+  gui_frame_set(&c, 144);
+  if (gui_frame_ms(&c) == 6) { r = r | 512; }            // 1000/144 = 6（整数；真值 6.94）
+
+  // ================= 四、档位不参与命令表（纯配置，不进布局/绘制）=================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.key = 0; in.ms = 0;
+  gui_frame_set(&c, 60);
+  gui_begin(&c, &in);
+  gui_label(&c, "fps");
+  gui_end(&c);
+  gui_dump(&c);
+  n0 = gui_cmd_n;
+  gui_frame_set(&c, 144);                                // 换档
+  gui_begin(&c, &in);
+  gui_label(&c, "fps");
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_cmd_n == n0) { r = r | 1024; }
+
+  // ================= 五、两个通道互相独立 =================
+  if (c.anim_pct == 100) { r = r | 2048; }
+
+  if (r == 4095) { return 42; }
+  return r;
+}

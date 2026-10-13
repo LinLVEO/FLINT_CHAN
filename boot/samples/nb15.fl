@@ -1,0 +1,6 @@
+// nb15.fl — 负例：share 必须由 new / share 变量初始化
+int main() {
+  int x = 1;
+  int *share p = &x;
+  return 0;
+}

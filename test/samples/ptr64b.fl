@@ -1,0 +1,16 @@
+// ptr64b.fl — v0.9 宽路径回归：数据段(>4GB 镜像基址)字符串地址的 比较/差/偏移链
+// 锁死 64 位 add/sub/cmp/test 编码对既有语义零改变（小差值场景新旧一致）
+// 期望退出码 0
+int main() {
+  int *a = "AAA";     // 4 字节（内容 3 + \0）
+  int *b = "BBB";     // 与 a 紧邻排布 → b = a + 4
+  if (a == b) return 1;
+  if (a > b) return 2;          // a 排布在前 → a < b（64 位 cmp）
+  int *c = a + 4;               // 64 位加 → 应等于 b（相邻排布）
+  if (c != b) return 3;
+  if ((b - a) != 4) return 4;   // 64 位地址差 = 4（地址差可算保持）
+  if (!(a && b)) return 5;      // 地址判真 test rax,rax
+  if (!a) return 6;
+  if (a && b && a < b) return 0;
+  return 7;
+}

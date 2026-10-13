@@ -1,0 +1,31 @@
+// probe_num.fl —— 诊断：FLINT 字面量与"读文件转数字"的行为（周期0 工具纪律）
+// 背景：bench_flint.cfg 里的 2097152 被读成 209（读 3 位就回），而 2000000 读对了。
+// 本探针分两段各自给判据：① 字面量能不能写 ② 逐位累加读到第几字节断
+int main() {
+  int a1 = 2097152;
+  int a2 = 2000000;
+  int a3 = 12345;
+  int a4 = 209;
+  print(["lit: 2097152=", a1, " 2000000=", a2, " 12345=", a3, " 209=", a4, "\n"]);
+
+  // 逐位：把 "209 7152" 这种形态手工喂进去，看在哪断
+  char s[16];
+  s[0] = 50; s[1] = 48; s[2] = 57; s[3] = 55; s[4] = 49; s[5] = 53; s[6] = 50; s[7] = 0;   // "2097152"
+  int i = 0;
+  int acc = 0;
+  int got = 0;
+  while (i < 16) {
+    int c = s[i];
+    print(["  byte", i, "=", c]);
+    if (c == 0) { print([" (NUL)\n"]); i = 99; }
+    else {
+      if (c >= 48) {
+        if (c <= 57) { acc = acc * 10 + (c - 48); got = 1; print([" dig acc=", acc, "\n"]); }
+        else { print([" stop\n"]); i = 99; }
+      } else { print([" stop\n"]); i = 99; }
+    }
+    i = i + 1;
+  }
+  print(["acc=", acc, " got=", got, "\n"]);
+  return acc & 255;
+}

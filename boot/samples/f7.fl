@@ -1,0 +1,1 @@
+int dbl(int x) { return x * 2; } int main() { int a = 5; int b = dbl(a); return dbl(b) + dbl(a) + 12; }

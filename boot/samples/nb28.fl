@@ -1,0 +1,6 @@
+// nb28 — B3a 负例：形参不能被函数体顶层同名变量遮蔽（对齐真 flint 实测）
+int f(int x) {
+  int x = 5;
+  return x;
+}
+int main() { return f(1); }

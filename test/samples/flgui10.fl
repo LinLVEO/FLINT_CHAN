@@ -1,0 +1,139 @@
+// flgui10.fl — FLGUI M4g：**位移 / 缩放**的无头契约样本（不建窗）
+// 这一刀**零新内核 API**（只用 M4f 的 `gui_anim` / `gui_lerp` ＋ 既有的 `gui_next_rect` / `gui_item_at`）⇒
+// 判据要钉的**不是新函数**，而是那条**接线**：动画值算出来以后，**真的按缓动结果进了布局矩形、并落进命令表**。
+//   （这条判据防的正是本项目最贵的一类假绿：算对了、也打印了，但**没接到布局上** —— "算了没用"看不见。）
+// app 侧的标准姿势（判据就是照这个姿势写的）：
+//   ① 两个目标矩形（收起态 / 展开态）② 进度 = `gui_anim(c, id, dur)` ③ 每个分量 `gui_lerp` ④ 交给布局原语
+//   ——"位移"改 x/y，"缩放"改 w/h，**同一个进度**驱动两者（这就是"缩放/位移"两样好看的实现口径）。
+// 判据（位掩码 14 位，全亮 = 16383 → return 42）：
+//   0..3  起步帧（t=0）：命令表里的 rect = 起始矩形 (0,80,40,10)
+//   4..7  中段（ms=80 / dur=160 ⇒ ease_out(128)=224）：rect = (52,115,92,45)
+//   8..9  到位（ms=5000）：rect = 目标矩形 (60,120,100,50) —— **不越界**
+//   10    位移与缩放**同源**：中段的 x 增量(52) == w 增量(52) ⇒ 两者吃的是同一个进度
+//   11    `anim_pct = 0`（关动画）：**同一帧就直接到位**（布局侧也走"立即完成"这条通道）
+//   12    `gui_item_at`**不动布局游标**（覆盖层的显示不许把后续控件带歪）
+//   13    有/无覆盖层时，"下一个控件"的矩形**逐字段相同**（这是 12 的行为级证据）
+include "flgui_widgets.fl"
+
+// 合成输入（8 个字段全填；`ms` = 本帧注入时间 —— 内核不取时）
+int f10_in(struct GuiInput *in, int ms) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0; in->wheel = 0; in->key = 0; in->ms = ms;
+  return ms;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiRect r;
+  struct GuiRect r2;
+  int rr = 0;
+  int idA = 0;
+  int idB = 0;
+  int t = 0;
+  int cx0 = 0;
+  int cy0 = 0;
+  int ch0 = 0;
+  int by1 = 0;
+  int by2 = 0;
+
+  gui_init(&c);
+  idA = gui_id("m4gA");
+  idB = gui_id("m4gB");
+
+  // ================= 一、起步帧（t = 0 ⇒ 起始矩形）=================
+  f10_in(&in, 0);
+  gui_begin(&c, &in);
+  t = gui_anim(&c, idA, 160);
+  r.x = gui_lerp(0, 60, t);       // 位移：x 0 → 60
+  r.y = gui_lerp(80, 120, t);     // 位移：y 80 → 120
+  r.w = gui_lerp(40, 100, t);     // 缩放：宽 40 → 100
+  r.h = gui_lerp(10, 50, t);      // 缩放：高 10 → 50
+  gui_next_rect(&c, &r);
+  gui_label(&c, "m4g");
+  gui_end(&c);
+  if (gui_cmd_n >= 1) {
+    if (gui_cmd_x[0] == 0) { rr = rr | 1; }
+    if (gui_cmd_y[0] == 80) { rr = rr | 2; }
+    if (gui_cmd_w[0] == 40) { rr = rr | 4; }
+    if (gui_cmd_h[0] == 10) { rr = rr | 8; }
+  }
+
+  // ================= 二、中段（进度 224/256 ⇒ 各分量按同一进度插值）=================
+  f10_in(&in, 80);
+  gui_begin(&c, &in);
+  t = gui_anim(&c, idA, 160);
+  r.x = gui_lerp(0, 60, t);
+  r.y = gui_lerp(80, 120, t);
+  r.w = gui_lerp(40, 100, t);
+  r.h = gui_lerp(10, 50, t);
+  gui_next_rect(&c, &r);
+  gui_label(&c, "m4g");
+  gui_end(&c);
+  if (gui_cmd_x[0] == 52) { rr = rr | 16; }
+  if (gui_cmd_y[0] == 115) { rr = rr | 32; }
+  if (gui_cmd_w[0] == 92) { rr = rr | 64; }
+  if (gui_cmd_h[0] == 45) { rr = rr | 128; }
+  // 位移与缩放同源：x 增量 52−0 = 52；w 增量 92−40 = 52（同一个 t ⇒ 两个增量必然相等）
+  if ((gui_cmd_x[0] - 0) == (gui_cmd_w[0] - 40)) { rr = rr | 1024; }
+
+  // ================= 三、到位（t 饱和 ⇒ 精确落在目标，不越界）=================
+  f10_in(&in, 5000);
+  gui_begin(&c, &in);
+  t = gui_anim(&c, idA, 160);
+  r.x = gui_lerp(0, 60, t);
+  r.y = gui_lerp(80, 120, t);
+  r.w = gui_lerp(40, 100, t);
+  r.h = gui_lerp(10, 50, t);
+  gui_next_rect(&c, &r);
+  gui_label(&c, "m4g");
+  gui_end(&c);
+  if (gui_cmd_x[0] == 60 && gui_cmd_y[0] == 120) { rr = rr | 256; }
+  if (gui_cmd_w[0] == 100 && gui_cmd_h[0] == 50) { rr = rr | 512; }
+
+  // ================= 四、关动画（anim_pct = 0）⇒ 同一帧就到位 =================
+  gui_anim_set(&c, 0);
+  f10_in(&in, 5000);
+  gui_begin(&c, &in);
+  t = gui_anim(&c, idB, 160);     // 换一个 ID：它从没起过，照样"立即到位"
+  r.x = gui_lerp(0, 60, t);
+  r.y = gui_lerp(80, 120, t);
+  r.w = gui_lerp(40, 100, t);
+  r.h = gui_lerp(10, 50, t);
+  gui_next_rect(&c, &r);
+  gui_label(&c, "m4g");
+  gui_end(&c);
+  if (gui_cmd_x[0] == 60 && gui_cmd_y[0] == 120 && gui_cmd_w[0] == 100 && gui_cmd_h[0] == 50) { rr = rr | 2048; }
+  gui_anim_set(&c, 100);
+
+  // ================= 五、覆盖层（gui_item_at）不许动布局游标 =================
+  // 先量"没有覆盖层"时第二个控件落在哪
+  f10_in(&in, 0);
+  gui_begin(&c, &in);
+  gui_label(&c, "a");
+  gui_label(&c, "b");
+  gui_end(&c);
+  if (gui_cmd_n >= 2) { by1 = gui_cmd_y[1]; }
+
+  // 再量"有覆盖层"时第二个控件 —— 覆盖层插在中间，位置必须**一字不差**
+  f10_in(&in, 0);
+  gui_begin(&c, &in);
+  gui_label(&c, "a");
+  cx0 = c.cur_x; cy0 = c.row_y; ch0 = c.row_h;      // 游标快照
+  r2.x = 5; r2.y = 5; r2.w = 40; r2.h = 10;
+  gui_item_at(&c, &r2);                             // 覆盖层：**直接钉死当前项矩形**
+  gui_text_put(&c, "");
+  if (gui_clip_visible(&c)) { gui_push(&c, 1); }
+  if (c.cur_x == cx0 && c.row_y == cy0 && c.row_h == ch0) { rr = rr | 4096; }   // 游标三项原样
+  gui_label(&c, "b");
+  gui_end(&c);
+  if (gui_cmd_n >= 3) { by2 = gui_cmd_y[2]; }
+  if (by1 == by2 && by1 != 0) { rr = rr | 8192; }
+
+  print(["FLGUI10 t0_rect=", 0, ",", 80, ",", 40, ",", 10, " mid_t=", 224,
+         " b_y_no_overlay=", by1, " b_y_with_overlay=", by2, "\n"]);
+  print(["FLGUI10 cursor a: x=", cx0, " row_y=", cy0, " row_h=", ch0, " r=", rr, "\n"]);
+  gui_dump(&c);
+
+  if (rr == 16383) { return 42; }
+  return rr;
+}

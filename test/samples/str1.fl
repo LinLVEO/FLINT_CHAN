@@ -1,0 +1,6 @@
+// str1.fl — 相邻字符串排布地址差：a="AB"(3B含\0) b="C" → b-a = 3
+int main() {
+  int a = "AB";
+  int b = "C";
+  return b - a;
+}

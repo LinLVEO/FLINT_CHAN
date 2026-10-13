@@ -1,0 +1,5 @@
+// io_api_lib.fl — 前置条件样本：库自带 api 声明，且被 include 在函数定义之后
+// （io 库落地前提；v1.0.3 起 api 声明可任意文件顶层、驱动会前移到单元头部）
+api kernel32 int GetTickCount();
+
+int io_api_tick() { return GetTickCount(); }

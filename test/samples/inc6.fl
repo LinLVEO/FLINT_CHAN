@@ -1,0 +1,6 @@
+// inc6.fl — 表达式混合：x=5; return x++ + ++x; = 5 + 7 = 12
+// x++ 用旧值 5（x→6），++x 前缀用新值 7（x→7）
+int main() {
+  int x = 5;
+  return x++ + ++x;
+}

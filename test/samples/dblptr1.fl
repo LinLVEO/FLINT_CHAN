@@ -1,0 +1,63 @@
+// dblptr1.fl —— v1.2.5 double 指针/引用（位掩码样本：每项 r |= 1<<i，退出码即成绩单 = 131071）
+// 覆盖：&d 取址 / double* 变量 / *p 读 / *p 写 / p[i] 读 / p[i] 写 / 裸指针字节步进 /
+//       double* 形参 + double* 返回 / 结构体 double* 字段（解引用 + 下标）/ double& 引用
+//       （读 / 写 / 复合赋值 / 当 double 实参）+ double& **形参**（callee 改调用方对象）。
+// ⚠️ 本文件故意把 main 写在两个被调函数**之前**：前向调用要考预扫描有没有把两件事记进函数表——
+//    ① 指针返回的**指向类型**（否则 `*pick(...)` 按 int 读 4 字节 = 静默错值）
+//    ② `double *a` 形参走 **GP**（地址）而不是 XMM（否则整型实参塞进 xmm0 = 静默传垃圾）
+struct Box { double *p; double v; }
+
+int main() {
+  int r = 0;
+
+  double d = 1.5;
+  double *p = &d;                 // ① 取址 + double* 变量
+  if (to_int(*p) == 1) r |= 1;    // ② *p 读（8 字节 SSE）
+  *p = 2.5;                       // ③ *p 写
+  if (to_int(d) == 2) r |= 2;
+
+  double a[3];
+  a[0] = 10.5; a[1] = 20.5; a[2] = 30.5;
+  double *q = a;                  // 数组名作表达式 = 指向首元素
+  if (to_int(q[1]) == 20) r |= 4; // ④ p[i] 读（下标按 8 字节缩放）
+  q[1] = 21.5;                    // ⑤ p[i] 写
+  if (to_int(a[1]) == 21) r |= 8;
+
+  double *t = q + 16;             // 裸指针 ± 是**字节**步进（16 = 两个 double）
+  if (to_int(*t) == 30) r |= 16;  // ⑥ 地址链上解引用读
+  *t = 33.5;                      // ⑦ 地址链上解引用写
+  if (to_int(a[2]) == 33) r |= 32;
+
+  if (to_int(*pick(a, 0)) == 10) r |= 64;   // ⑧ double* 形参 + double* 返回（前向调用）
+  double *w = pick(a, 2);
+  if (to_int(*w) == 33) r |= 128;           // ⑨ 返回的指针赋值后再解引用
+
+  struct Box b;
+  b.p = &d;
+  b.v = 7.5;
+  if (to_int(*b.p) == 2) r |= 256;          // ⑩ 结构体 double* 字段解引用读
+  *b.p = 4.5;                               // ⑪ 经字段写回别名对象
+  if (to_int(d) == 4) r |= 512;
+  if (to_int(b.p[0]) == 4) r |= 1024;       // ⑫ double* 字段下标读
+
+  double &ref = d;                // ⑬ double& 引用绑定
+  ref += 1;                       // ⑭ 引用复合赋值（int 右值自动提升成 1.0）
+  if (to_int(ref) == 5) r |= 2048;          // ⑮ 引用读
+  if (twice(ref) == 10) r |= 4096;          // ⑯ 引用当 double 实参（值走 XMM 通道）
+
+  if (addhalf(ref) == 6) r |= 8192;         // ⑰ double& **形参**：callee 里改的就是调用方对象（5.5+0.5=6）
+  if (to_int(d) == 6) r |= 16384;           // ⑱ 别名没走错对象（d 已被 callee 改成 6.0）
+
+  ref = 8.5;                                // ⑲ 直接赋值给 double&（间接 SSE 写路径，非复合）
+  if (to_int(d) == 8) r |= 32768;           // ⑳ 别名对象确实被改成 8.5（写宽 8 字节，不是 32 位半截）
+
+  double fresh = 3.5;                       // ㉑ 故意让 xmm0 里留下"别的东西"（3.5）当残渣
+  if (to_int(ref) == 8) r |= 65536;         // ㉒ double& 读：实现若退回整数路径，xmm0 里是 3.5 的残渣
+                                            //    → 这 8.5 会被算成 3.5（"值恰好落在约定寄存器"那类假绿）
+
+  return r;
+}
+
+double *pick(double *a, int i) { return a + i * 8; }
+int twice(double x) { return to_int(x) * 2; }
+int addhalf(double &x) { x += 0.5; return to_int(x); }

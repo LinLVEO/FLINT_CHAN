@@ -1,0 +1,5 @@
+// pr1.fl — B2g：print 内建（字符串/整数/负数段 + 换行）
+int main() {
+  print(["pr1 ", 42, " ", 0 - 7, "\n"]);
+  return 42;
+}

@@ -1,0 +1,52 @@
+// apifont1.fl — 14 参 API（CreateFontA 真实签名）+ 字形层：**参数读回验证**
+// v1.4.0 起 api 声明上限 16（4 寄存器 + 12 栈参）；本样本是「上限提到 14 且栈参真的各就各位」的证据。
+// 每个参数都给可区分的值，建完字后读回 LOGFONTA 逐字段比对：
+//   第 1 参 lfHeight  = 16（寄存器 rcx）        → 读回 height
+//   第 5 参 lfWeight  = 700（栈槽 1）           → 读回 weight
+//   第 9 参 lfCharSet = 1（栈槽 5）             → 读回 charset
+//   第 12 参 lfQuality = 5（栈槽 8，ClearType）  → 读回 quality
+//   第 14 参 lfFaceName = "Consolas"（末栈槽）   → GetTextFaceA 读回名字
+// 返回位掩码：1 dc ／2 句柄／4 高度／8 字重／16 字符集／32 渲染质量／64 字体名 = 127 全绿。
+// （这是"浮窗还原第一步-字形层"的地基测试：没有这层，后面量宽/排版全部没意义。）
+api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, int);
+api gdi32 ptr SelectObject(int, int);
+api gdi32 int GetObjectA(int, int, int);
+api gdi32 int GetTextFaceA(int, int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+
+int main() {
+  char buf[64];
+  int r = 0;
+
+  int *dc = GetDC(0);
+  if (dc == 0) return r;                 // 无屏幕 DC：直接返回 0（调用方会看到位掩码缺位）
+  r = r | 1;
+
+  int *f = CreateFontA(16, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, "Consolas");
+  if (f == 0) { ReleaseDC(0, dc); return r; }
+  r = r | 2;
+
+  SelectObject(dc, f);
+
+  // LOGFONTA 前 28 字节：lfHeight@0 lfWidth@4 lfEscapement@8 lfOrientation@12 lfWeight@16
+  //                      lfItalic@20 lfUnderline@21 lfStrikeOut@22 lfCharSet@23
+  //                      lfOutPrecision@24 lfClipPrecision@25 lfQuality@26 lfPitchAndFamily@27
+  GetObjectA(f, 64, buf);
+  int hgt = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
+  int wgt = buf[16] | (buf[17] << 8) | (buf[18] << 16) | (buf[19] << 24);
+  int cs = buf[23];
+  int ql = buf[26];
+  if (hgt == 16) r = r | 4;
+  if (wgt == 700) r = r | 8;
+  if (cs == 1) r = r | 16;
+  if (ql == 5) r = r | 32;
+
+  // 字体名（末栈槽的指针是否完整：读出来必须是 Consolas，不是空串/垃圾）
+  GetTextFaceA(dc, 64, buf);
+  if (buf[0] == 67 && buf[1] == 111 && buf[2] == 110 && buf[3] == 115
+      && buf[4] == 111 && buf[5] == 108 && buf[6] == 97 && buf[7] == 115) r = r | 64;
+
+  ReleaseDC(0, dc);
+  return r;
+}

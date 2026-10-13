@@ -1,0 +1,6 @@
+// neg-inttoptr.fl -- -strict ①: int 值传给 int* 形参（默认静默通过 = T1 缺口）
+int take(int *p) { return *p; }
+int main() {
+  int n = 5;
+  return take(n);
+}

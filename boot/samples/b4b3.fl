@@ -1,0 +1,17 @@
+// b4b3 — B4b：char 值返回写入各种 char 目标（struct 字段 / char 数组 / 裸指针 / char 形参）
+struct S { char c; int v; }
+char f() { return 'Z'; }          // 90
+int put(char c) { return c; }     // char 值形参（真 flint 支持；按字节截断）
+
+int main() {
+  struct S s;
+  s.c = f();                      // char 字段（1 字节写）
+  char buf[4];
+  buf[0] = f();                   // char 数组元素
+  char *p = buf;
+  p[1] = f();                     // 裸指针字节写
+  p[2] = f() + 1;                 // 91（表达式按 int 语义，落 char 目标时截断）
+  int r = put(f());               // 90
+  int t = put(300);               // 44（char 形参按字节截断，真 flint 实测 44）
+  return (s.c - 90) + (buf[0] - 90) + (p[1] - 90) + (p[2] - 91) + (r - 90) + (t - 44) + 42;
+}

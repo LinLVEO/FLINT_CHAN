@@ -1,0 +1,133 @@
+// shf1.fl -- 2026-09-22 (card T-20260922-021324, 3rd knife family 3 = shifts: count straight to cl / imm8)
+//   sentinel for the "shift count" tier. Old path: lv -> eax / push rax / count -> eax / pop rcx /
+//   xchg eax,ecx / shl|sar eax,cl  (4 instructions of pure shuffling). Measured target (boot product
+//   of apps\m2_float, before this family): 36 xchg followed by shl/sar, of which 32 have a
+//   COMPILE-TIME CONSTANT count, 3 a pool register, 1 a pointer->field read.
+//   New tier: constant  => C1 /4|/7 ib  (shl|sar eax, imm8 -- no eax, no cl)
+//             leaf      => mov ecx,<leaf> + D3 /4|/7
+//             memory    => mov ecx,[rbp-d] / mov rcx,[rbp-off]+mov ecx,[rcx+disp] + D3 /4|/7
+// Grid = form x target x PREMISE:
+//   bit 1    constant count, ARITHMETIC >> (incl. a negative shifted value)
+//   bit 2    constant count, << with the MASKING BOUNDARIES: 0 / 31 / 32 / 33 / 300 / -1
+//            (hardware masks imm8 and cl to 5 bits alike => must be bit-for-bit the same as old path)
+//   bit 4    count = POOL REGISTER (3rd declared local => high register, REX.R path in mov ecx,rXd)
+//   bit 8    count = frame SLOT, address taken so it can never be promoted, AND the slot offset is
+//            past 128 bytes (pad[20] in front) => exercises the disp32 form
+//   bit 16   count = pointer -> int field (kind 32): mov rcx,[rbp-off] then mov ecx,[rcx+disp]
+//   bit 32   count = LOCAL STRUCT int field (kind 30): composite address => mov ecx,[rbp-d]
+//   bit 64   shifted value is NOT a leaf (array element / call result) + compound assignment x >>= 3
+//   bit 128  negative control: count IS an expression => must fall back to the old path (order kept)
+// expected 42 (all 8 bits lit)
+
+struct S3 { int a; int b; }
+
+int s3_set(struct S3 *p, int a, int b) { p->a = a; p->b = b; return 0; }
+int s3_five() { return 10; }
+
+int s1_imm_sar() {                // bit 1: constant count, >>
+  int x = 1000;
+  int y = x >> 3;                 // 125
+  int n = -1000;
+  int m = n >> 3;                 // -125 (arithmetic shift keeps the sign)
+  int z = y >> 2;                 // 31
+  return y * 100 + z + m + 1000;  // 12500 + 31 - 125 + 1000 = 13406
+}
+int s1_imm_shl() {                // bit 2: constant count, << with masking boundaries
+  int a = 3;
+  int b = a << 4;                 // 48
+  int c = 5;
+  int d = c << 0;                 // 5      (imm8 = 0)
+  int e = 1;
+  int f = e << 31;                // 0x80000000
+  int g = 1;
+  int h = g << 33;                // 33 & 31 = 1  -> 2
+  int i = 1;
+  int j = i << 300;               // 300 & 31 = 12 -> 4096
+  int k = 8;
+  int l = k << -1;                // -1 & 31 = 31 -> 8 << 31 = 0
+  int s = 0;
+  s = s * 10 + b;                 // 48
+  s = s * 10 + d;                 // 485
+  s = s * 10 + (f >> 24);         // 4850 - 128 = 4722
+  s = s * 10 + h;                 // 47222
+  s = s * 10 + (j >> 10);         // 472224
+  s = s * 10 + l;                 // 4722240
+  return s;                       // 4722240
+}
+int s1_pool() {                   // bit 4: count = pool register (4 locals => all promoted)
+  int a = 2;
+  int i = 3;
+  int sh = 3;
+  int r = 1;
+  r = r << sh;                    // 8
+  r = r << sh;                    // 64
+  r = r >> a;                     // 16
+  r = (r + i) << sh;              // (16 + 3) << 3 = 152
+  return r;                       // 152
+}
+int s1_slot() {                   // bit 8: count = frame slot, offset past 128 bytes (disp32)
+  int pad[20];
+  int x = 5;
+  int sh = 3;
+  int *ps = &sh;                  // address taken => sh can never be promoted
+  int s = 0;
+  pad[0] = 1;
+  *ps = 4;                        // sh = 4 through the pointer (slot form is kept)
+  s = x << sh;                    // 5 << 4 = 80
+  s = s >> sh;                    // 80 >> 4 = 5
+  return s + pad[0] + 36;         // 5 + 1 + 36 = 42
+}
+int s1_ptrfield(struct S3 *q) {   // bit 16: count = pointer -> int field
+  int x = 1024;
+  int s = 0;
+  s = x >> q->b;                  // 1024 >> 3 = 128
+  s = s << q->a;                  // 128 << 2 = 512
+  s = s >> q->b;                  // 512 >> 3 = 64
+  return s;                       // 64
+}
+int s1_local_field() {            // bit 32: count = local struct int field (composite address)
+  struct S3 v;
+  int x = 4096;
+  int s = 0;
+  s3_set(&v, 2, 3);
+  s = x >> v.b;                   // 4096 >> 3 = 512
+  s = s << v.a;                   // 512 << 2 = 2048
+  s = s >> v.b;                   // 2048 >> 3 = 256
+  return s;                       // 256
+}
+int s1_nonleaf() {                // bit 64: shifted value non-leaf + compound assignment
+  int arr[4];
+  int sh = 2;
+  int s = 0;
+  arr[0] = 64; arr[1] = 128; arr[2] = 256; arr[3] = 512;
+  s = arr[2] >> sh;               // 256 >> 2 = 64   (array element on the left)
+  s = s << sh;                    // 256
+  s >>= 3;                        // 32   (compound assignment: a different emit path)
+  s = s + (s3_five() >> 1);       // 32 + (10 >> 1) = 37
+  return s;                       // 37
+}
+int s1_neg() {                    // bit 128: negative control -- count is an expression
+  int a = 2;
+  int b = 3;
+  int x = 4096;
+  int s = 0;
+  s = x >> (a + b);               // 4096 >> 5 = 128
+  s = s << (a * b + 1);           // 128 << 7 = 16384
+  s = s >> (b + b);               // 16384 >> 6 = 256
+  return s;                       // 256
+}
+int main() {
+  struct S3 v;
+  int r = 0;
+  s3_set(&v, 2, 3);
+  if (s1_imm_sar() == 13406) { r = r | 1; }
+  if (s1_imm_shl() == 4722240) { r = r | 2; }
+  if (s1_pool() == 152) { r = r | 4; }
+  if (s1_slot() == 42) { r = r | 8; }
+  if (s1_ptrfield(&v) == 64) { r = r | 16; }
+  if (s1_local_field() == 256) { r = r | 32; }
+  if (s1_nonleaf() == 37) { r = r | 64; }
+  if (s1_neg() == 256) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

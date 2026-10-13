@@ -1,0 +1,5 @@
+// nb17.fl — B2n 负例：&未定义函数（boot 必须报错）
+int main() {
+  int *p = &no_such_fn;
+  return 0;
+}

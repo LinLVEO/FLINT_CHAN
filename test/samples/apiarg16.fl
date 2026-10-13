@@ -1,0 +1,14 @@
+// apiarg16.fl — v1.4.0 API 实参上限 12 → 16 的**栈参逐位验证**
+// 动机：CreateFontA 是 14 参（字形层必需），旧上限 12 直接卡住浮窗还原。
+// 鉴别力：把第 5..16 个实参（正好是栈上 12 个槽）当 printf 的 %d 逐个打印出来比 stdout——
+//   任何"栈槽偏移算错/右→左求值落位错/回收量算错"都会让某一位数字错位或变垃圾，
+//   而不是像"编译过 + 没崩"那样照样绿。
+// 位次：1-4 = rcx/rdx/r8/r9（寄存器）｜5-16 = [rsp+32+(i-5)*8]（栈参）
+api msvcrt int pf16(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int) as "printf";
+
+int main() {
+  int n = pf16("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+               1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  if (n <= 0) return 1;   // printf 返回写出字符数；<=0 = 调用本身失败
+  return 42;
+}

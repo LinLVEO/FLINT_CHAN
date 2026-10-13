@@ -1,0 +1,23 @@
+// b5b1.fl -- boot-side (双端) smoke for the extracted lib\ui_lib.fl —— **已注册**（$pos + $diff）
+//
+// 2026-09-17 留证结论（已修复）：boot 曾编不过 ——
+//   parse err=-175 token=912 pos=5354 text=';' line 122:
+//   api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, int);
+// 根因 = **真 flint 的 API 实参上限 v1.4.0 已提到 16**（flint.h:246 API_MAX_ARGS），boot 侧仍写死 12。
+// **同日修复**（任务卡 T-20260917-215230）：boot/lib_parse.fl 的 `argc > 12` → `argc > 16`（单常量改动；
+//   发射器本就把第 5 个起的实参按 Win64 放到 [rsp+32+8k]，不需要改）。改后 boot 编过、产物退出码 42，
+//   真 flint 侧同为 42 ⇒ 本条进 $pos + $diff，**ui_lib 的 boot 双端覆盖缺口补上**。
+//
+// 覆盖口径：本样本只做「整库能被 boot 吃下 + ui_make 真建出窗口」这条冒烟（失败即 return 90）；
+// 组件层（按钮/勾选/滚动/裁剪）的行为断言仍只在真 flint 侧 `test\samples\ui_widgets.fl`。
+include "ui_lib.fl"
+
+int main() {
+  struct WndSt wnd;
+  wnd.cls = "FLINTB5B1";
+  wnd.w = 200;
+  wnd.ht = 80;
+  wnd.alpha = 255;
+  if (!ui_make(&wnd)) return 90;
+  return 42;
+}

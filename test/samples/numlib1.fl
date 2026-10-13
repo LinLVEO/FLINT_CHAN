@@ -1,0 +1,40 @@
+// numlib1.fl — num_lib 验证：to_text / from_text / to_hex / digit_count
+// 自洽设计：不依赖其他库，用 from_text 回读做往返断言
+include "../../lib/num_lib.fl"
+
+int main() {
+  int r = 0;
+  char b[16];
+
+  if (std::itoa(0, b) == 1) r |= 1;
+  if (std::atoi(b) == 0) r |= 2;
+
+  if (std::itoa(12345, b) == 5) r |= 4;
+  if (std::atoi(b) == 12345) r |= 8;
+
+  if (std::itoa(-42, b) == 3) r |= 16;
+  if (std::atoi(b) == -42) r |= 32;
+
+  if (std::itoa(2147483647, b) == 10) r |= 64;
+  if (std::atoi(b) == 2147483647) r |= 128;
+
+  if (std::atoi("  +7") == 7) r |= 256;
+  if (std::atoi("-13abc") == -13) r |= 512;
+  if (std::atoi("xyz") == 0) r |= 1024;
+
+  if (std::itohex(0, b) == 1) r |= 2048;
+  if (b[0] == '0') r |= 4096;
+  if (std::itohex(255, b) == 2) r |= 8192;
+  if (std::itohex(0xDEADBEEF, b) == 8) r |= 16384;
+  if (b[0] == 'd' && b[1] == 'e' && b[2] == 'a' && b[3] == 'd') r |= 32768;
+  if (b[4] == 'b' && b[5] == 'e' && b[6] == 'e' && b[7] == 'f') r |= 65536;
+  if (std::itohex(-1, b) == 8) r |= 131072;
+  if (b[0] == 'f' && b[7] == 'f') r |= 262144;
+
+  if (std::numlen(0) == 1) r |= 524288;
+  if (std::numlen(-42) == 3) r |= 1048576;
+  if (std::numlen(2147483647) == 10) r |= 2097152;
+
+  if (r == 4194303) return 42;
+  return r;
+}

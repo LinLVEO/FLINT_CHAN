@@ -1,0 +1,19 @@
+// dir1a.fl — 2026-09-21（卡 T-20260921-215305 第一刀）：**二元运算右值直寻址档**（右值 = 本地 int 标量）
+// 期望退出码 = 255（8 位全亮）：六种运算各占一位 + 两条"左值立即数"的方向位 + 两条老路负对照。
+// 若某分支的"方向 / 宽度 / 寄存器约定"错了，对应位不亮 —— 这一刀改的就是这里的发射路径。
+int main() {
+  int a = 100;
+  int b = 7;
+  int r = 0;
+  if (a + b == 107) { r = r | 1; }        // add eax,[rbp-off]
+  if (a - b == 93) { r = r | 2; }         // sub eax,[rbp-off]（方向：lv - rv）
+  if (a * b == 700) { r = r | 4; }        // imul eax,[rbp-off]
+  if ((a & b) == 4) { r = r | 8; }        // and eax,[rbp-off]
+  if ((a ^ b) == 99) { r = r | 16; }      // xor eax,[rbp-off]
+  if ((a | b) == 103) { r = r | 32; }     // or eax,[rbp-off]
+  int c = 50;
+  if (3 + c == 53) { r = r | 64; }        // 左值立即数：add eax,[rbp-off]
+  if (100 - c == 50) { r = r | 128; }     // 左值立即数：sub eax,[rbp-off]（方向敏感）
+  if (r == 255) { r = 42; }               // 8 位全亮才 42（$diff 口径）；否则退出码 = 未亮的位掩码
+  return r;
+}

@@ -1,0 +1,9 @@
+// b2j2.fl — B2j 解引用宽度自检：char* 1 字节 / int* 4 字节（elem 类型决定读写宽）：期望 42
+int main() {
+  char buf[4];
+  char *c = buf;
+  *c = 40;
+  *(c + 1) = 2;
+  int x = *c + buf[1];
+  return x;
+}

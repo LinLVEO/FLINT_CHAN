@@ -1,0 +1,19 @@
+// b2p1.fl — B2p 正向：函数顶层托管变量 + 块内/循环内**普通**变量混用必须照常编译
+// （修复「块内托管变量」误伤防护：只有 own/share 受限，普通变量块内声明不受影响）
+int main() {
+  int *own p = new int;
+  *p = 10;
+  int i = 0;
+  int sum = 0;
+  while (i < 3) {
+    int t = i * 2;                 // 循环体内普通变量：允许
+    sum = sum + t;
+    i = i + 1;
+  }
+  {
+    int z = 5;                     // 显式块内普通变量：允许
+    sum = sum + z;
+  }
+  *p = *p + sum;                   // 10 + 11 = 21
+  return *p * 2;                   // 42
+}

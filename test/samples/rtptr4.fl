@@ -1,0 +1,15 @@
+// rtptr4.fl — v1.0.6 函数返回指针：struct* 返回 + 调用链直接 -> 读写穿透
+struct P { int x; int y; }
+struct P *gp(struct P *p) { return p; }
+int main() {
+  struct P s;
+  s.x = 3;
+  s.y = 4;
+  if (gp(&s) == 0) return 1;
+  gp(&s)->x = 30;              // 调用链直接 -> 写（struct_idx 随返回）
+  if (s.x != 30) return 2;
+  if (gp(&s)->y != 4) return 3;
+  gp(&s)->y = 40;
+  if (s.y != 40) return 4;
+  return gp(&s)->x - 25;       // 30-25 = 5
+}

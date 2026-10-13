@@ -1,0 +1,124 @@
+// flgui4.fl — FLGUI M4 无头行为成绩单③：**主题单点定义 / 默认值 / 复位 / 覆盖** ＋ **DPI 纯函数缩放**
+//   ＋ **same_line（同类相对语义开关）方向** ＋ **gui_next_rect / gui_item_at 两种"外来排版"**
+//   **不建窗**：合成输入喂 gui_begin；命令表与游标 dump 成文本 → test\flgui-verify.ps1 双端逐字节对账。
+// 位图（全亮 = 42）：
+//   0 帧号 ｜1 gui_init 后主题=默认 ｜2 app 可覆盖单个字段 ｜3 gui_theme_default 复位回默认
+//   4 96dpi 恒等 ｜5 96dpi 直通 ｜6 dpi=0 当 96 ｜7 dpi<0 当 96 ｜8 120dpi 上偏（100→125）
+//   9 120dpi 下偏（10→12）｜10 144dpi 1.5 倍（20→30）｜11 负数对称（-7→-11）
+//   12 同一行两项 y 相同（开关放**中间**）｜13 开关放**前面** ⇒ 第二项退回下一行（反例）
+//   14 gui_next_rect 覆盖自动布局（x=50）｜15 gui_item_at 只钉当前矩形、**不动**布局游标
+include "flgui_widgets.fl"
+
+// 两项之间调用 = 正确写法（"下一个项"与第一项同一行）
+int row_two_same_line(struct GuiCtx *c) {
+  gui_label(c, "A1");
+  gui_same_line(c);
+  gui_label(c, "A2");
+  return 0;
+}
+
+// 把开关放在**第一个项之前** = 错法（第一项退回上一行、第二项才到本行）—— 反例探针
+int row_two_switch_first(struct GuiCtx *c) {
+  gui_same_line(c);
+  gui_label(c, "C1");
+  gui_label(c, "C2");
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiRect r;
+  int res = 0;
+  int def_bg = 0;
+  int def_track = 0;
+  int yA1 = 0;
+  int yA2 = 0;
+  int yC1 = 0;
+  int yC2 = 0;
+  int need_x = 0;
+
+  gui_init(&c);
+  def_bg = c.theme_bg;
+  def_track = c.theme_track;
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.ms = 0;
+
+  // ================= 帧 1：主题默认值 / 覆盖 / 复位（全在数值上验，不靠"看着像"）=================
+  if (c.theme_bg == 0x00101010) { res = res | 1; }
+  if (c.theme_panel == 0x00202020) { if (c.theme_btn == 0x00404040) { if (c.theme_text == 0x00E0E0E0) { res = res | 1; } } }
+  gui_begin(&c, &in);
+  gui_label(&c, "t");
+  gui_end(&c);
+  gui_dump(&c);
+
+  c.theme_bg = 0x00121010;                       // app 只改自己要改的那一两个字段（画廊就是这么做的）
+  if (c.theme_bg == 0x00121010) { res = res | 2; }
+  gui_theme_default(&c);                         // 复位 ⇒ 回到默认（"默认长什么样"只有一处权威）
+  if (c.theme_bg == def_bg) { if (c.theme_track == def_track) { res = res | 4; } }
+
+  // ================= 帧 2：DPI 纯函数缩放（96 / 0 / 负数 / 120 / 144）=================
+  c.dpi = 96;
+  if (gui_dpi_scale(&c, 100) == 100) { res = res | 8; }
+  if (gui_dpi_scale(&c, 1) == 1) { res = res | 16384; }
+  c.dpi = 0;
+  if (gui_dpi_scale(&c, 100) == 100) { res = res | 16; }
+  c.dpi = 0 - 5;
+  if (gui_dpi_scale(&c, 100) == 100) { res = res | 32; }
+  c.dpi = 120;                                   // 125%：(100*120+48)/96 = 125.5 ⇒ 截断 125；(10*120+48)/96 = 1248/96 = 13 精确
+  if (gui_dpi_scale(&c, 100) == 125) { res = res | 64; }
+  if (gui_dpi_scale(&c, 10) == 13) { res = res | 128; }
+  c.dpi = 144;                                   // 150%：20→30
+  if (gui_dpi_scale(&c, 20) == 30) { res = res | 256; }
+  if (gui_dpi_scale(&c, 0 - 7) == 0 - 11) { res = res | 512; }   // 负数对称：(-7*144+48)/96 = 10 ⇒ 取负 11
+  gui_begin(&c, &in);
+  gui_label(&c, "d");
+  gui_end(&c);
+  gui_dump(&c);
+
+  // ================= 帧 3：same_line —— 正确写法 A1/A2 同一行 =================
+  c.dpi = 96;
+  gui_begin(&c, &in);
+  row_two_same_line(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  yA1 = gui_cmd_y[0];
+  yA2 = gui_cmd_y[1];
+  if (yA1 == yA2) { res = res | 1024; }
+
+  // ================= 帧 4：反例 —— 开关放前面 ⇒ 第一项退回上一行 =================
+  gui_begin(&c, &in);
+  row_two_switch_first(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  yC1 = gui_cmd_y[0];
+  yC2 = gui_cmd_y[1];
+  if (yC1 == yA1 + c.line_h + c.spacing) { res = res | 2048; }   // C1 落回上一行（本行留给了 C2）
+  if (yC2 == yC1 + c.line_h + c.spacing) { res = res | 2048; }   // C2 才落到本行
+
+  // ================= 帧 5：gui_next_rect 覆盖自动布局 =================
+  gui_begin(&c, &in);
+  gui_label(&c, "n0");
+  r.x = 50; r.y = 60; r.w = 40; r.h = 12;
+  gui_next_rect(&c, &r);
+  gui_label(&c, "n1");
+  gui_end(&c);
+  gui_dump(&c);
+  if ((gui_cmd_x[1] == 50) && (gui_cmd_y[1] == 60)) { res = res | 4096; }
+
+  // ================= 帧 6：gui_item_at 只钉当前矩形、不动布局游标 =================
+  gui_begin(&c, &in);
+  gui_label(&c, "p0");
+  need_x = c.cur_x;                              // 记下自动布局推进到的 x
+  r.x = 5; r.y = 70; r.w = 30; r.h = 10;
+  gui_item_at(&c, &r);
+  gui_label(&c, "p1");                           // 自动布局继续：应该在新的一行、x 回到 lay_x
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_cmd_x[1] == c.lay_x) {                 // 没被 item_at 带歪 ⇒ 仍在列首
+    if (gui_cmd_kind[1] == 5) { if (gui_cmd_y[1] > gui_cmd_y[0]) { res = res | 8192; } }
+  }
+  if (need_x > c.lay_x) { if (c.cur_x == need_x) { res = res | 8192; } }   // 游标确实被推进过且没被 item_at 改掉
+
+  if (res == 32767) { return 42; }
+  return res;
+}

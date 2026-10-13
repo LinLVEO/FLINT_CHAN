@@ -1,0 +1,12 @@
+struct Vec2 { int a; int b; }
+void add1(struct Vec2 &v) {
+  v.a = v.a + 1;
+  v.b = v.b + 2;
+}
+int main() {
+  struct Vec2 v;
+  v.a = 1;
+  v.b = 2;
+  add1(v);
+  return v.a * 10 + v.b;
+}

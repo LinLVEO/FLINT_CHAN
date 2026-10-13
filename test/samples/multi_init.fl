@@ -1,0 +1,5 @@
+// multi_init.fl — 多重声明全带初始化：int x=2, y=3, z=x*y; → 6
+int main() {
+  int x = 2, y = 3, z = x * y;
+  return z;
+}

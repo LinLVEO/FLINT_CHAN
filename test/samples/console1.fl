@@ -1,0 +1,16 @@
+// console1.fl — print 内建验证：段列表 + 换行（v1.0.8 起 print 是语言内建，不再 include console.fl）
+// stdout 期望（run-tests.js 捕获断言）：
+//   start
+//   v=42
+//   -7|0
+//   done
+//   2147483647
+// 覆盖：文本整串 / 段拼接 / 负数 / 0 / \n 段 / INT32_MAX
+int main() {
+  print(["start", "\n"]);
+  print(["v=", 42, "\n"]);
+  print([-7, "|", 0, "\n"]);
+  print(["done", "\n"]);
+  print([2147483647, "\n"]);
+  return 0;
+}

@@ -1,0 +1,7 @@
+// t_callstmt.fl — B2h 调用语句样本：期望 42
+int g(int x) { return x + 1; }
+int main() {
+  int a = 5;
+  g(a);
+  return a + 37;
+}

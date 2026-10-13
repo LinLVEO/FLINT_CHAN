@@ -1,0 +1,175 @@
+// flgui5.fl — FLGUI M4 无头判据⑤：**滚轮 → 视口偏移的确定性账本** ＋ **命令表级布局判据**
+// 两条都是 M4 明确要"进城（进门）"的判据（此前只躺在 tmp\m3b\ 里，靠人记得去跑）：
+//   ① 滚轮：每格 20px 的**累加/清零**账本 —— 合成输入走的就是平台层 `gui_win_pump` 填进 GuiInput 的那个字段
+//      （`gui_begin` 只做搬运）⇒ 本样本管**契约**，"真鼠标真的走通这条路"由真输入探针
+//      `apps\ui_gallery\wheel-probe.ps1` 管（平台层缺口看不见：脚本化输入绕过平台层 —— 2026-09-22 真滚轮那个 bug）。
+//   ② 布局：**命令表级判据**（`CMD kind/rect` 的实际坐标）—— 状态型 dump（`btn=`/`chk=`/`scr=`/`frames=`）
+//      对"画在哪"完全失明，正是 `gui_same_line` 方向写反那次漏网的原因。
+// 位图（全亮 = 16383）：
+//   0 首帧偏移 0 ｜1 一格 = **20px** ｜2 一格就把偏移推起来 ｜3 四格共 80px（**累加**出来的）
+//   4 向下滚过头 收尾夹到 maxoff ｜5 夹住后偏移 == maxoff ｜6 再滚不变 ｜7 向上滚一格即减 20
+//   8 向上滚过头夹回 0 ｜9 光标在视口外 ⇒ 滚轮被忽略（偏移不变）｜10 内容比视口短 ⇒ maxoff 0、不发滚动条
+//   11 命令表首条是裁剪压栈 ｜12 A1/A2 同一行（y 相同）｜13 下一行 y = 首行 y + 行高 + 间距（方向在命令表里可见）
+//
+// ⚠️ **"一格 = 20px"这个数两边都量过**（2026-09-22 M4）：
+//   · 内部账：`gui_scroll_begin` 里 `off = off - wheel * 20`（脚本化输入喂的是"格数"）；
+//     真鼠标一格在平台层被换算成 `wheel = 1`（`wParam 高 16 位 / 120`）⇒ 账一样。
+//   · **真输入**实测（`apps\ui_gallery\wheel-probe.ps1`，真滚轮事件）：`scr: 0 → 20 → 40`。
+//   ⚠️ 为什么当初被写成 60：我先前只给 4 行内容（maxoff 只有 32）⇒ 滚 60 被**收尾夹到 32**，
+//     于是"一格 60"看着像成过一次 —— 这就是"**判据把夹取当搬运**"的经典假绿：**探针内容必须比被测偏移高**，
+//     否则量到的是夹取后的值（本样本为此把内容加到 12 行 ⇒ maxoff 172）。
+include "flgui_widgets.fl"
+
+int list_body(struct GuiCtx *c) {
+  gui_label(c, "r01");   // 12 行 × (行高 14 + 间距 4) − 间距 = 212 ⇒ 视口 40 时 maxoff = 172
+  gui_label(c, "r02");   // ⚠️ 内容必须**高过**被测偏移，否则收尾会把偏移夹到 maxoff，判据量到的就不是"累加账"了
+  gui_label(c, "r03");
+  gui_label(c, "r04");
+  gui_label(c, "r05");
+  gui_label(c, "r06");
+  gui_label(c, "r07");
+  gui_label(c, "r08");
+  gui_label(c, "r09");
+  gui_label(c, "r10");
+  gui_label(c, "r11");
+  gui_label(c, "r12");
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int res = 0;
+  int off = 0;
+  int maxoff = 0;
+  int vy = 0;
+  int vx = 0;
+  int yA = 0;
+  int y_a1 = 0;
+  int y_a2 = 0;
+  int y_b1 = 0;
+
+  gui_init(&c);
+  // M4m（2026-09-28）：**本样本锁的是"老 20px/格"的单位账**（下面每个断言都写着 20/80/120 这样的数）。
+  //   库的滚轮步长已改成 `wheel_step`、**默认 60（3 行/格）** ⇒ 不钉住的话本样本的位掩码与 dump 基线会当场变红。
+  //   这里显式钉老单位（被测语义一字未变）；**新默认值 60 的契约在 `test\samples\flgui13.fl`**。
+  c.wheel_step = 20;
+  c.lay_w = 120;
+  c.lay_h = 200;
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.ms = 0;
+
+  // ================= 帧 1：无输入 → 偏移 0，视口几何记下来 =================
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  vx = gui_cmd_x[0];                    // 裁剪压栈命令的矩形 = 视口
+  vy = gui_cmd_y[0];
+  if (gui_cmd_kind[0] == 6) { res = res | 2048; }
+  if (gui_pool_get(gui_id("list")) == 0) { res = res | 1; }
+
+  // ================= 帧 2：视口内一格 = 偏移 20 =================
+  in.mx = vx + 10; in.my = vy + 10; in.wheel = 0 - 1;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  off = gui_pool_get(gui_id("list"));
+  if (off == 20) { res = res | 2; }
+
+  // ================= 帧 3：再滚三格 ⇒ 累计 80px（20 + 3×20，每格 20 是**累加**出来的）=================
+  in.wheel = 0 - 3;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  off = gui_pool_get(gui_id("list"));
+  if (off == 80) { res = res | 8; }
+  if (off == 20 * 4) { res = res | 4; }
+
+  // ================= 帧 4：向下滚过头 → 收尾夹到 maxoff =================
+  in.wheel = 0 - 10;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == maxoff) { res = res | 16; }
+  if (maxoff > 0) { res = res | 32; }
+
+  // ================= 帧 5：夹住后再滚 ⇒ 仍是 maxoff（不越界）=================
+  in.wheel = 0 - 4;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == maxoff) { res = res | 64; }
+
+  // ================= 帧 6：向上滚一格 ⇒ 减 60（方向与"格数×60"都在这条账里）=================
+  in.wheel = 1;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  off = gui_pool_get(gui_id("list"));
+  if (off == maxoff - 20) { res = res | 128; }
+
+  // ================= 帧 7：向上滚过头 ⇒ 夹回 0 =================
+  in.wheel = 50;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == 0) { res = res | 256; }
+
+  // ================= 帧 8：光标在视口**外** ⇒ 滚轮被忽略（悬停判据）=================
+  in.mx = vx + 500; in.my = vy + 500; in.wheel = 0 - 5;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  list_body(&c);
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == 0) { res = res | 512; }
+
+  // ================= 帧 9：内容比视口短 ⇒ maxoff 0、不发滚动条 =================
+  in.mx = 0; in.my = 0; in.wheel = 0;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "short", 40);
+  gui_label(&c, "only");
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (maxoff == 0) { res = res | 1024; }
+
+  // ================= 帧 10：命令表级布局判据 —— A 行两项同一行、B 行在下一行 =================
+  gui_begin(&c, &in);
+  gui_label(&c, "A1");
+  gui_same_line(&c);                 // 开关放**两个项之间** = 正确写法
+  gui_label(&c, "A2");
+  gui_label(&c, "B1");
+  gui_end(&c);
+  gui_dump(&c);
+  y_a1 = gui_cmd_y[0];
+  y_a2 = gui_cmd_y[1];
+  y_b1 = gui_cmd_y[2];
+  yA = y_a1;
+  if (y_a1 == y_a2) { res = res | 4096; }
+  if (y_b1 == yA + c.line_h + c.spacing) { res = res | 8192; }
+
+  if (res == 16383) { return 42; }
+  return res;
+}

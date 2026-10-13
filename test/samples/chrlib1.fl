@@ -1,0 +1,32 @@
+// chrlib1.fl — chr_lib 验证：std::is_digit / std::is_alpha / std::is_space / upper / lower
+include "../../lib/chr_lib.fl"
+
+int main() {
+  int r = 0;
+
+  if (std::is_digit('0') == 1) r |= 1;
+  if (std::is_digit('9') == 1) r |= 2;
+  if (std::is_digit('a') == 0) r |= 4;
+  if (std::is_digit('/') == 0) r |= 8;
+
+  if (std::is_alpha('a') == 1) r |= 16;
+  if (std::is_alpha('Z') == 1) r |= 32;
+  if (std::is_alpha('0') == 0) r |= 64;
+
+  if (std::is_space(' ') == 1) r |= 128;
+  if (std::is_space(9) == 1) r |= 256;
+  if (std::is_space(10) == 1) r |= 512;
+  if (std::is_space(13) == 1) r |= 1024;
+  if (std::is_space('x') == 0) r |= 2048;
+
+  if (std::to_upper('a') == 'A') r |= 4096;
+  if (std::to_upper('Z') == 'Z') r |= 8192;
+  if (std::to_upper('5') == '5') r |= 16384;
+
+  if (std::to_lower('A') == 'a') r |= 32768;
+  if (std::to_lower('z') == 'z') r |= 65536;
+  if (std::to_lower('5') == '5') r |= 131072;
+
+  if (r == 262143) return 42;
+  return r;
+}

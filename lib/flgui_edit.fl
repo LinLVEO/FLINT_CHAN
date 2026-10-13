@@ -1,0 +1,270 @@
+// flgui_edit.fl — FLGUI **可编辑文本**（M4 第二批）：聚焦 / 打字 / 退格（GBK 感知）/ 回车确认 / Esc 取消 / 点外面失焦 / 光标条
+//
+// 为什么单开一个文件（而不是塞进 flgui_widgets.fl）：① 它自带**跨帧状态**（文本 + 聚焦 + 编辑前的备份），
+//   与纯绘制的控件分开更好读；② **纯增量**：已有的 5 条 dump 基线一个字节都不该动 —— 分开文件最容易证明这点。
+//
+// ★ 载体纪律（本项目踩过三次，写错必翻车）：
+//   ① 文本必须住**全局 char 数组**（`struct GuiCtx` 只放标量；struct 里放定长数组字段会让 boot 按 4B/8B
+//      混算 ⇒ 越写越出帧、间歇 0xC0000005）；
+//   ② **指针不许进全局 int**（"地址值（64 位）不能装进全局 int / char"）；要在别处用文本，一律用
+//      `slot` 下标 + `gui_edit_text(slot)` 现取指针（返回值是局部 `char *`，可以）。
+//
+// ★ 布局约定（单点定义，改这里就够了）：
+//   每槽 256 字节 = 备份区(低 128) ＋ 实时区(高 128)  ⇒ 槽 i 实时文本 = `gui_edit_buf + i*256 + 128`
+//   `gui_edit_maxlen[slot]` 上限被夹到 127（实时区 128 字节含结尾 NUL）。
+//
+// ★ 编辑语义（契约；判据按这个写）：
+//   · 聚焦 = 点进盒子（光标逻辑位置 = 末尾）｜ 失焦 = 点盒子外 / 回车 / Esc
+//   · 打字 = 末尾追加（`GuiInput.key` 每帧一个字符）｜ 退格 = 删**最后一个字符**（GBK 双字节整删）
+//   · **回车 = 确认**（`gui_textfield_edit` 返回 1，并把当前内容固化成新基线）｜ **Esc = 取消**（回滚到基线）
+//   · 点外面失焦 = **保留已输入内容**（"没按回车算不算数"交给调用方按返回值决定，本层不替它决定）
+//   · 满 = 静默丢弃（不越界、不切半个 GBK：放不下整字时整字不收）
+//
+// ★ 光标条 = 新命令 kind 15（一条 1px 竖条）。为什么不改已有的 kind：加一种 kind 是**纯增量**，
+//   老基线的命令流一字不动（"基线未动"就是纯增量的机械证据）。
+//
+// ★ 键盘只在**焦点控件**里被消费（同"滚轮只在悬停视口里被消费"）—— 一个"每帧量"只有一个读取点。
+// ★ `gui_key_pending`（**待打印字符数**）必须住在这里而不是平台层：① 它的"消费方"是本文件的 `gui_edit_key`；
+//   ② 平台层是 `flgui_win32.fl`，而样本只 include 控件层 ⇒ 计数住平台层会让样本**编不过**
+//   （2026-09-23 实测：`使用了未声明的变量 'gui_key_pending'`，`flgui1~flgui6` 全挂）。平台层只管"收到多少、发出来"。
+int gui_key_pending = 0;    // >0 = 还有打印字符没被消费（平台层每收一条 WM_CHAR 加 1，消费方每取一个减 1）
+int gui_key_last = 0;       // 最近一个待消费字符（平台层跨帧端过来用）
+
+// ===== 键码（与 Win32 对齐：VK_BACK / VK_RETURN / VK_ESCAPE）=====
+// ⚠️ FLINT **没有 `const`** ⇒ 用"全大写全局 int 当具名常量"（本项目既有惯例；这些常量**只读**，别改）。
+int GUI_KEY_NONE = 0;
+int GUI_KEY_BACKSPACE = 8;
+int GUI_KEY_ENTER = 13;
+int GUI_KEY_ESCAPE = 27;
+int GUI_EDIT_DONE = 1;      // gui_edit_key 返回：回车确认
+int GUI_EDIT_CANCEL = 2;    // gui_edit_key 返回：Esc 取消
+
+// ===== 载体与容量 =====
+char gui_edit_buf[2048];    // 8 槽 × 256 字节
+int gui_edit_len[8];        // 每槽当前**字节**数（实时区）
+int gui_edit_blen[8];       // 每槽基线**字节**数（备份区；Esc 回滚的还原长度）
+int gui_edit_maxlen[8];     // 每槽上限（默认 64，夹到 127）
+int gui_edit_on[8];         // 是否已绑定过（区分"空文本"与"没初始化"）
+
+int gui_edit_slot_ok(int slot) { if (slot < 0) { return 0; } if (slot > 7) { return 0; } return 1; }
+int gui_edit_cap(int slot) {
+  int m = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  m = gui_edit_maxlen[slot];
+  if (m < 1) { m = 64; }
+  if (m > 127) { m = 127; }
+  return m;
+}
+int gui_edit_offset(int slot) { return slot * 256 + 128; }   // 实时区起点
+int gui_edit_baseoff(int slot) { return slot * 256; }        // 备份区起点
+
+// 文本指针（现取现用；**别把它存进全局 int**）
+char *gui_edit_text(int slot) {
+  if (gui_edit_slot_ok(slot) == 0) { return gui_edit_buf; }
+  return gui_edit_buf + gui_edit_offset(slot);
+}
+int gui_edit_size(int slot) {
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  return gui_edit_len[slot];
+}
+
+// GBK 感知的"这个字符几个字节"：头字节 0x81..0xFE ⇒ 2 字节，否则 1 字节。
+// （不用查码表：判据只看"下一字节在不在"，不需要知道具体是哪个字。）
+int gui_edit_chlen(char *s, int i) {
+  int hi = s[i];
+  if (hi == 0) { return 0; }
+  if (hi < 0) { hi = hi + 256; }
+  if (hi >= 129) {
+    if (hi <= 254) {
+      if (s[i+1] != 0) { return 2; }
+    }
+  }
+  return 1;
+}
+
+// 绑定 / 重置：把 `init` 拷进实时区与备份区（超上限**按字符**截断）。返回实际字节数。
+int gui_edit_init(int slot, char *init, int maxlen) {
+  int i = 0;
+  int n = 0;
+  int step = 0;
+  int off = 0;
+  int bo = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  if (maxlen < 1) { maxlen = 64; }
+  if (maxlen > 127) { maxlen = 127; }
+  gui_edit_maxlen[slot] = maxlen;
+  off = gui_edit_offset(slot);
+  bo = gui_edit_baseoff(slot);
+  while (init[i] != 0) {
+    step = gui_edit_chlen(init, i);
+    if (step == 0) { break; }
+    if (n + step > maxlen) { break; }
+    if (step == 2) { gui_edit_buf[off + n] = init[i]; gui_edit_buf[off + n + 1] = init[i + 1]; }
+    else { gui_edit_buf[off + n] = init[i]; }
+    n = n + step;
+    i = i + step;
+  }
+  gui_edit_buf[off + n] = 0;
+  gui_edit_len[slot] = n;
+  i = 0;
+  while (i < n) { gui_edit_buf[bo + i] = gui_edit_buf[off + i]; i = i + 1; }
+  gui_edit_buf[bo + n] = 0;
+  gui_edit_blen[slot] = n;
+  gui_edit_on[slot] = 1;
+  return n;
+}
+
+// 只改上限（**每帧都可调**）：上限变小且现内容超了 ⇒ 按**字符边界**裁到新上限。返回裁完的长度。
+// ⚠️ 为什么必须有它：控件若只在"第一次绑定"时设上限，那么"改上限"那一帧不生效 ⇒ 判据会静默量到旧上限
+//   （2026-09-22 M4b 实测：maxlen 16 → 3 之后仍能打进去，正是这个坑）。
+int gui_edit_setmax(int slot, int maxlen) {
+  int n = 0;
+  int step = 0;
+  int off = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  if (maxlen < 1) { maxlen = 64; }
+  if (maxlen > 127) { maxlen = 127; }
+  gui_edit_maxlen[slot] = maxlen;
+  off = gui_edit_offset(slot);
+  n = gui_edit_len[slot];
+  while (n > maxlen) {
+    n = n - 1;
+    step = gui_edit_chlen(gui_edit_text(slot), n);   // 退到"上一个字符的起点"（GBK 整字裁）
+    if (step == 2) { n = n - 1; }
+  }
+  gui_edit_buf[off + n] = 0;
+  gui_edit_len[slot] = n;
+  return n;
+}
+
+// 末尾追加一个字符（key = `WM_CHAR` 的字符码）。返回 1 = 收下了。
+// ⚠️ 只收"可打印"：>= 0x20 且 != 0x7F（控制字符由退格/回车/Esc 单独走）；>= 0x80 一律收（GBK 双字节 / IME 结果）。
+int gui_edit_put(int slot, int key) {
+  int off = 0;
+  int n = 0;
+  int cap = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  if (key < 32) { return 0; }
+  if (key == 127) { return 0; }
+  n = gui_edit_len[slot];
+  cap = gui_edit_cap(slot);
+  if (n + 1 > cap) { return 0; }
+  off = gui_edit_offset(slot);
+  gui_edit_buf[off + n] = key;
+  gui_edit_len[slot] = n + 1;
+  gui_edit_buf[off + n + 1] = 0;
+  return 1;
+}
+
+// 末尾追加一个**字符串**（首字符之后按字符边界整段追加；装不下就停）。返回追加的字节数。
+int gui_edit_puts(int slot, char *s) {
+  int i = 0;
+  int step = 0;
+  int got = 0;
+  while (s[i] != 0) {
+    step = gui_edit_chlen(s, i);
+    if (step == 0) { break; }
+    if (gui_edit_put(slot, 0 + s[i]) == 0) { break; }
+    if (step == 2) {
+      if (gui_edit_put(slot, 0 + s[i+1]) == 0) { break; }
+    }
+    got = got + step;
+    i = i + step;
+  }
+  return got;
+}
+
+// 退格：删最后一个**字符**。返回 1 = 真删了（GBK 双字节整删）。
+int gui_edit_backspace(int slot) {
+  int n = 0;
+  int off = 0;
+  int a = 0;
+  int b = 0;
+  int del = 1;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  n = gui_edit_len[slot];
+  if (n < 1) { return 0; }
+  off = gui_edit_offset(slot);
+  a = gui_edit_buf[off + n - 1];
+  if (a < 0) { a = a + 256; }
+  if (a >= 64) {
+    if (a != 127) {
+      if (a <= 254) {
+        if (n >= 2) {
+          b = gui_edit_buf[off + n - 2];
+          if (b < 0) { b = b + 256; }
+          if (b >= 129) { if (b <= 254) { del = 2; } }
+        }
+      }
+    }
+  }
+  gui_edit_len[slot] = n - del;
+  gui_edit_buf[off + n - del] = 0;
+  return 1;
+}
+
+// 取消 = 回滚到基线（聚焦时的内容 / 上次 commit 的内容）
+int gui_edit_rollback(int slot) {
+  int n = 0;
+  int i = 0;
+  int off = 0;
+  int bo = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  n = gui_edit_blen[slot];
+  off = gui_edit_offset(slot);
+  bo = gui_edit_baseoff(slot);
+  i = 0;
+  while (i < n) { gui_edit_buf[off + i] = gui_edit_buf[bo + i]; i = i + 1; }
+  gui_edit_buf[off + n] = 0;
+  gui_edit_len[slot] = n;
+  return n;
+}
+
+// 把当前内容固化成"新基线"（**确认**时调用 ⇒ 之后 Esc 回滚到这一份）
+int gui_edit_commit(int slot) {
+  int n = 0;
+  int i = 0;
+  int off = 0;
+  int bo = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  n = gui_edit_len[slot];
+  off = gui_edit_offset(slot);
+  bo = gui_edit_baseoff(slot);
+  i = 0;
+  while (i < n) { gui_edit_buf[bo + i] = gui_edit_buf[off + i]; i = i + 1; }
+  gui_edit_buf[bo + n] = 0;
+  gui_edit_blen[slot] = n;
+  return n;
+}
+
+// ===== 聚焦 =====
+// 聚焦槽存在 `GuiCtx.edit_slot`（-1 = 没有焦点）；`GuiCtx.key` 是本帧的键盘读入（见 flgui_edit_key）。
+int gui_edit_focused(struct GuiCtx *c) { return c->edit_slot; }
+int gui_edit_focus(struct GuiCtx *c, int slot) {
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  c->edit_slot = slot;
+  return 1;
+}
+int gui_edit_blur(struct GuiCtx *c) {
+  c->edit_slot = 0 - 1;
+  return 1;
+}
+
+// 本帧键盘动作（**只在"自己是焦点"时由控件调用**：不是焦点就不响应键盘）
+// 返回：0 = 无动作 / 已收下字符 ｜ 1 = 回车确认（**已自动 commit + 失焦**）｜ 2 = Esc 取消（**已自动回滚 + 失焦**）
+// ⚠️ 为什么"确认/取消"在这里就把状态收干净：否则每个调用方都要记得配对调 commit/rollback/失焦 ——
+//    忘一个就会得到"回车了还在编辑 / Esc 了内容没回去"这类**状态型 bug**（状态 dump 里看得见，但代码里看不出来）。
+//    要自己做二次确认的调用方，用返回值即可（内容已经备好：确认=已固化，取消=已回滚）。
+int gui_edit_key(struct GuiCtx *c) {
+  int k = c->key;
+  int s = c->edit_slot;
+  c->key = 0;                       // 取走即清（键盘是"待消费槽"不是"每帧量"：见 gui_win_pump 的注释）
+  if (k > 31) { if (gui_key_pending > 0) { gui_key_pending = gui_key_pending - 1; } }   // 消费掉一个"待打印字符"
+  if (s < 0) { return 0; }
+  if (k == GUI_KEY_NONE) { return 0; }
+  if (k == GUI_KEY_BACKSPACE) { gui_edit_backspace(s); return 0; }
+  if (k == GUI_KEY_ENTER) { gui_edit_commit(s); gui_edit_blur(c); return GUI_EDIT_DONE; }
+  if (k == GUI_KEY_ESCAPE) { gui_edit_rollback(s); gui_edit_blur(c); return GUI_EDIT_CANCEL; }
+  gui_edit_put(s, k);
+  return 0;
+}

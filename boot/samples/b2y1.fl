@@ -1,0 +1,21 @@
+// b2y1.fl — B2y io 库（整文件读写，boot 侧差分）：八项位掩码 = 255 → 退出码 42
+// 1 写成功 2 存在 4 大小=5 8 读回 5 字节 16 首字节A 32 末字节E 64 不存在=0 128 读失败=-1
+include "io_lib.fl"
+int main() {
+  char w[16];
+  char r[16];
+  int i = 0;
+  int m = 0;
+  while (i < 5) { w[i] = 'A' + i; i = i + 1; }        // "ABCDE"
+  if (std::file_write("E:\\FLINT\\test\\tmp\\b2y1.tmp", w, 5) == 1) m |= 1;
+  if (std::file_exists("E:\\FLINT\\test\\tmp\\b2y1.tmp") == 1) m |= 2;
+  if (std::file_size("E:\\FLINT\\test\\tmp\\b2y1.tmp") == 5) m |= 4;
+  int n = std::file_read("E:\\FLINT\\test\\tmp\\b2y1.tmp", r, 16);
+  if (n == 5) m |= 8;
+  if (r[0] == 'A') m |= 16;
+  if (r[4] == 'E') m |= 32;
+  if (std::file_exists("E:\\FLINT\\test\\tmp\\no_such_io.tmp") == 0) m |= 64;
+  if (std::file_read("E:\\FLINT\\test\\tmp\\no_such_io.tmp", r, 16) == -1) m |= 128;
+  if (m != 255) return 1;
+  return 42;
+}

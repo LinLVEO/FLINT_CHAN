@@ -1,0 +1,4 @@
+// incdup_main2.fl — B2v 菱形去重：b 经 a 间接 include + 直接 include 各一次 → 只展开一次
+include "incdup_a.fl"
+include "incdup_b.fl"
+int main() { return incdup_a_val(); }

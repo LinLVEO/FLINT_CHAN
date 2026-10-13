@@ -1,0 +1,7 @@
+// b2l5.fl — B2l 第二档 2/2：own（出口自动释放，对齐真 flint）
+int main() {
+  int *own p = new int;
+  if (p == 0) { return 1; }
+  *p = 42;
+  return *p;
+}

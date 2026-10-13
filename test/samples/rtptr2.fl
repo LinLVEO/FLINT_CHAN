@@ -1,0 +1,13 @@
+// rtptr2.fl — v1.0.6 函数返回指针：char* 返回（数据段字符串地址）+ 字节下标/解引用 + 同地址性
+char *greet() { return "Hi!"; }
+int main() {
+  char *s;
+  s = greet();
+  if (s == 0) return 1;
+  if (s[0] != 'H') return 2;   // char* 下标字节读（elem=char）
+  if (*s != 'H') return 3;     // *s 字节读
+  if (s[2] != '!') return 4;
+  char *t = greet();
+  if (t != s) return 5;        // 同一字面量 = 同一数据段地址（64 位相等）
+  return s[1] + s[2];          // 'i'(105) + '!'(33) = 138
+}

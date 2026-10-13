@@ -1,0 +1,8 @@
+// nb38.fl — v1.4.28（B1-3）负例：导入模块名（写出名）**超过 63 字节**必须编译期硬错（双端一致）
+//   70 个 'A' 的裸短名 → 写出名 = 70 + 自动补的 ".dll" 4 字节 = **74 字节** > 63。
+//   改前真 flint 是**静默截断**：编译 exit 0、产物导入名只剩 63 个 'A' = 半个路径、启动期 0xC0000135；
+//   boot 的写出端是动态缓冲（本来不截断）⇒ 本样本把**两端都**钉成编译期硬错
+//   （boot 报 parse err=-189；真 flint 报「导入模块名过长：写出名最长 63 字节，现在 74 字节」）。
+//   与 test\边界探针.ps1 的 api_modname_over63 同源；上限内侧由 b1c1.fl（恰好 63 字节）钉住。
+api "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" int GetTickCount();
+int main() { return 42; }

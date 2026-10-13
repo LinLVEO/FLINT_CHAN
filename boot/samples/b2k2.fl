@@ -1,0 +1,63 @@
+// b2k2：++/-- 前后缀值语义（B2k）——int / char / 指针（字节步进）/ 数组元素 / 字段 / *q
+//   注：FLINT 不能声明 struct 指针局部变量 → 指针字段访问走 struct* 形参函数
+struct S { int a; char c; }
+int bump2(struct S *pv) {
+  pv->a = 41;
+  int i = pv->a++;
+  pv->c = 41;
+  int j = pv->c++;
+  return i * 100 + j;                              // 4141
+}
+int main() {
+  int ok = 0;
+  int x = 40;
+  int a = x++;
+  if (a == 40 && x == 41) { ok += 1; }
+  int b = ++x;
+  if (b == 42 && x == 42) { ok += 1; }
+  int c = x--;
+  if (c == 42 && x == 41) { ok += 1; }
+  int d = --x;
+  if (d == 40 && x == 40) { ok += 1; }
+  x++;
+  x++;
+  if (x == 42) { ok += 1; }
+
+  char ch = 40;
+  char e = ch++;
+  if (e == 40 && ch == 41) { ok += 1; }
+  char f = ++ch;
+  if (f == 42 && ch == 42) { ok += 1; }
+  char g = ch--;
+  if (g == 42 && ch == 41) { ok += 1; }
+  char h = --ch;
+  if (h == 40 && ch == 40) { ok += 1; }
+
+  int arr[3];
+  int *p = arr;
+  int *old = p++;
+  if (old == arr && p == arr + 1) { ok += 1; }
+
+  arr[1] = 40;
+  int i1 = arr[1]++;
+  if (i1 == 40 && arr[1] == 41) { ok += 1; }
+  ++arr[1];
+  if (arr[1] == 42) { ok += 1; }
+
+  struct S v;
+  v.a = 41;
+  int i2 = v.a++;
+  if (i2 == 41 && v.a == 42) { ok += 1; }
+  v.c = 41;
+  int i3 = v.c++;
+  if (i3 == 41 && v.c == 42) { ok += 1; }
+  if (bump2(&v) == 4141 && v.a == 42 && v.c == 42) { ok += 1; }
+
+  int *q = arr;
+  *q = 41;
+  int i5 = (*q)++;
+  if (i5 == 41 && *q == 42) { ok += 1; }
+
+  if (ok == 16) { return 42; }
+  return ok;
+}

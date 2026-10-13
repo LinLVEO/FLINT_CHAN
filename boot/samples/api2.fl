@@ -1,0 +1,3 @@
+// api2.fl — B2i 正例：api 声明可出现在函数之后（顶层任意位置）
+int main() { return 42; }
+api kernel32 int GetTickCount();

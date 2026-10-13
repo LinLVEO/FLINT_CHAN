@@ -1,0 +1,14 @@
+// b2l4.fl — B2l 第二档：new 在循环/分支里的语义（与真 flint 差分对照）
+int main() {
+  int *a = new int;
+  int *b = new int;
+  *a = 10;
+  *b = 32;
+  int sum = 0;
+  int i = 0;
+  while (i < 2) {
+    if (i == 0) { sum = sum + *a; } else { sum = sum + *b; }
+    i = i + 1;
+  }
+  return sum;
+}

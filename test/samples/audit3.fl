@@ -1,0 +1,27 @@
+// audit3.fl — v1.0.6.2 盲区审计 A3：指针返回函数内 own/share 出口清理保护 64 位返回值
+// 清理段（VirtualFree/refcount--）会破坏 rax——codegen 出口已 push rax 保护；
+// 本样本固化「清理后 64 位堆地址返回值完整」（返回地址高 32 位被毁 → 截断 → 错值/崩）
+int *mk_own(int v) {          // own 局部：出口直接 VirtualFree 清理路径
+  int *own tmp = new int;
+  *tmp = 999;
+  int *p = new int;
+  *p = v;
+  return p;                      // 清理 tmp 后 rax（64 位堆地址）须完整
+}
+int *mk_share(int v) {          // share 局部（双引用）：refcount-- 归零 free 清理路径
+  int *share s = new int;
+  *s = 7;
+  int *share t = s;             // 拷贝 +1 → s/t 双引用，出口两处 -1
+  int *p = new int;
+  *p = v;
+  return p;
+}
+int main() {
+  int *r1 = mk_own(42);
+  if (*r1 != 42) return 1;
+  int *r2 = mk_own(0x11223344);
+  if (*r2 != 0x11223344) return 2;
+  int *r3 = mk_share(0x7FFFFFFF);
+  if (*r3 != 0x7FFFFFFF) return 3;
+  return 0;
+}

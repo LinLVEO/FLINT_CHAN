@@ -1,0 +1,72 @@
+// ui_seg.fl — v1.0.5 应用消化补盲：flint_ui 整串文本原语自动化回归
+//（apps/m2_float/flint_ui.fl 的 Seg/seg_mk/ui_text/itoa 版 ui_num 之前只在 m2 浮窗里被用到、
+//   无自动化覆盖——本样本建真实窗口 + GetDC 后断言：整段量宽推进 x、char 缓冲段、ui_num 整串）
+// 自动退出 ~40 帧；断言全过 → 退出码 7；失败 → 1/2/3
+include "ui_lib.fl"
+
+int main() {
+  struct WndSt wnd;
+  wnd.cls = "FLINTSEG";
+  wnd.w = 300;
+  wnd.ht = 100;
+  wnd.alpha = 255;
+  if (!ui_make(&wnd)) return 90;
+  int *h = wnd.h;
+  struct MSG m;
+  struct RECT client;
+  client.l = 0; client.t = 0; client.r = 300; client.b = 100;
+  int running = 1;
+  int frame = 0;
+  int exitcode = 7;
+  int asserted = 0;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      int *dc = GetDC(h);
+      struct Drw dr;
+      dr.dc = dc;
+      if (asserted == 0) {
+        // —— 首帧一次性断言（真实 DC 量宽）——
+        struct Seg ss;
+        char seg[16];
+        int x;
+        int L;
+        // 1) ui_text：字符串字面量整段（Seg 承载 (地址,长度)）
+        x = 20;
+        seg_mk(&ss, "CPU 99C", 7);
+        ui_text(&dr, &ss, &x, 20);
+        if (x <= 20) { exitcode = 1; running = 0; }
+        // 2) ui_text：char 缓冲段（itoa 数字 → 字节缓冲 → 整段）
+        x = 20;
+        L = std::itoa(32767, seg);
+        seg_mk(&ss, seg, L);
+        ui_text(&dr, &ss, &x, 44);
+        if (x <= 20) { exitcode = 2; running = 0; }
+        // 3) ui_num：itoa 整串画 + 量宽推进
+        x = 20;
+        ui_num(&dr, &x, 44, 71);
+        if (x <= 20) { exitcode = 3; running = 0; }
+        // 4) 正常整帧绘制（黑底 + 两行整串文字），确认不崩
+        ui_fill(dc, &client, 4);
+        SetBkMode(dc, 1);
+        SetTextColor(dc, 0x00EBEBEB);
+        x = 8;
+        seg_mk(&ss, "FLINT ui_text OK", 16);
+        ui_text(&dr, &ss, &x, 8);
+        L = std::itoa(99, seg);
+        seg[L] = 'C';
+        seg_mk(&ss, seg, L + 1);
+        ui_text(&dr, &ss, &x, 8);
+        asserted = 1;
+      }
+      ReleaseDC(h, dc);
+      frame++;
+      if (frame > 40) running = 0;
+      Sleep(16);
+    }
+  }
+  return exitcode;
+}

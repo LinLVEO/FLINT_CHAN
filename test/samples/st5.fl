@@ -1,0 +1,12 @@
+struct Rect { int left; int top; int right; int bottom; }
+int area(struct Rect *r) {
+  return (r->right - r->left) * (r->bottom - r->top);
+}
+int main() {
+  struct Rect rc;
+  rc.left = 10;
+  rc.top = 20;
+  rc.right = 110;
+  rc.bottom = 70;
+  return area(&rc);
+}

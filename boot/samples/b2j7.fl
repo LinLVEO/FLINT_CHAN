@@ -1,0 +1,10 @@
+// b2j7.fl — B2j 结构体字段取址 + 解引用读写：期望 42
+//   （回归点：&v.f 的基址只能加一次 nf-1——曾重复加 → 指到保留区外 → 读到 0）
+struct S { int a; int b; }
+int main() {
+  struct S s;
+  s.b = 7;
+  int *q = &s.b;
+  *q = 42;
+  return *q + s.b - 42;
+}

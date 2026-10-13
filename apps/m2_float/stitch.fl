@@ -1,0 +1,128 @@
+// stitch.fl —— 「同进程缝合」数据源：直接用 FLINT 导入表直调 HwBridge.dll（C# 的 LibreHardwareMonitor）
+//
+// 用法：放 tmp\row-probe\stitch.on 即启用。优先级：demo > stitch > http(8080) > 本地直读。
+// 分工（别重复劳动）：桥只管 **CPU 温度/占用/频率/功耗 + GPU 温度/占用/显存/功耗 + FPS**；
+//   内存/磁盘/网速仍走本地直读（FLINT 本来就能读），桥给对应字段留 v_=0 → api_to_rows 会跳过、
+//   保留本地值（与 8080 JSON 路径同一套口径：全部 ×1000 定点整数）。
+//
+// 为什么需要提权：桥内部是 LHM 的 Ring0（WinRing0 设备，服务 R0HardwareMonitor）读 MSR。
+//   本产物用 `flint -admin` 构建（本机 UAC 静默提权）；不提权时 CPU 三项拿不到，GPU 仍可用。
+// ⚠️ api 声明不在这里：FLINT 要求 api 必须在**合并后文件的最顶部**（任何 struct/函数之前），
+//    而本文件被 include 在 float_rows/http_lib 之后 → 两条声明放在 `hw.fl` 顶部（见那里的「第 8 步」注释）。
+
+int g_stitch_st = -99;    // hw_init 的状态位，同时兼作"开过没开过"的哨兵（-99 = 还没开；**别拿它跟快照状态混用**）
+int g_pm_st8 = 0;         // 每条快照 FLAGS 的低 8 位：bit0 init ok / bit1 有CPU / bit2 有GPU / bit3 RTSS可读 /
+                          //   bit4 本条FPS来自PresentMon / bit5 本条1%low来自PresentMon
+int g_stitch_ok = 0;      // 1 = 桥可用（hw_init 返回 >= 0）
+int g_stitch_mask = 0;    // 最近一次快照的有效位掩码
+int g_stitch_rc = 0;      // 最近一次 hw_snap 的返回值
+int g_pm_want = -1;       // PresentMon 通道意图（0=不要 / 1=要；-1 = 还没告诉过桥）
+int g_pm_lines = 0;       // PresentMon 收到的数据行数（诊断：0 = ETW 起不来）
+int g_pm_status = 0;      // PresentMon 内部状态位（bit0 exe在/bit1 起来了/bit2 有数据/bit3 有帧率/bit4 已退出/bit5 无 exe）
+int g_pm_n = 0;           // 本次选中的进程样本数（快照 FLAGS 高 8 位）
+int g_pm_src_off = -1;    // v1.4.7：帧率来源名在**建行缓冲 rbuf** 里的偏移（-1 = 本帧没有；dump 诊断要看它）
+int g_pm_src_len = 0;
+int g_raw23 = 0;          // v1.4.7 诊断：快照槽 23（FLAGS）原值
+int g_raw22 = 0;          // v1.4.7 诊断：快照槽 22（有效位掩码）原值
+char g_pm_src[64];        // 来源名本身（hw_pm_src 的接收缓冲；布局与 pads 同 = 8 字节/元素）
+// ⚠️ 一个循环依赖的取舍：`g_pm_src_off` 声明在**本文件**，而用它的是 float_rows.fl（include 在前）。
+//    FLINT 的文件级名字解析在全程序范围（实测能让前面 include 的文件引用后面声明的全局量）——
+//    本轮真跑过才敢这么写（验收记录在 验收成绩单-缝合态.md 的 v1.4.7 段）。
+
+// 初始化桥（幂等；返回 1 = 可用）
+int stitch_open() {
+  if (g_stitch_st != -99) return g_stitch_ok;
+  g_stitch_st = hw_init();
+  if (g_stitch_st >= 0) g_stitch_ok = 1;
+  return g_stitch_ok;
+}
+
+// v1.4.7（2026-09-17）：把"要不要跑 PresentMon"告诉桥（**幂等**，只在意图变化时才真调导出）。
+// 为什么不让桥自己决定：桥要保持"你调我才动"——否则任何导入它的产物都凭空多一个 ETW 子进程。
+int stitch_pm(int want) {
+  if (want == g_pm_want) return g_pm_want;
+  g_pm_want = hw_pm_want(want);
+  return g_pm_want;
+}
+
+// 取一次快照并折算进 ApiSnap（只填桥的强项字段）
+// ⚠️ 用 **hw_snap64**（8 字节槽）不是 hw_snap（4 字节槽）：FLINT 的 `int` 是 8 字节槽
+//    （实测 `int b[24]` 的第 j 个元素落在字节偏移 8*j），拿 4 字节版本会整体错位 ——
+//    现象极阴险：个别值"看着对"（低位槽碰巧对上），掩码高位（如 bit13=FPS）读出来恒为 0。
+int stitch_to_snap(struct ApiSnap *s) {
+  int b[24];
+  int i;
+  for (i = 0; i < 24; i = i + 1) { b[i] = 0; }
+  g_stitch_rc = hw_snap64(b);
+  g_stitch_mask = b[22];
+  // 状态位与样本数：b[23] = 低 8 位状态 + 中 16 位序号 + 高 8 位样本数
+  // ⚠️ 位运算不能靠 `&` / `>>`（记忆：FLINT 的按位运算是坏的）→ 一律用取模拆字节。
+  //    实测教训（2026-09-17，本卡收尾时抓到）：原来写的是"整除+相减"
+  //      `b[23] - (b[23] / 256) * 256`
+  //    —— 在 C 里对负数向零截断：序号涨到 128 以后 b[23] ≥ 0x8000，最高位把 int 顶成负数
+  //    （现场值 raw23 = 0x00FFE0C1，整串解释成负数后 `(b/256)*256` 不再是整字节倍数，
+  //      减完得到 **-31** 而不是 193）⇒ bit4/bit5 全丢。症状**极像"PM 通道没通"**：
+  //      FPS 数值明明读对了（143），来源标注却永远不出现（soff 永远 -1）。
+  //    取模对负数也保持低字节语义（-31 % 256 = 225），所以这里用取模 + 负数兜底。
+  g_pm_st8 = b[23] % 256;
+  if (g_pm_st8 < 0) g_pm_st8 = g_pm_st8 + 256;         // 兜底：序号把 int 顶成负数时
+  g_pm_n = (b[23] / 16777216) % 256;                   // 高 8 位 = 样本数（桥侧已夹到 ≤255）
+  if (g_pm_n < 0) g_pm_n = 0;                          // 数值段不猜负数（负数时按"没有样本"算）
+  g_raw23 = b[23];                    // v1.4.7 诊断：快照槽 23 的**原值**（dump 里打出来，免得靠推算）
+  g_raw22 = b[22];                    // 同：槽 22 = 有效位掩码原值
+  // —— CPU（桥 0..3）——
+  s->v_cpu_temp = (g_stitch_mask >> 0) & 1;  s->cpu_temp = b[0];
+  s->v_cpu_load = (g_stitch_mask >> 1) & 1;  s->cpu_load = b[1];
+  s->v_cpu_clock = (g_stitch_mask >> 2) & 1; s->cpu_clock = b[2];
+  s->v_cpu_pwr = (g_stitch_mask >> 3) & 1;   s->cpu_pwr = b[3];
+  // —— GPU（桥 4..8）——
+  s->v_gpu_temp = (g_stitch_mask >> 4) & 1;  s->gpu_temp = b[4];
+  s->v_gpu_load = (g_stitch_mask >> 5) & 1;  s->gpu_load = b[5];
+  s->v_gpu_memu = (g_stitch_mask >> 6) & 1;  s->gpu_memu = b[6];
+  s->v_gpu_memt = (g_stitch_mask >> 7) & 1;  s->gpu_memt = b[7];
+  s->v_gpu_pwr = (g_stitch_mask >> 8) & 1;   s->gpu_pwr = b[8];
+  // —— FPS（桥 13/14）——
+  // v1.4.7（2026-09-17）：帧率来源以 **PresentMon 优先、RTSS 回退**（桥内已按此选值，见 HwBridge.cs）。
+  //   bit4 = 本条 FPS 来自 PresentMon ⇒ 顺手把来源进程名取回来（C# 参考版的 FPS 行末尾有 `·msedge` 这种标注，
+  //   8080 JSON 里没有这个字段，所以只有缝合路径能给出来）。
+  s->v_fps = (g_stitch_mask >> 13) & 1;      s->fps = b[13];
+  s->v_fps_low = (g_stitch_mask >> 14) & 1;  s->fps_low = b[14];
+  s->have_src = 0;
+  g_pm_lines = hw_pm_lines();
+  g_pm_status = hw_pm_status();
+  if (((g_pm_st8 / 16) % 2) == 1) {
+    // cap 传**缓冲总字节数**（64）：桥侧会写 名字 + 结尾 0，最多 63 字节名字
+    // （⚠️ 别在这里先减 1，否则桥侧再减 1 ⇒ 名字被砍成 5 字节，实测踩过）
+    int sl = hw_pm_src(g_pm_src, 64);
+    if (sl > 0 && sl < 64) {
+      g_pm_src[63] = 0;        // 兜底收尾（缓冲里可能有上次的残留）
+      s->have_src = 1;
+      s->fps_src_len = sl;
+    }
+  }
+  // —— 整机功耗（桥 20；= cpu + gpu + 底噪45，与 C# 的 EstimateSystemPower 同式）——
+  s->v_sys_pwr = (g_stitch_mask >> 20) & 1;  s->sys_pwr = b[20];
+  // —— 内存/磁盘/网速/风扇：一律留 v_=0（交给本地直读通道）——
+  s->v_ram_used = 0; s->v_ram_total = 0; s->v_ram_load = 0;
+  s->v_disk_used = 0; s->v_disk_total = 0; s->v_disk_load = 0;
+  s->v_net_down = 0; s->v_net_up = 0; s->v_fan = 0;
+  return g_stitch_rc;
+}
+
+// v1.4.7（2026-09-17）：把来源名搬进**建行缓冲**，返回它在缓冲里的偏移（-1 = 本帧没有）。
+// 为什么必须搬：行构建器给文字段存的是 `buf` 里的**偏移**（`struct FSegs.texts`），没有"指向另一块缓冲"
+//   这种表达（struct 字段不支持指针）⇒ 来源名必须和别的文字段躺同一块地。
+// 为什么放在**建行之后**调：此刻所有行的文字都就位了，缓冲尾部一定空着（不用改 g->cur 的语义）。
+// ⚠️ 参数一律用标量：FLINT 的参数注解不认 `int *segs`（数组到指针不自动转换）→ 偏移自己算好再传进来。
+int stitch_sync_src(int *buf, int off, int nsrc) {
+  int i = 0;
+  int o = 0;
+  g_pm_src_off = 0 - 1;
+  g_pm_src_len = 0;
+  if (nsrc <= 0) return 0 - 1;
+  o = off + 1;                            // 分隔符（与 fr_text 的写法保持一致：前一个段末尾留 1 字节）
+  while (i < nsrc && g_pm_src[i] != 0) { buf[o + i] = g_pm_src[i]; i = i + 1; }
+  g_pm_src_off = o;
+  g_pm_src_len = i;
+  return o;
+}

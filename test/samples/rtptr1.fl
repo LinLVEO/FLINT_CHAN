@@ -1,0 +1,14 @@
+// rtptr1.fl — v1.0.6 函数返回指针：int* 直返 + 穿透写 + 链式返回 + 64 位地址比较
+int *retp(int *p) { return p; }
+int main() {
+  int a = 7;
+  int *p;
+  p = retp(&a);               // 句柄/指针直返（旧：只能 struct 字段承接）
+  if (p == 0) return 1;
+  *p = 99;                    // 穿透写（解引用返回的指针）
+  if (a != 99) return 2;
+  int *q = retp(retp(&a));    // 链式返回（返回结果再作实参）
+  if (q != &a) return 3;      // 64 位地址相等比较
+  *q = 42;
+  return a;                   // 42
+}

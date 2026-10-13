@@ -1,0 +1,117 @@
+// div1.fl -- 2026-09-22 (card T-20260921-232138, 3rd knife family 2 = div/mod: divisor into ecx)
+//   sentinel for the "divisor into ecx" tier: the dividend is still evaluated into eax, the divisor
+//   is a LEAF (immediate / frame slot / pool register) moved STRAIGHT into ecx => cdq; idiv ecx,
+//   instead of the old path (push rax / divisor -> eax / pop rcx / xchg eax,ecx / cdq / idiv ecx).
+// Grid = form x target x PREMISE:
+//   bit 1    divisor = imm, dividend = array element (non-leaf), division
+//   bit 2    divisor = imm, modulo
+//   bit 4    divisor = POOL REGISTER (promoted local), both / and %  (3rd-declared local => high reg)
+//   bit 8    divisor = frame SLOT (address taken so it can never be promoted) AND the slot offset is
+//            past 128 bytes (pad[20] in front) => exercises the disp32 form. premise: pool = 4
+//   bit 16   negative dividend AND negative divisor (unary minus + literal, and a negative local):
+//            truncation toward zero must match the old path exactly
+//   bit 32   dividend = non-leaf in several shapes (array element with a variable bound, call result)
+//   bit 64   compound assignment (x /= c, x %= c) must stay correct -- that path never used xchg
+//   bit 128  negative controls: divisor NON-leaf (must fall back to the old path, order preserved)
+// expected 42 (all 8 bits lit)
+
+int d1_small() { return 87; }
+
+int d1_a() {                     // bit 1: divisor = imm
+  int arr[4];
+  int i = 0;
+  int s = 0;
+  arr[0] = 100; arr[1] = 250; arr[2] = 399; arr[3] = 7;
+  while (i < 4) { s = s + arr[i] / 100; i = i + 1; }   // 1 + 2 + 3 + 0 = 6
+  return s;                                            // 6
+}
+int d1_b() {                     // bit 2: divisor = imm, modulo
+  int arr[4];
+  int i = 0;
+  int s = 0;
+  arr[0] = 10; arr[1] = 23; arr[2] = 37; arr[3] = 99;
+  while (i < 4) { s = s * 10 + arr[i] % 7; i = i + 1; }  // 3, 2, 2, 1 -> 3221
+  return s;                                              // 3221
+}
+int d1_c() {                     // bit 4: divisor = POOL REGISTER (declared 3rd => high register)
+  int arr[3];
+  int i = 0;
+  int s = 0;
+  int div = 6;
+  arr[0] = 61; arr[1] = 44; arr[2] = 19;
+  while (i < 3) { s = s * 10 + arr[i] / div; i = i + 1; }  // 10, 7, 3 -> 1073
+  s = s + (arr[0] % div);                                  // 61 % 6 = 1 -> 1074
+  return s;                                                // 1074
+}
+int d1_d() {                     // bit 8: divisor = frame SLOT, offset past 128 bytes (disp32)
+  int pad[20];                   // pushes every later slot past 128 bytes
+  int arr[3];
+  int i = 0;
+  int s = 0;
+  int steps = 0;
+  int dvsr = 4;
+  int *pd = &dvsr;               // address taken => never promoted
+  pad[0] = 1; pad[19] = 2;
+  arr[0] = 45; arr[1] = 71; arr[2] = 96;
+  *pd = 5;                       // dvsr = 5 through the pointer
+  while (i < 3) { s = s * 100 + arr[i] / dvsr; i = i + 1; steps = steps + 1; }  // 9, 14, 19 -> 91419
+  s = s + arr[0] % dvsr;                         // 45 % 5 = 0
+  return s + steps + pad[0] + pad[19];           // 91419 + 3 + 1 + 2 = 91425
+}
+int d1_e() {                     // bit 16: negative dividend / negative divisor (truncate toward zero)
+  int arr[3];
+  int neg = -7;
+  int i = 0;
+  int s = 0;
+  arr[0] = -30; arr[1] = 30; arr[2] = -30;
+  while (i < 3) { s = s * 10 + arr[i] / 7; i = i + 1; }  // -4, 4, -4 -> -364
+  s = s + (arr[0] / -7);         // -30 / -7 = 4 (unary minus + literal divisor)  -> -360
+  s = s + (arr[1] % neg);        // 30 % -7 = 2 (negative local divisor)         -> -358
+  return s;                                            // -358
+}
+int d1_f() {                     // bit 32: dividend = non-leaf in several shapes
+  int arr[3];
+  int lim = 9;
+  int i = 0;
+  int s = 0;
+  arr[0] = 100; arr[1] = 250; arr[2] = 640;
+  while (i < 3) { s = s + arr[i] / lim; i = i + 1; }   // 11 + 27 + 71 = 109
+  s = s + (d1_small() / 3);                            // 87 / 3 = 29   -> 138
+  s = s + (d1_small() % 10);                           // 87 % 10 = 7   -> 145
+  return s;                                            // 145
+}
+int d1_g() {                     // bit 64: compound assignment stays correct (different emit path)
+  int x = 1000;
+  int y = 7;
+  int c = 3;
+  x /= y;                        // 142
+  x %= c;                        // 142 % 3 = 1
+  y /= 2;                        // 3
+  c %= 2;                        // 1
+  return x * 100 + y * 10 + c;   // 100 + 30 + 1 = 131
+}
+int d1_h() {                     // bit 128: negative controls (divisor non-leaf => old path)
+  int arr[3];
+  int a = 100;
+  int b = 3;
+  int cc = 4;
+  int s = 0;
+  arr[0] = 1000; arr[1] = 2000; arr[2] = 3000;
+  s = s + (arr[0] / (b + cc));   // 1000 / 7 = 142  (divisor is an expression)
+  s = s + (arr[1] % (b + 1));    // 2000 % 4 = 0     (divisor is an expression)
+  s = s + (a / cc);              // 100 / 4 = 25     (slot dividend vs pool-register divisor)
+  return s;                                            // 167
+}
+int main() {
+  int r = 0;
+  if (d1_a() == 6) { r = r | 1; }
+  if (d1_b() == 3221) { r = r | 2; }
+  if (d1_c() == 1074) { r = r | 4; }
+  if (d1_d() == 91425) { r = r | 8; }
+  if (d1_e() == -358) { r = r | 16; }
+  if (d1_f() == 145) { r = r | 32; }
+  if (d1_g() == 131) { r = r | 64; }
+  if (d1_h() == 167) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

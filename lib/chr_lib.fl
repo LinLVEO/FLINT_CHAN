@@ -1,0 +1,35 @@
+// chr_lib.fl — FLINT 标准库（第一批）：字符分类与大小写转换（char = 无符号字节 0..255）
+// 用法：include "../../lib/chr_lib.fl"（路径相对本文件目录解析）
+// 命名：2026-09-09 用户定（原则 7 便利性第一）——is_/to_ 短语，见 SPEC「标准库」节
+
+// 十进制数字 '0'..'9' → 1
+int std::is_digit(int c) {
+  if (c >= '0' && c <= '9') { return 1; }
+  return 0;
+}
+
+// 英文字母 → 1
+int std::is_alpha(int c) {
+  if (c >= 'a' && c <= 'z') { return 1; }
+  if (c >= 'A' && c <= 'Z') { return 1; }
+  return 0;
+}
+
+// 空白（空格 / 制表 9 / 换行 10 / 回车 13）→ 1
+int std::is_space(int c) {
+  if (c == ' ') { return 1; }
+  if (c == 9 || c == 10 || c == 13) { return 1; }
+  return 0;
+}
+
+// 小写 → 大写（其余原样返回）
+int std::to_upper(int c) {
+  if (c >= 'a' && c <= 'z') { return c - 32; }
+  return c;
+}
+
+// 大写 → 小写（其余原样返回）
+int std::to_lower(int c) {
+  if (c >= 'A' && c <= 'Z') { return c + 32; }
+  return c;
+}

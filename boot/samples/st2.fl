@@ -1,0 +1,3 @@
+struct P { int x; int y; }
+int setp(struct P *p, int a, int b) { p->x = a; p->y = b; return 0; }
+int main() { struct P v; return setp(&v, 40, 2) + v.x + v.y; }

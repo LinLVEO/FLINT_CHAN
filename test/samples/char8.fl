@@ -1,0 +1,5 @@
+char id(char c) { return c; }
+int main() {
+  char x = 200;
+  return id(x);
+}

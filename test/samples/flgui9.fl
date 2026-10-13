@@ -1,0 +1,167 @@
+// flgui9.fl — FLGUI M4f：**真动画第一刀**的无头契约样本（不建窗；只量内核侧"缓动 / 插值 / 进度 / 池字段"）
+// 为什么单开一个样本：
+//   · 动画是**有状态**的（起始戳住状态池、跨帧存活）⇒ 必须有一条判据钉住"起始戳只盖一次"；
+//   · 进度按**绝对时间**算（M4d 时间注入）⇒ "掉帧不跑偏"要拿**两条帧史不同的 ID** 对账，只看一条看不出来；
+//   · `anim_pct = 0`（关动画）与 `dur <= 0` 是**两个除零特判**，两条都要量到（不许崩、不许除零）；
+//   · 曲线是**定点整数**（256 = 1.0；boot 侧浮点未接通 ⇒ 禁 `double`）⇒ 形状必须钉住值，不能只测端点。
+// 判据（位掩码 31 位，全亮 = 2147483647 → return 42）：
+//   0 e(0)=0 ｜1 e(256)=256 ｜2 e(128)=224 ｜3 负值夹 0 ｜4 超上限夹 256 ｜5 e(64)=148（曲线形状，线性会给 64）
+//   6 lerp(a,b,0)=a ｜7 lerp(a,b,256)=b ｜8 lerp(0,256,128)=128 ｜9 反向下界 ｜10 反向中点 15 ｜11 t 越界夹取
+//   12 池字段写读回 ｜13 老入口 gui_pool_get == 字段 0 ｜14 gui_pool_at(id,0) == 字段 0
+//   15 k 越界夹到 3 ｜16 k 越界写不踩字段 0
+//   17 anim_pct=0 ⇒ 进度恒 256（立即到位）｜18 起步帧进度 0
+//   19 起始戳**就是 0**（⚠️ "不能用 0 当没起"的那个坑）｜20 "起过没有"另占标志字段（= 1）
+//   21 ms=16 → 67 ｜22 ms=32 → 124（按时间推进）
+//   23 跨 4 帧后起始戳仍是 0（**只盖一次**）
+//   24 同帧 idA=239 ｜25 idB（晚起 32ms）=200 ｜26 两者不等（**不同 ID 不串位**）
+//   27 逐帧采样的 idB 在 ms=160 得 253 ｜28 一跳 128ms 的 idC 与 idB **同值**（**掉帧不跑偏**）
+//   29 慢动作 pct=200：同一 el=32 只有 67（< 正常档 124）＋ `dur <= 0`（0 与 -5）⇒ 256 且**不写标志**
+//   30 到点饱和：ms=5000 时进度 = 256（**不越界**）
+include "flgui_widgets.fl"
+
+// 合成输入（8 个字段全填；`ms` = 本帧注入时间 —— 内核不取时，见 GuiInput 注释）
+int fl9_in(struct GuiInput *in, int ms) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0; in->wheel = 0; in->key = 0; in->ms = ms;
+  return ms;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int r = 0;
+  int ok = 1;
+  int idA = 0;
+  int idB = 0;
+  int idC = 0;
+  int idD = 0;
+  int idE = 0;
+  int idP = 0;
+  int idQ = 0;
+  int p0 = 0;
+  int p16 = 0;
+  int p32 = 0;
+  int pA96 = 0;
+  int pB96 = 0;
+  int pB160 = 0;
+  int pC160 = 0;
+  int pD192 = 0;
+  int p5000 = 0;
+
+  gui_init(&c);
+  idA = gui_id("fl9A");
+  idB = gui_id("fl9B");
+  idC = gui_id("fl9C");
+  idD = gui_id("fl9D");
+  idE = gui_id("fl9E");
+  idP = gui_id("fl9P");
+  idQ = gui_id("fl9Q");
+
+  // ================= 一、缓动曲线 gui_ease_out（定点 0..256）=================
+  if (gui_ease_out(0) == 0) { r = r | 1; }
+  if (gui_ease_out(256) == 256) { r = r | 2; }
+  if (gui_ease_out(128) == 224) { r = r | 4; }          // 1−(1−0.5)³ = 0.875 ⇒ 224
+  if (gui_ease_out(0 - 5) == 0) { r = r | 8; }          // 越界一律夹取（不崩、不返回负数）
+  if (gui_ease_out(999) == 256) { r = r | 16; }
+  if (gui_ease_out(64) == 148) { r = r | 32; }          // 形状：线性会给 64，ease-out 必须更快
+
+  // ================= 二、整数插值 gui_lerp =================
+  if (gui_lerp(10, 20, 0) == 10) { r = r | 64; }
+  if (gui_lerp(10, 20, 256) == 20) { r = r | 128; }
+  if (gui_lerp(0, 256, 128) == 128) { r = r | 256; }
+  if (gui_lerp(20, 10, 256) == 10) { r = r | 512; }
+  if (gui_lerp(20, 10, 128) == 15) { r = r | 1024; }    // 反向（截断方向随被除数符号 = C 语义）
+  if (gui_lerp(10, 20, 999) == 20) { r = r | 2048; }
+
+  // ================= 三、池字段读写（k = 0..3）与夹取 =================
+  gui_pool_put(idP, 1, 123);
+  if (gui_pool_at(idP, 1) == 123) { r = r | 4096; }
+  gui_pool_put(idP, 0, 7);
+  if (gui_pool_get(idP) == 7) { r = r | 8192; }          // 老入口恒等价字段 0
+  if (gui_pool_at(idP, 0) == 7) { r = r | 16384; }
+  gui_pool_put(idQ, 9, 55);                              // k 越界 ⇒ 夹到 3（不许越写）
+  if (gui_pool_at(idQ, 3) == 55) { r = r | 32768; }
+  if (gui_pool_at(idQ, 0) == 0) { r = r | 65536; }       // 越界写不许踩到字段 0
+
+  // ================= 四、anim_pct = 0 ⇒ 立即到位（除零特判 ①）=================
+  gui_anim_set(&c, 0);
+  fl9_in(&in, 0);
+  gui_begin(&c, &in);
+  if (gui_anim(&c, idA, 160) == 256) { r = r | 131072; }
+  gui_end(&c);
+
+  // ================= 五、anim_pct = 100：按时间推进 / 起始戳只盖一次 =================
+  gui_anim_set(&c, 100);
+  fl9_in(&in, 0);
+  gui_begin(&c, &in);
+  p0 = gui_anim(&c, idA, 160);                           // 起步帧：el = 0
+  gui_end(&c);
+  if (p0 == 0) { r = r | 262144; }
+  if (gui_pool_at(idA, 1) == 0) { r = r | 524288; }       // ⚠️ 起始戳**就是 0**（不能用 0 当"没起"）
+  if (gui_pool_at(idA, 3) == 1) { r = r | 1048576; }      // "起过没有"另占字段 3
+
+  fl9_in(&in, 16);
+  gui_begin(&c, &in);
+  p16 = gui_anim(&c, idA, 160);
+  gui_end(&c);
+  if (p16 == 67) { r = r | 2097152; }
+
+  fl9_in(&in, 32);
+  gui_begin(&c, &in);
+  p32 = gui_anim(&c, idA, 160);                          // el = 32
+  gui_anim(&c, idB, 160);                                // idB 在 ms=32 才起（戳 = 32）
+  gui_anim(&c, idC, 160);                                // idC 同样 32 起，但**下一帧直接到 160**（模拟掉帧）
+  gui_end(&c);
+  if (p32 == 124) { r = r | 4194304; }
+
+  // 跨 4 帧后起始戳必须还是 0（若每帧重盖，这里会是 16 / 32）
+  if (gui_pool_at(idA, 1) == 0) { r = r | 8388608; }
+
+  fl9_in(&in, 96);
+  gui_begin(&c, &in);
+  pA96 = gui_anim(&c, idA, 160);                         // el = 96
+  pB96 = gui_anim(&c, idB, 160);                         // el = 64
+  gui_end(&c);
+  if (pA96 == 239) { r = r | 16777216; }
+  if (pB96 == 200) { r = r | 33554432; }
+  if (pA96 != pB96) { r = r | 67108864; }                // 不同 ID 的戳互不串位
+
+  fl9_in(&in, 160);
+  gui_begin(&c, &in);
+  pB160 = gui_anim(&c, idB, 160);                        // 逐帧采样的 idB：el = 128
+  pC160 = gui_anim(&c, idC, 160);                        // 一跳 128ms 的 idC：el = 128（帧数完全不同）
+  gui_end(&c);
+  if (pB160 == 253) { r = r | 134217728; }
+  if (pC160 == pB160) { r = r | 268435456; }             // **掉帧不跑偏**：同 elapsed ⇒ 同进度
+
+  // ================= 六、慢动作 pct = 200 ＋ 除零特判 ②（dur <= 0）=================
+  gui_anim_set(&c, 200);
+  fl9_in(&in, 160);
+  gui_begin(&c, &in);
+  gui_anim(&c, idD, 160);                                // idD 起（戳 = 160）
+  gui_end(&c);
+  fl9_in(&in, 192);
+  gui_begin(&c, &in);
+  pD192 = gui_anim(&c, idD, 160);                        // el = 32，但 dur = 160 × 200 / 100 = 320
+  gui_end(&c);
+  ok = 1;
+  if (pD192 != 67) { ok = 0; }                           // 慢动作 ⇒ 同刻进度更小（正常档 el=32 是 124）
+  if (pD192 >= p32) { ok = 0; }
+  if (gui_anim(&c, idE, 0) != 256) { ok = 0; }           // dur = 0 ⇒ 立即到位（除零特判 ②）
+  if (gui_anim(&c, idE, 0 - 5) != 256) { ok = 0; }       // 负时长同办
+  if (gui_pool_at(idE, 3) != 0) { ok = 0; }              // 立即到位那条路**不许写标志**（否则下次真动画起不来）
+  if (ok == 1) { r = r | 536870912; }
+
+  // ================= 七、到点饱和（不越界）=================
+  fl9_in(&in, 5000);
+  gui_begin(&c, &in);
+  p5000 = gui_anim(&c, idA, 160);                        // el ≫ dur
+  gui_end(&c);
+  if (p5000 == 256) { r = r | 1073741824; }
+
+  print(["FLGUI9 p0=", p0, " p16=", p16, " p32=", p32, " A96=", pA96, " B96=", pB96, " B160=", pB160, " C160=", pC160, " D192=", pD192, " p5000=", p5000, "\n"]);
+  print(["FLGUI9 stampA=", gui_pool_at(idA, 1), " flagA=", gui_pool_at(idA, 3), " flagE=", gui_pool_at(idE, 3), " r=", r, "\n"]);
+  gui_dump(&c);
+
+  if (r == 2147483647) { return 42; }
+  return r;
+}

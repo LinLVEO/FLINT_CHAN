@@ -1,0 +1,351 @@
+// flgui13.fl — FLGUI M4m（2026-09-28，卡 T-20260928-005959）：**输入灵敏度**的无头契约
+//   不建真窗：滚轮/滑块/滚动条全走"合成输入喂 gui_begin"；拖动那组只喂 `my` ＋ 一个 `hwnd = 0` 的 GuiWin
+//   （拖动函数**只收 DragSt 与窗口句柄，不碰 GuiCtx** ⇒ 命令表可以逐字段对账）。
+//   真鼠标那半不在这道门里：滚轮 = `apps\ui_gallery\wheel-probe.ps1`、拖动 = `apps\ui_gallery\drag-probe.ps1`。
+//
+// 本刀三组判据（每组都钉"改前会红"的那个数）：
+//   ① **滚轮步长 `c.wheel_step`**（默认 60 = 3 行/格）：`0 / 40 / 60` 三档喂 `in.wheel = ∓1 / ∓3`
+//      ⇒ 偏移变化 = `wheel_step × 格数`（含累加与反向），且 `0` 是真的**不动**（不是"被夹住"）。
+//      内容 12 行 ⇒ maxoff = 172，比被测偏移高 ⇒ **不把收尾夹取当搬运**（flgui5 记过的那条假绿）。
+//   ② **拖动倍率 `c.drag_scale`**（默认 100 = 1:1）：滑块与滚动条各跑 `100 / 50 / 200`，
+//      同一段光标位移 **Δ = 20px** ⇒ 位移 = `Δ × scale / 100` = **20 / 10 / 40**（都不带余数 ⇒
+//      期望值是三个整数常量，不需要"照抄实现里的除法"）。`scale = 100` 那一档另加一条现状等价判据：
+//      滑块按下那一帧的值 == **光标在轨道内的像素偏移**（老绝对映射逐像素相同）。
+//      滚动条还顺带钉 **可抓区放宽**：按下点取 `tx − 6`（**老 4px 区之外**）也能抓到滑块。
+//   ③ **窗口拖动不碰命令流**：拖动状态 on/off 两套下同一帧的命令表**逐字段**（kind/x/y/w/h/toff/tlen/col/a）
+//      与条数完全一致；另钉"顶栏 24px 之外按下 ⇒ 不开拖"（= 不可拖档、位移 0,0 的上游口径）＋
+//      "顶栏内按下 ⇒ 开拖（返回 1、on = 1）"＋"抬手收尾（on = 0）"＋"400ms 内第二次按下 ⇒ 双击分支（返回 2）"。
+// 位掩码 21 位，全亮 = 2097151 → return 42。
+//   bit 1  默认 wheel_step == 60 ｜ bit 2  默认 drag_scale == 100
+//   bit 3  wheel_step = 0：滚 3 格偏移**不动** ｜ bit 4  step = 40：滚 1 格 = 40 ｜ bit 5  再滚 2 格 = 120（累加）
+//   bit 6  step = 60：滚 1 格 = 60 ｜ bit 7  再反向滚 1 格 = 0
+//   bit 8  滑块按下帧 = 绝对映射（值 == 光标像素偏移）
+//   bit 9/10/11   滑块 scale = 100/50/200 ⇒ 位移 20/10/40
+//   bit 12/13/14  滚动条 scale = 100/50/200 ⇒ 滑块位移 20/10/40
+//   bit 15/16/17  滚动条可抓区放宽（三档都在 `tx − 6` 处抓到了滑块：y0 = 视图顶）
+//   bit 18 拖动不改命令流（逐字段 ＋ 条数）｜ bit 19 顶栏外按下不开拖（on 保持 0）
+//   bit 20 顶栏内按下开拖（返回 1、on = 1）｜ bit 21 400ms 内第二次顶栏按下 ⇒ 双击分支（返回 2）
+include "flgui_win32.fl"
+
+// 命令表快照（拖动 on/off 两帧逐字段比；命令表每帧重建 ⇒ 必须抄下来再比）—— 大容量载体一律全局数组
+int f13_sk[256];
+int f13_sx[256];
+int f13_sy[256];
+int f13_sw[256];
+int f13_sh[256];
+int f13_st[256];
+int f13_sl[256];
+int f13_sc[256];
+int f13_sa[256];
+int f13_sn = 0;
+
+int f13_snap() {
+  int i = 0;
+  f13_sn = gui_cmd_n;
+  while (i < gui_cmd_n) {
+    f13_sk[i] = gui_cmd_kind[i];
+    f13_sx[i] = gui_cmd_x[i];
+    f13_sy[i] = gui_cmd_y[i];
+    f13_sw[i] = gui_cmd_w[i];
+    f13_sh[i] = gui_cmd_h[i];
+    f13_st[i] = gui_cmd_toff[i];
+    f13_sl[i] = gui_cmd_tlen[i];
+    f13_sc[i] = gui_cmd_col[i];
+    f13_sa[i] = gui_cmd_a[i];
+    i = i + 1;
+  }
+  return f13_sn;
+}
+
+// 逐字段比（条数也要同）
+int f13_same() {
+  int i = 0;
+  if (gui_cmd_n != f13_sn) { return 0; }
+  while (i < gui_cmd_n) {
+    if (f13_sk[i] != gui_cmd_kind[i]) { return 0; }
+    if (f13_sx[i] != gui_cmd_x[i]) { return 0; }
+    if (f13_sy[i] != gui_cmd_y[i]) { return 0; }
+    if (f13_sw[i] != gui_cmd_w[i]) { return 0; }
+    if (f13_sh[i] != gui_cmd_h[i]) { return 0; }
+    if (f13_st[i] != gui_cmd_toff[i]) { return 0; }
+    if (f13_sl[i] != gui_cmd_tlen[i]) { return 0; }
+    if (f13_sc[i] != gui_cmd_col[i]) { return 0; }
+    if (f13_sa[i] != gui_cmd_a[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 12 行内容（每行 = line_h 14 + spacing 4）⇒ 视口 40 时 maxoff = 172、视口 100 时 cont = 226
+int f13_rows(struct GuiCtx *c) {
+  gui_label(c, "r01");
+  gui_label(c, "r02");
+  gui_label(c, "r03");
+  gui_label(c, "r04");
+  gui_label(c, "r05");
+  gui_label(c, "r06");
+  gui_label(c, "r07");
+  gui_label(c, "r08");
+  gui_label(c, "r09");
+  gui_label(c, "r10");
+  gui_label(c, "r11");
+  gui_label(c, "r12");
+  return 0;
+}
+
+// 一帧"滚轮"：视口钉在 (10,30,100,40)（调用方把光标放进视口），返回该视口本帧结束后的偏移
+int f13_wheel_frame(struct GuiCtx *c, struct GuiInput *in, char *name, int w) {
+  struct GuiRect r;
+  int off = 0;
+  in->wheel = w;
+  gui_begin(c, in);
+  r.x = 10; r.y = 30; r.w = 100; r.h = 40;
+  gui_next_rect(c, &r);
+  gui_scroll_begin(c, name, 40);
+  f13_rows(c);
+  gui_scroll_end(c);
+  gui_end(c);
+  off = gui_pool_get(gui_id(name));
+  in->wheel = 0;
+  return off;
+}
+
+// 一帧"滑块"：轨道钉在 (10,100,200,20)，`max = 199 = 轨道内宽` ⇒ **值 1:1 等于像素偏移**（好读、可判）
+int f13_slider_frame(struct GuiCtx *c, struct GuiInput *in, int v) {
+  struct GuiRect r;
+  int nv = 0;
+  gui_begin(c, in);
+  r.x = 10; r.y = 100; r.w = 200; r.h = 20;
+  gui_next_rect(c, &r);
+  nv = gui_slider(c, "sld", v, 199);
+  gui_end(c);
+  return nv;
+}
+
+// 一帧"滚动条"：视图钉在 (10,30,100,100)（12 行内容 ⇒ maxoff = 126、滑块高 44、行程 56），
+//   返回本帧滑块（kind 12）顶部的 y —— 拖动位移就直接从这个值读（不手算映射公式）
+int f13_scbar_frame(struct GuiCtx *c, struct GuiInput *in, char *name) {
+  struct GuiRect r;
+  int i = 0;
+  int ty = 0;
+  gui_begin(c, in);
+  r.x = 10; r.y = 30; r.w = 100; r.h = 100;
+  gui_next_rect(c, &r);
+  gui_scroll_begin(c, name, 100);
+  f13_rows(c);
+  gui_scroll_end(c);
+  gui_end(c);
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 12) { ty = gui_cmd_y[i]; }
+    i = i + 1;
+  }
+  return ty;
+}
+
+// 拖动 on/off 两帧画同一套东西（滑块 + 滚动条 + 文本 ⇒ 命令流形状够复杂才值得比）
+int f13_paint(struct GuiCtx *c) {
+  struct GuiRect r;
+  gui_label(c, "drag");
+  r.x = 10; r.y = 100; r.w = 200; r.h = 20;
+  gui_next_rect(c, &r);
+  gui_slider(c, "sld", 0, 199);
+  r.x = 10; r.y = 30; r.w = 100; r.h = 60;
+  gui_next_rect(c, &r);
+  gui_scroll_begin(c, "pane", 60);
+  f13_rows(c);
+  gui_scroll_end(c);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct DragSt dg;
+  int res = 0;
+  int o0 = 0;
+  int o1 = 0;
+  int v0 = 0;
+  int v1 = 0;
+  int y0 = 0;
+  int y1 = 0;
+  int sc = 0;
+  int lk = 0;
+  int b1 = 0;
+  int b2 = 0;
+  int b3 = 0;
+  int onv = 0;
+  int na = 0;
+  int same = 0;
+
+  gui_init(&c);
+  c.lay_w = 160;
+  c.lay_h = 200;
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.key = 0; in.ms = 0;
+
+  // ============ 一、默认值（bit 1 / bit 2）============
+  if (c.wheel_step == 60) { res = res | 1; }
+  if (c.drag_scale == 100) { res = res | 2; }
+  print(["M4M def wheel_step=", c.wheel_step, " drag_scale=", c.drag_scale, "\n"]);
+
+  // ============ 二、滚轮步长：0 / 40 / 60（bit 3~7）============
+  // 三个视口用**不同的名字** ⇒ 偏移各自从 0 起（不靠"手动复位偏移"）。
+  // 光标 (60,50) 在视口 (10,30,100,40) 内（滚轮只被悬停的视口消费）。
+  in.mx = 60; in.my = 50;
+  c.wheel_step = 0;
+  o0 = f13_wheel_frame(&c, &in, "w0", 0);
+  o1 = f13_wheel_frame(&c, &in, "w0", 0 - 3);
+  print(["WSTEP step=", c.wheel_step, " n=", 0 - 3, " off0=", o0, " off1=", o1, "\n"]);
+  if (o0 == 0) { if (o1 == 0) { res = res | 4; } }
+
+  c.wheel_step = 40;
+  o0 = f13_wheel_frame(&c, &in, "w40", 0 - 1);
+  print(["WSTEP step=", c.wheel_step, " n=", 0 - 1, " off0=", 0, " off1=", o0, "\n"]);
+  if (o0 == 40) { res = res | 8; }
+  o1 = f13_wheel_frame(&c, &in, "w40", 0 - 2);
+  print(["WSTEP step=", c.wheel_step, " n=", 0 - 2, " off0=", o0, " off1=", o1, "\n"]);
+  if (o1 == 120) { res = res | 16; }
+
+  c.wheel_step = 60;
+  o0 = f13_wheel_frame(&c, &in, "w60", 0 - 1);
+  print(["WSTEP step=", c.wheel_step, " n=", 0 - 1, " off0=", 0, " off1=", o0, "\n"]);
+  if (o0 == 60) { res = res | 32; }
+  o1 = f13_wheel_frame(&c, &in, "w60", 1);
+  print(["WSTEP step=", c.wheel_step, " n=", 1, " off0=", o0, " off1=", o1, "\n"]);
+  if (o1 == 0) { res = res | 64; }
+
+  // ============ 三、拖动倍率 · 滑块（bit 8~11）============
+  // 按下点 mx = 30 ⇒ 绝对映射 = 30 − 10 = **20**（这就是"现状"那一帧的值）；随后拖到 mx = 50（Δ = 20）。
+  in.my = 110;
+  sc = 100;
+  c.drag_scale = sc;
+  in.mx = 30; in.down = 1; in.pressed = 1; in.released = 0;
+  v0 = f13_slider_frame(&c, &in, 0);
+  in.mx = 50; in.pressed = 0;
+  v1 = f13_slider_frame(&c, &in, v0);
+  print(["SLD sc=", sc, " press=", 20, " v0=", v0, " v1=", v1, " dx=", 20, "\n"]);
+  if (v0 == 20) { res = res | 128; }                       // 按下帧 = 绝对映射（现状等价）
+  if (v1 == 40) { res = res | 256; }                       // 20 + 20 × 100/100
+  in.down = 0; in.released = 1;
+  f13_slider_frame(&c, &in, v1);
+  in.released = 0;
+
+  sc = 50;
+  c.drag_scale = sc;
+  in.mx = 30; in.down = 1; in.pressed = 1;
+  v0 = f13_slider_frame(&c, &in, 0);
+  in.mx = 50; in.pressed = 0;
+  v1 = f13_slider_frame(&c, &in, v0);
+  print(["SLD sc=", sc, " press=", 20, " v0=", v0, " v1=", v1, " dx=", 20, "\n"]);
+  if (v1 == 30) { res = res | 512; }                       // 20 + 20 × 50/100
+  in.down = 0; in.released = 1;
+  f13_slider_frame(&c, &in, v1);
+  in.released = 0;
+
+  sc = 200;
+  c.drag_scale = sc;
+  in.mx = 30; in.down = 1; in.pressed = 1;
+  v0 = f13_slider_frame(&c, &in, 0);
+  in.mx = 50; in.pressed = 0;
+  v1 = f13_slider_frame(&c, &in, v0);
+  print(["SLD sc=", sc, " press=", 20, " v0=", v0, " v1=", v1, " dx=", 20, "\n"]);
+  if (v1 == 60) { res = res | 1024; }                      // 20 + 20 × 200/100
+  in.down = 0; in.released = 1;
+  f13_slider_frame(&c, &in, v1);
+  in.released = 0;
+
+  // ============ 四、拖动倍率 · 滚动条（bit 12~15）============
+  // 视图 (10,30,100,100) ⇒ 轨道 x = 10 + 100 − 4 = 106（老命中区 [106,110)）。
+  // **按下点取 mx = 100 = tx − 6**：只落在 M4m 放宽后的 12px 命中区里 ⇒ 抓得到滑块就等于
+  //   "可抓区放宽"被验到了（老代码这一下会整个忽略、滑块一动不动）。
+  // 按下 my = 38（滑块顶 30 + 8），拖到 my = 58（Δ = 20）⇒ 滑块位移 = 20 × scale / 100。
+  in.mx = 100;
+  sc = 100;
+  c.drag_scale = sc;
+  in.my = 38; in.down = 1; in.pressed = 1; in.released = 0;
+  y0 = f13_scbar_frame(&c, &in, "s100");
+  in.my = 58; in.pressed = 0;
+  y1 = f13_scbar_frame(&c, &in, "s100");
+  print(["SCB sc=", sc, " y0=", y0, " y1=", y1, " dx=", 20, "\n"]);
+  if (y0 == 30) { res = res | 2048; }                      // 命中区放宽：tx − 6 也抓到了（y0 = 视图顶）
+  if (y1 == 50) { res = res | 4096; }                      // 30 + 20 × 100/100 = 50
+  in.down = 0; in.released = 1;
+  f13_scbar_frame(&c, &in, "s100");
+  in.released = 0;
+
+  sc = 50;
+  c.drag_scale = sc;
+  in.my = 38; in.down = 1; in.pressed = 1;
+  y0 = f13_scbar_frame(&c, &in, "s50");
+  in.my = 58; in.pressed = 0;
+  y1 = f13_scbar_frame(&c, &in, "s50");
+  print(["SCB sc=", sc, " y0=", y0, " y1=", y1, " dx=", 20, "\n"]);
+  if (y0 == 30) { res = res | 8192; }
+  if (y1 == 40) { res = res | 16384; }                     // 30 + 20 × 50/100 = 40
+  in.down = 0; in.released = 1;
+  f13_scbar_frame(&c, &in, "s50");
+  in.released = 0;
+
+  sc = 200;
+  c.drag_scale = sc;
+  in.my = 38; in.down = 1; in.pressed = 1;
+  y0 = f13_scbar_frame(&c, &in, "s200");
+  in.my = 58; in.pressed = 0;
+  y1 = f13_scbar_frame(&c, &in, "s200");
+  print(["SCB sc=", sc, " y0=", y0, " y1=", y1, " dx=", 20, "\n"]);
+  if (y0 == 30) { res = res | 32768; }
+  if (y1 == 70) { res = res | 65536; }                     // 30 + 20 × 200/100 = 70
+  in.down = 0; in.released = 1;
+  f13_scbar_frame(&c, &in, "s200");
+  in.released = 0;
+
+  // ============ 五、窗口拖动：不碰命令流 ＋ 拖动区（bit 16~19）============
+  // 无真窗：`hwnd = 0`（`SetCapture(0)` / `ReleaseCapture()` / `ShowWindow(0,…)` 都只是失败返回，不动窗口）。
+  g.hwnd = 0;
+  g.w = 420;
+  g.h = 260;
+  dg.on = 0;
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0;
+
+  // 拖动状态 ON：顶栏（my = 5 < 24）按下 ⇒ 进拖动（返回 1、on = 1）。**这一帧不调 drag_frame**：
+  //   那个函数要查物理左键（轮询兜底），返回值会随"此刻鼠标按没按着"变 —— 判据不许依赖它。
+  b1 = gui_win_drag_begin(&dg, &g, 5);
+  onv = dg.on;
+  gui_begin(&c, &in);
+  f13_paint(&c);
+  gui_end(&c);
+  na = f13_snap();
+
+  // 拖动状态 OFF：抬手收尾后同一帧再画一遍（同一套输入、同一套控件）
+  gui_win_drag_end(&dg);
+  gui_begin(&c, &in);
+  f13_paint(&c);
+  gui_end(&c);
+  same = f13_same();
+  print(["DRAG begin=", b1, " on=", onv, " off_after_end=", dg.on, " cmdnA=", na, " cmdnB=", gui_cmd_n,
+         " same=", same, "\n"]);
+  if (same == 1) { res = res | 131072; }
+  if (b1 == 1) { if (onv == 1) { res = res | 524288; } }   // 顶栏内按下 ⇒ 真的进了拖动状态
+
+  // 顶栏之外（my = 100）按下 ⇒ **不开拖**（on 保持 0）—— "不可拖档位移 0,0" 的上游口径
+  lk = gui_win_drag_begin(&dg, &g, 100);
+  print(["DRAG locked_my=100 begin=", lk, " on=", dg.on, "\n"]);
+  if (lk == 0) { if (dg.on == 0) { res = res | 262144; } }
+
+  // 顶栏之内再按一次（**与上一次顶栏按下的时刻已相隔 > 400ms**？不一定 —— 所以先清时刻再按）：
+  //   ⚠️ 双击判定是"400ms 内、位移 ≤4px" ⇒ 同一段代码里连按两次**就是**双击（返回 2）。
+  //   这里正好用它来钉双击分支；而"开拖"那一档由上面第一次按下（返回 1）钉。
+  b3 = gui_win_drag_begin(&dg, &g, 5);
+  print(["DRAG dbl begin2=", b3, " on=", dg.on, "\n"]);
+  if (b3 == 2) { res = res | 1048576; }
+  gui_win_drag_end(&dg);
+
+  // 每帧都该能安全调一次（没在拖 ⇒ 返回 0、什么都不做）；这一条不进位图（返回值与物理左键有关）
+  b2 = gui_win_drag_frame(&dg);
+  print(["DRAG idle frame=", b2, " on=", dg.on, "\n"]);
+
+  print(["M4M res=", res, " want=", 2097151, "\n"]);
+  if (res == 2097151) { return 42; }
+  return res;
+}

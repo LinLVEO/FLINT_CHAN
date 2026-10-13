@@ -1,0 +1,10 @@
+// new3.fl — 裸 new（非 own，手动管理）：VirtualFree(p-8) 释放 = 头部布局 + 64 位减法实证
+api kernel32 int VirtualFree(int, int, int);
+int main() {
+  int *p = new int;
+  if (p == 0) return 90;
+  *(p) = 7;
+  if (*(p) != 7) return 91;
+  VirtualFree(p - 8, 0, 0x8000);  // 负载地址 -8 = 块基址 → MEM_RELEASE
+  return 0;
+}

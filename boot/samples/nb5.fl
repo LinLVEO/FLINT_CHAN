@@ -1,0 +1,6 @@
+// nb5.fl — B2j 负例：解引用非指针（*x 里 x 是 int）必须编译报错
+int main() {
+  int x;
+  *x = 1;
+  return 0;
+}

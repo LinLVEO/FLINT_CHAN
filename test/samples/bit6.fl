@@ -1,0 +1,6 @@
+// bit6.fl — 按位取反 ~ ：~5 = -6；~0xFF(255) = -256
+int main() {
+  int a = ~5;
+  int b = ~0xFF;
+  return a + b;   // -6 + -256 = -262
+}

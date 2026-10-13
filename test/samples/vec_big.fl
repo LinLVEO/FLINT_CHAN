@@ -1,0 +1,30 @@
+// vec_big.fl -- lib\vec_lib.fl growth stress. Registered in test\run-tests.js as 42.
+// Pushes 1000 elements starting from capacity 1 (1 -> 2 -> 4 -> ... -> 1024, nine moves),
+// then reads every element back and compares. Catches a growth bug that only appears after
+// several moves (copying too few bytes, losing the tail, stale capacity slot).
+// The leak side (200000 new/push/free cycles, flat working set) is a scratch probe:
+// tmp\vectest\vec_leak.fl -- not in the regression because it needs ~4 s of wall clock.
+include "vec_lib.fl"
+
+int main() {
+  char *v = std::vec_new(1);
+  if (v == 0) { return 1; }
+  int i = 0;
+  while (i < 1000) {
+    int x = i * 3;
+    v = std::vec_push(v, &x);
+    i = i + 1;
+  }
+  if (std::vec_len(v) != 1000) { return 2; }
+  int j = 0;
+  int bad = 0;
+  while (j < 1000) {
+    int got = 0;
+    std::memcpy(&got, std::vec_get(v, j), 8);
+    if (got != j * 3) { bad = bad + 1; }
+    j = j + 1;
+  }
+  std::vec_free(v);
+  if (bad != 0) { return 3; }
+  return 42;
+}

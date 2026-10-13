@@ -1,0 +1,11 @@
+int max4(int a, int b, int c, int d) {
+  int m;
+  m = a;
+  if (b > m) m = b;
+  if (c > m) m = c;
+  if (d > m) m = d;
+  return m;
+}
+int main() {
+  return max4(3, 9, 5, 7);
+}

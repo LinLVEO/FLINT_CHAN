@@ -1,0 +1,41 @@
+// b2l2.fl — B2l：复合赋值 %=（复用节点 60 的 op 4：读-改-写，表达式值 = 存储值）
+// 退出码 42 = 全部断言通过
+struct P {
+  int x;
+  char c;
+  int y;
+}
+int main() {
+  int x = 100;
+  x %= 7;                              // 100 % 7 = 2
+  if (x != 2) { return 1; }
+  x %= 5;                              // 2 % 5 = 2
+  if (x != 2) { return 3; }
+  int n = 0 - 7;
+  n %= 3;                              // -7 % 3 = -1
+  if (n != 0 - 1) { return 4; }
+  int a[4];
+  a[0] = 17;
+  a[1] = 29;
+  a[0] %= 5;                           // 2
+  a[1] %= 7;                           // 1
+  if (a[0] != 2) { return 5; }
+  if (a[1] != 1) { return 6; }
+  struct P p;
+  p.x = 1000;
+  p.x %= 7;                            // 6
+  if (p.x != 6) { return 7; }
+  int *q = &p.x;
+  *q %= 4;                             // 6 % 4 = 2
+  if (p.x != 2) { return 8; }
+  int i = 0;
+  int j = 0;
+  while (j < 6) {                      // 循环内 %= 与 %：i 走 1 2 0 1 2 0
+    i = (i + 4) % 3;
+    j %= 100;                          // 恒等（j 1..5 → 不变）
+    j = j + 1;
+  }
+  if (i != 0) { return 9; }
+  if (j != 6) { return 10; }
+  return 42;
+}

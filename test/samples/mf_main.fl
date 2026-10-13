@@ -1,0 +1,5 @@
+// mf_main.fl — 主文件：调用另一文件里的函数（跨文件调用）
+int main() {
+  int x = lib_mul3(2, 3, 4);      // 24（函数在 mf_lib.fl）
+  return lib_add(20, x - 10);     // 34
+}

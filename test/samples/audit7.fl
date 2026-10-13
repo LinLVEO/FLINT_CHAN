@@ -1,0 +1,45 @@
+// audit7.fl — v1.0.6.2 盲区审计 A7：&a[i] 元素取址 + 指针链 + 指针算术字节语义回归
+// 语义澄清（决策 40）：裸指针 ± int / ++ / += = 字节单位（share 头 p-8 约定 + str1 字节差
+// 实测 + 决策 17 实现）；下标 a[i]/p[i] = 元素缩放（int ×8 / char ×1，postfix 内展开）。
+// 本批真修复（movsxd）：地址链 int 侧负值（下标 p[-1] 的 -1×8 / 裸 p-1 / p += 负量）原经
+// 32 位乘后零扩展成 0xFFFFFFF8 巨大正数 → 地址错崩；改符号扩展（gen_binop wide + 复合 ptr）
+void setv(int *p, int v) { *p = v; }
+int main() {
+  int a[5];
+  for (int i = 0; i < 5; i++) a[i] = i * 10;
+  // 1. &a[i] 取址：读/改数组元素
+  int *p = &a[2];
+  if (*p != 20) return 1;
+  *p = 99;
+  if (a[2] != 99) return 2;
+  // 2. 下标链 p[k]（元素缩放，负下标 movsxd 修复）
+  int *q = &a[3];
+  if (q[-1] != 99) return 3;      // q-1 槽 = a[2]
+  if (q[1] != 40) return 4;       // a[4]
+  // 3. &a[i] 作跨函数实参
+  setv(&a[1], 77);
+  if (a[1] != 77) return 5;
+  // 4. char 数组元素取址 → char*（字节语义）
+  char b[8];
+  for (int i = 0; i < 8; i++) b[i] = i + 1;
+  char *cb = &b[2];
+  if (cb[0] != 3) return 6;
+  cb[2] = 100;
+  if (b[4] != 100) return 7;
+  // 5. 裸指针 ± int = 字节单位（地址差断言；p0+8 = 跨 1 个 int 8B 槽）
+  int *p0 = &a[0];
+  int *p1 = p0 + 1;
+  if (p1 - p0 != 1) return 8;
+  int *p2 = p0 + 8;
+  if (p2 - p0 != 8) return 9;
+  // 6. char* 字节步进（++/裸 +/复合负量 movsxd）
+  char *s = "ABCDEF";
+  char *t = s;
+  t++;
+  if (*t != 'B') return 10;
+  t = s + 4;
+  if (*t != 'E') return 11;
+  t += -3;
+  if (*t != 'B') return 12;
+  return 0;
+}

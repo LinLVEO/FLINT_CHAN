@@ -1,0 +1,37 @@
+// audit5.fl — v1.0.6.2 盲区审计 A5：字符串 \xNN / 内嵌 \0 / 大写 0X 解析字节实证
+// tokenize parse_escape：\xNN 1-2 位十六进制（isxdigit + 大小写字母 |0x20）；\0 内嵌空字节
+// 数字：0x/0X 前缀（buf[1]=='X'）都支持；这些路径此前零字节级测试（str1/3 只测地址排布差）
+int main() {
+  // 1. \xNN 解码（1-2 位 + 普通字符混合）："\x41B\x43" = 'A','B','C' + 尾 \0
+  char *s1 = "\x41B\x43";
+  if (s1[0] != 'A') return 1;
+  if (s1[1] != 'B') return 2;
+  if (s1[2] != 'C') return 3;
+  if (s1[3] != 0) return 4;          // 统一补尾 \0
+  // 2. 大写十六进制字母 \xAB / \xFF / 小写 \x0f 混合
+  char *s2 = "\xAB\xFF\x0f";
+  if (s2[0] != 0xAB) return 5;       // 171
+  if (s2[1] != 0xFF) return 6;       // 255（char 读 movzx）
+  if (s2[2] != 0x0F) return 7;       // 15
+  // 3. 内嵌 \0：中间空字节后的字节仍可达
+  char *s3 = "A\0B";
+  if (s3[0] != 'A') return 8;
+  if (s3[1] != 0) return 9;
+  if (s3[2] != 'B') return 10;
+  // 4. 1 位 \x（后随非 hex 分隔符即停）："\x4Z"
+  char *s4 = "\x4Z";
+  if (s4[0] != 4) return 11;
+  if (s4[1] != 'Z') return 12;
+  // 5. 大写 0X 前缀字面量与 0x 等价（tokenize 191：buf[1]=='x'||'X'）
+  int v = 0XFF;
+  if (v != 255) return 13;
+  int w = 0X80000000;                // 位型：与 0x80000000 同为 int -2147483648
+  if (w != 0x80000000) return 14;
+  // 6. 相邻字面量各自排布不干扰（含 \x00 开头）
+  char *a = "\x00A";
+  char *b = "B";
+  if (a[0] != 0) return 15;
+  if (a[1] != 'A') return 16;
+  if (b[0] != 'B') return 17;
+  return 0;
+}

@@ -1,0 +1,117 @@
+// ui_widgets.fl -- ui_lib 即时模式组件层回归（2026-09-17，步 3）
+// 手法：**离屏 DIB 表面**（surf_init，跟生产同一条路）+ **脚本化输入**（自己填 struct UiIn，不依赖真鼠标）
+//   + **像素级断言**（GetPixel 从离屏表面读回颜色）。裁剪用"盒外像素有没有被涂"判，不靠肉眼。
+// ⚠️ 为什么不建窗读像素（首版踩过，记下来）：**窗口 DC 会带"可见区"裁剪**，被别的窗口盖住的地方
+//   读到的是未定义内容（实测读到 0x0F423F 这种怪色），断言会假红。离屏 DIB 没有这个干扰。
+// ⚠️ 即时模式差一帧：**返回新值的那一帧画的还是旧状态** → 查像素前要多画一帧（并清掉 clicked）。
+// 退出码 = 位掩码（全过 = 65535）；表面建失败 = 90
+//   bit0 命中内=1  bit1 命中外=0  bit2 无输入返回0  bit3 悬停state=1  bit4 按下state=2  bit5 clicked返回1
+//   bit6 悬停底像素 RGB(30,31,32)   bit7 勾选0→1   bit8 再点1→0   bit9 勾选内块像素 RGB(130,200,255)
+//   bit10 拖滑块 pos 变大  bit11 点轨道 pos+=vis
+//   bit12 裁剪内涂色  bit13 裁剪外没被涂  bit14 pop 之后外也被涂  bit15 clip_push 返回 SIMPLEREGION(2)
+// 诊断位：bit20 按钮像素=按下色 ｜ bit21 勾选像素=面板底
+include "ui_lib.fl"
+
+// 直读 DIB 像素缓冲（地面真相；DIB 是 BGRA 排列，返回 0xRRGGBB）
+// ⚠️ 为什么不用 GetPixel 验裁剪：**裁剪区外的点 GetPixel 会返回非像素值**（实测读到 0xFFFFFF 这种假白），
+//    拿它判"盒外有没有被涂"必然假红。缓冲直读没有这个问题。
+int px_at(char *bits, int bw, int x, int y) {
+  int i = (y * bw + x) * 4;
+  int b = bits[i] % 256;
+  int g = bits[i + 1] % 256;
+  int rr = bits[i + 2] % 256;
+  return rr * 65536 + g * 256 + b;
+}
+
+int main() {
+  struct Surf s;
+  s.bw = 360;
+  s.bh = 240;
+  s.cw = 360;
+  s.ch = 240;
+  if (!surf_init(&s)) return 90;
+  int *dc = s.dc;
+  struct Drw dr;
+  dr.dc = dc;
+
+  int r = 0;
+  struct UiIn in;
+  struct UiBox bx;
+  struct RECT rc;
+  int px = 0;
+
+  // ---------- (1) 命中测试 ----------
+  bx.l = 20; bx.t = 20; bx.r = 140; bx.b = 52;
+  bx.label = "OK"; bx.len = 2; bx.state = 0; bx.total = 0; bx.vis = 0;
+  in.mx = 30; in.my = 30; in.down = 0; in.clicked = 0;
+  if (ui_hit(&in, &bx) == 1) { r = r | 1; }
+  in.mx = 200; in.my = 200;
+  if (ui_hit(&in, &bx) == 0) { r = r | 2; }
+
+  // ---------- (2) 按钮：无输入 / 悬停 / 按下 / 点击 ----------
+  in.mx = 200; in.my = 200; in.down = 0; in.clicked = 0;
+  if (ui_button(&dr, &in, &bx) == 0) { r = r | 4; }
+  if (bx.state == 0) { r = r | 8; }
+  in.mx = 30; in.my = 30;
+  ui_button(&dr, &in, &bx);
+  if (bx.state == 1) { r = r | 16; }
+  in.down = 1;
+  ui_button(&dr, &in, &bx);
+  if (bx.state == 2) { r = r | 32; }
+  in.clicked = 1;
+  if (ui_button(&dr, &in, &bx) == 1) { r = r | 64; }
+  in.down = 0; in.clicked = 0;                 // 最后画成"悬停态"，像素断言才有意义
+  ui_button(&dr, &in, &bx);
+  px = GetPixel(dc, 23, 23);
+  if (px == 0x00201F1E) { r = r | 128; }       // bit6：悬停底
+  if (px == 0x004A3A20) { r = r | 1048576; }   // 诊断：读到按下色
+
+  // ---------- (3) 勾选：切换两次 + 内块像素 ----------
+  bx.l = 20; bx.t = 70; bx.r = 120; bx.b = 86;
+  bx.label = "TICK"; bx.len = 4; bx.state = 0;
+  in.mx = 28; in.my = 78; in.down = 0; in.clicked = 1;
+  int on = 0;
+  on = ui_check(&dr, &in, &bx, on);
+  if (on == 1) { r = r | 256; }
+  on = ui_check(&dr, &in, &bx, on);
+  if (on == 0) { r = r | 512; }
+  on = ui_check(&dr, &in, &bx, on);            // 再勾上
+  in.clicked = 0;
+  on = ui_check(&dr, &in, &bx, on);            // 多画一帧把"新状态"真正画出来
+  px = GetPixel(dc, 28, 78);
+  if (on == 1 && px == 0x00FFC882) { r = r | 1024; }   // bit9
+  if (px == 0x00121010) { r = r | 2097152; }           // 诊断：读到面板底
+
+  // ---------- (4) 滚动条：拖滑块 + 点轨道 ----------
+  bx.l = 300; bx.t = 70; bx.r = 312; bx.b = 190;
+  bx.label = 0; bx.len = 0; bx.total = 100; bx.vis = 10; bx.state = 0;
+  int pos = 0;
+  in.mx = 305; in.my = 80; in.down = 1; in.clicked = 0;   // 按在滑块上（thumb_h = 12，起点 70）
+  pos = ui_scroll(&dr, &in, &bx, pos);
+  in.my = 130;                                            // 往下拖
+  pos = ui_scroll(&dr, &in, &bx, pos);
+  if (pos > 0) { r = r | 2048; }
+  in.down = 0; in.clicked = 1; in.my = 180;               // 松手后点轨道空白 → 翻一页
+  int pos2 = ui_scroll(&dr, &in, &bx, pos);
+  if (pos2 == pos + bx.vis) { r = r | 4096; }
+
+  // ---------- (5) 裁剪：盒外像素有没有被涂 ----------
+  bx.l = 20; bx.t = 200; bx.r = 120; bx.b = 220;
+  bx.label = 0; bx.len = 0; bx.state = 0;
+  rc.l = 20; rc.t = 200; rc.r = 320; rc.b = 220;
+  ui_fill_rgb(dc, &rc, 0x00202020);                       // 铺底
+  int clr = ui_clip_push(dc, &bx);
+  // ⚠️ 只判"非空且非错"：实测**同一段代码在不同 DC 状态下**返回过 SIMPLEREGION(2) 与 COMPLEXREGION(3)
+  //    （拿某个具体值当判据会假红；真正要证的是"裁剪区不是空的、也没报错"）
+  if (clr == 2 || clr == 3) { r = r | 65536; }            // bit16：裁剪区非空
+  if (clr == 1) { r = r | 131072; }                       // 诊断：NULLREGION（空）
+  if (clr == 0) { r = r | 524288; }                       // 诊断：ERROR
+  ui_fill_rgb(dc, &rc, 0x00FFC882);                       // 想涂整条，应被裁到盒内
+  char *bits = s.bits;
+  if (px_at(bits, s.bw, 100, 210) == 0x82C8FF) { r = r | 8192; }    // bit13：盒内涂上（RGB 序）
+  if (px_at(bits, s.bw, 300, 210) == 0x202020) { r = r | 16384; }   // bit14：盒外保持底色
+  ui_clip_pop(dc);
+  ui_fill_rgb(dc, &rc, 0x00FFC882);                       // pop 后再涂
+  if (px_at(bits, s.bw, 300, 210) == 0x82C8FF) { r = r | 32768; }   // bit15：盒外这次被涂上（裁剪已解除）
+  return r;
+}

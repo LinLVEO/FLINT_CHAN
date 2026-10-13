@@ -1,0 +1,79 @@
+// ui2.fl — v0.8.2 自绘 UI 元素实证：背景 FillRect + 按钮矩形 + 命中测试函数
+// 链路：白底填充 → 灰按钮矩形 → 按钮文字；hit() 命中测试先做纯算术自测（不依赖窗口）
+// 回归友好：~80 帧（1.3s）自动退，退出码 7；判据 70=hit 断言失败
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 int FillRect(int, int, int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api kernel32 void Sleep(int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct RECT { int l; int t; int r; int b; }   // 4×int = Win32 RECT（16B）
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }  // WM_PAINT：吞掉防合成洪泛
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// 命中测试：点 (mx,my) 是否在矩形内（半开区间 [l,r)×[t,b)）；矩形指针传入（函数参数 ≤4）
+int hit_rect(int mx, int my, struct RECT *rc) {
+  if (mx < rc->l) return 0;
+  if (mx >= rc->r) return 0;
+  if (my < rc->t) return 0;
+  if (my >= rc->b) return 0;
+  return 1;
+}
+
+int main() {
+  // —— hit_rect() 纯算术自测（无窗口也能验，回归防线）——
+  struct RECT t1; t1.l = 40; t1.t = 50; t1.r = 160; t1.b = 90;
+  if (hit_rect(50, 60, &t1) != 1) return 70;  // 内点
+  if (hit_rect(39, 60, &t1) != 0) return 71;  // 左外
+  if (hit_rect(160, 60, &t1) != 0) return 72; // 右边界（半开）
+  if (hit_rect(50, 49, &t1) != 0) return 73;  // 上外
+  if (hit_rect(50, 90, &t1) != 0) return 74;  // 下边界（半开）
+  // —— 窗口 + 自绘 UI ——
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTUI2";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0, "FLINTUI2", "FLINT v0.8.2 UI", 0x00CF0000, 100, 80, 360, 200, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  ShowWindow(h, 1);
+  struct MSG m;
+  int running = 1;
+  int frame = 0;
+  struct RECT client; client.l = 0; client.t = 0; client.r = 360; client.b = 200;
+  struct RECT btn;    btn.l = 60;  btn.t = 60;  btn.r = 180; btn.b = 110;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;      // WM_CLOSE
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      int *dc = GetDC(h);
+      FillRect(dc, &client, GetStockObject(0));  // 白底（WHITE_BRUSH=0）
+      FillRect(dc, &btn, GetStockObject(2));     // 按钮灰（GRAY_BRUSH=2）
+      TextOutA(dc, 92, 78, "CLICK", 5);
+      ReleaseDC(h, dc);
+      frame++;
+      if (frame > 80) running = 0;              // 自动退（~1.3s）
+      Sleep(16);
+    }
+  }
+  return 7;
+}

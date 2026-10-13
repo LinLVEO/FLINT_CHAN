@@ -1,0 +1,4 @@
+// mf_struct_lib.fl — 库：结构体定义 + 取指针函数
+struct PP { int x; int y; }
+
+int p_sum(struct PP *p) { return p->x + p->y; }

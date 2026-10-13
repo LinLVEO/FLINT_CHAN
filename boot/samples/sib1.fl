@@ -1,0 +1,116 @@
+// sib1.fl -- 2026-09-22 (card T-20260922-025551, 5th knife A1 = ARRAY ADDRESSING: SIB scaled addressing)
+//   sentinel for the "SIB scaled addressing" tier. Old path costs 2 extra instructions per access:
+//     index -> eax / `shl eax,3` (x8) -> `lea rcx,[rbp-base]` (or load the pointer) -> `[rcx+rax*1]`
+//     and the WRITE path additionally pushed the already-scaled offset.
+//   New tier: `[rbp + idx*8 - off]` for local arrays (drops shl AND lea), `[rcx + idx*8]` for pointer
+//     arrays (drops shl). index = rax on read paths, rdx on write paths (the value owns eax).
+//   Measured target (boot product of apps\m2_float, before this knife): 477 `[rcx+r??*1]` sites
+//     (char local array write 383 / char* write 76 / int pointer write 12 / int local write 6) and
+//     the ruler's k2 loop body: 25 instructions vs 12 for real flint.
+// Grid = form x target x PREMISE:
+//   bit 1    LOCAL int array, variable index, read+write inside a loop (the k2 shape)
+//   bit 2    LOCAL int array, CONSTANT indices (read+write)
+//   bit 4    index is an EXPRESSION (non-leaf: `(i + 1) & 3`)
+//   bit 8    POINTER array (`int *p` parameter): write then read => `[rcx+rdx*8]` / `[rcx+rax*8]`
+//   bit 16   LOCAL char array (scale 1): write then read => `[rbp+rdx*1]` / `[rbp+rax*1]`
+//   bit 32   char* parameter read+write (the UNCHANGED old path -- a regression cell)
+//   bit 64   BIG FRAME: array base past 128 bytes => the SIB form must take the disp32 branch
+//   bit 128  negative control: index is ADDRESS-CLASS (`a[p]`) => must fall back to the old path
+//            (the old 32-bit `shl eax,3` truncates a 64-bit address, so the SIB form is NOT equivalent).
+//            That statement sits behind a runtime-false condition: it is EMITTED but never executed,
+//            so the product must still contain the old-path `shl eax,0x3` bytes (form check, not value).
+// expected 42 (all 8 bits lit)
+
+int sib_k2ish(int n) {            // bit 1: local int array, variable index, read+write in a loop
+  int a[4];
+  int i = 0;
+  int j = 0;
+  int s = 0;
+  a[0] = 0; a[1] = 0; a[2] = 0; a[3] = 0;
+  while (i < n) {
+    a[j & 3] = a[j & 3] + i;
+    j = j + 1;
+    i = i + 1;
+  }
+  s = a[0] + a[1] + a[2] + a[3];  // i=0..7 -> a = 4,6,8,10
+  return s;                       // 28
+}
+int sib_const() {                 // bit 2: constant indices
+  int a[4];
+  int s = 0;
+  a[0] = 11; a[3] = 22;
+  s = a[0] * 100 + a[3];          // 1100 + 22
+  return s;                       // 1122
+}
+int sib_expr() {                  // bit 4: index is an expression
+  int a[4];
+  int i = 0;
+  int s = 0;
+  a[0] = 5; a[1] = 6; a[2] = 7; a[3] = 8;
+  while (i < 4) {
+    s = s * 10 + a[(i + 1) & 3];  // 6,7,8,5
+    i = i + 1;
+  }
+  return s;                       // 6785
+}
+int sib_ptr(int *p) {             // bit 8: pointer array (write then read)
+  int i = 0;
+  int s = 0;
+  while (i < 3) { p[i] = i * 3 + 1; i = i + 1; }   // 1,4,7
+  i = 0;
+  while (i < 3) { s = s + p[i]; i = i + 1; }       // 12
+  return s;                       // 12
+}
+int sib_char() {                  // bit 16: local char array (scale 1)
+  char b[6];
+  int i = 0;
+  int s = 0;
+  while (i < 5) { b[i] = 65 + i; i = i + 1; }        // 'A'..'E'
+  i = 0;
+  while (i < 5) { s = s + b[i] - 64; i = i + 1; }    // 1+2+3+4+5
+  return s;                       // 15
+}
+int sib_cptr(char *c) {           // bit 32: char* parameter (old path, regression cell)
+  int i = 0;
+  int s = 0;
+  while (i < 3) { c[i] = 48 + i; i = i + 1; }        // '0','1','2'
+  i = 0;
+  while (i < 3) { s = s * 10 + (c[i] - 48); i = i + 1; }
+  return s;                       // 12
+}
+int sib_big() {                   // bit 64: big frame => SIB disp32 branch
+  int pad[30];
+  int a[4];
+  int i = 0;
+  int s = 0;
+  pad[0] = 1; pad[29] = 2;
+  a[0] = 0; a[1] = 0; a[2] = 0; a[3] = 0;
+  while (i < 6) { a[i & 3] = a[i & 3] + i + 1; i = i + 1; }   // a = 6,8,3,4
+  s = a[0] + a[1] + a[2] + a[3];    // 21
+  return s + pad[0] + pad[29];      // 24
+}
+int sib_neg(int zero) {           // bit 128: address-class index => MUST fall back to the old path
+  int a[4];
+  int x = 7;
+  int *p = &x;
+  a[0] = 1;
+  if (zero == 1) { a[p] = 5; }    // emitted but never executed (zero is 0 at runtime)
+  return a[0] + x;                // 8
+}
+int main() {
+  char cb[4];
+  int arr[3];
+  int r = 0;
+  arr[0] = 1; arr[1] = 2; arr[2] = 3;
+  cb[0] = 0; cb[1] = 0; cb[2] = 0; cb[3] = 0;
+  if (sib_k2ish(8) == 28) { r = r | 1; }
+  if (sib_const() == 1122) { r = r | 2; }
+  if (sib_expr() == 6785) { r = r | 4; }
+  if (sib_ptr(arr) == 12) { r = r | 8; }
+  if (sib_char() == 15) { r = r | 16; }
+  if (sib_cptr(cb) == 12) { r = r | 32; }
+  if (sib_big() == 24) { r = r | 64; }
+  if (sib_neg(r - r) == 8) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

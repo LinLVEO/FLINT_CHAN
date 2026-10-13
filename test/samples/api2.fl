@@ -1,0 +1,8 @@
+// api2.fl — v0.8 kernel32 API 调用（自动可验）：GetTickCount 无参返回系统运行毫秒
+api kernel32 int GetTickCount();
+
+int main() {
+  int t = GetTickCount();
+  if (t > 0) return 1;   // 系统 uptime 必然 >0
+  return 0;
+}

@@ -1,0 +1,29 @@
+// b2n2.fl — B2n：函数地址跨函数传递与比较（差分；期望 42）
+// 覆盖：函数地址作实参 / 形参间比较 / 函数内与 &函数名 比较 / 直接以 &函数名 作实参
+int g0() { return 10; }
+int g1() { return 20; }
+
+int is_target(int *p, int *q) {
+  if (p == q) return 1;
+  return 0;
+}
+
+int which(int *p) {
+  if (p == &g0) return 1;
+  if (p == &g1) return 2;
+  return 0;
+}
+
+int main() {
+  int *a = &g0;
+  int *b = &g1;
+  int r = 0;
+  if (is_target(a, &g0) == 1) r |= 1;
+  if (is_target(a, b) == 0) r |= 2;
+  if (which(a) == 1) r |= 4;
+  if (which(b) == 2) r |= 8;
+  if (which(&g0) == 1) r |= 16;
+  if (a != b) r |= 32;
+  if (r == 63) return 42;
+  return r;
+}

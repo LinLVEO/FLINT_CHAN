@@ -1,0 +1,96 @@
+﻿{
+    "exe":  "E:\\FLINT-lab\\bench\\bench_one_m4.exe",
+    "window_bytes":  7168,
+    "insns":  2089,
+    "code_bytes":  2089,
+    "bytes_per_insn":  1,
+    "mem":  1414,
+    "stack":  550,
+    "pushpop":  391,
+    "reg_only":  399,
+    "calls":  65,
+    "jumps":  201,
+    "bad_bytes":  0,
+    "hist":  [
+                 {
+                     "mn":  "mov",
+                     "n":  735
+                 },
+                 {
+                     "mn":  "add",
+                     "n":  232
+                 },
+                 {
+                     "mn":  "push",
+                     "n":  209
+                 },
+                 {
+                     "mn":  "pop",
+                     "n":  182
+                 },
+                 {
+                     "mn":  "jmp",
+                     "n":  115
+                 },
+                 {
+                     "mn":  "sub",
+                     "n":  72
+                 },
+                 {
+                     "mn":  "call",
+                     "n":  65
+                 },
+                 {
+                     "mn":  "cmp",
+                     "n":  60
+                 },
+                 {
+                     "mn":  "lea",
+                     "n":  53
+                 },
+                 {
+                     "mn":  "movq",
+                     "n":  38
+                 },
+                 {
+                     "mn":  "jne",
+                     "n":  36
+                 },
+                 {
+                     "mn":  "movsd",
+                     "n":  27
+                 },
+                 {
+                     "mn":  "imul",
+                     "n":  22
+                 },
+                 {
+                     "mn":  "leave",
+                     "n":  21
+                 },
+                 {
+                     "mn":  "ret",
+                     "n":  21
+                 },
+                 {
+                     "mn":  "neg",
+                     "n":  17
+                 },
+                 {
+                     "mn":  "movslq",
+                     "n":  16
+                 },
+                 {
+                     "mn":  "movzbl",
+                     "n":  16
+                 },
+                 {
+                     "mn":  "je",
+                     "n":  16
+                 },
+                 {
+                     "mn":  "jge",
+                     "n":  13
+                 }
+             ]
+}

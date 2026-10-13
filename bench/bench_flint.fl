@@ -1,0 +1,106 @@
+// bench_flint.fl —— FLINT 侧基准宿主（自计时；轮数从 bench_flint.dat 读，二进制 4 字节小端）
+// 立卡：T-20260919-010437（周期0「尺子与账本」）
+// 编译：E:\FLINT-lab\flint.exe bench_flint.fl -o bench_flint.exe
+// 运行：先由 对账.ps1 生成 bench_flint.dat（见该脚本 -N），再直接跑本 exe
+//
+// 输出格式（与 bench_c / bench_runner.js 同族，供 对账.ps1 解析）：
+//   cfg bytes=<读到的字节数> value=<解析出的轮数>
+//   impl=flint
+//   qpf=<频率> qpcraw=<两次 QPC 差值> qpcns=<同段耗时 ns>
+//   n=<轮数> i=<重复次数>（来自 consts.fl 的 ITERS）
+//   k1=<值> t1=<累计 ticks>  ……（k2/t2、k3/t3 同）
+//
+// ⚠️ 为什么配置走**二进制**而不是文本（2026-09-19 踩坑）：
+//    文本 cfg 第一版带注释，FLINT 侧读出来是 n=209（应为 2097152）——
+//    "把注释里的数字读进来"这类**静默错**最难查（结果全错却不报错）。
+//    改二进制后协议只有一条：4 字节小端 = 轮数；**读到的值原样打出来自证**。
+//
+// ⚠️ 为什么 n 必须是 2 的幂：三份实现的收尾归一口径是 x & (n-1)（FLINT 侧没有 %，
+//    软件除法会污染被测形状），n 为 2 的幂时它才恒等于 x % n。
+
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+
+struct QPC { int lo; int hi; }
+
+include "bench_core.fl"
+include "consts.fl"
+include "io_lib.fl"
+
+// 二进制读轮数：4 字节小端；文件缺失/长度不对/值非法 → 用 BF_FALLBACK（绝不静默跑 0 轮）
+int bf_read_n() {
+  char buf[8];
+  int n = std::file_read("bench_flint.dat", buf, 8);
+  int acc = 0;
+  if (n == 4) {
+    int i = 0;
+    int mul = 1;
+    while (i < 4) {
+      acc = acc + buf[i] * mul;
+      mul = mul * 256;
+      i = i + 1;
+    }
+  }
+  print(["cfg bytes=", n, " value=", acc, "\n"]);
+  if (acc < 1024) { return BF_FALLBACK; }
+  if ((acc & (acc - 1)) != 0) { return BF_FALLBACK; }
+  return acc;
+}
+
+int main() {
+  int n = bf_read_n();
+  int iters = ITERS;
+
+  // —— 时钟自证：QPF **单独一个结构体**（2026-09-19 踩坑：把 QPF 与 QPC 写进同一个结构体，
+  //    结果把 Counter 的低 32 位当成频率用 → 报出 3.2~4.3 GHz 的"频率"，那是 QPC 读数）
+  //    + 连读两次 Counter 证明低 32 位在动（防"时钟读不到/恒为 0"的假绿）——
+  struct QPC qf;
+  struct QPC qa;
+  struct QPC qb;
+  qf.lo = 0; qf.hi = 0;
+  qa.lo = 0; qa.hi = 0;
+  qb.lo = 0; qb.hi = 0;
+  QueryPerformanceFrequency(&qf);
+  QueryPerformanceCounter(&qa);
+  QueryPerformanceCounter(&qb);
+  int qraw = qb.lo - qa.lo;
+  if (qraw < 0) { qraw = 0 - qraw; }
+
+  int i = 0;
+  while (i < 1000) { i = i + 1; }
+
+  struct QPC s1; struct QPC e1;
+  struct QPC s2; struct QPC e2;
+  struct QPC s3; struct QPC e3;
+  int r1 = 0; int r2 = 0; int r3 = 0;
+  int t1 = 0; int t2 = 0; int t3 = 0;
+  int a = 0;
+  int u = 0;
+  int v = 0;
+
+  while (a < iters) {
+    QueryPerformanceCounter(&s1);
+    r1 = bc_k1(n);
+    QueryPerformanceCounter(&e1);
+    QueryPerformanceCounter(&s2);
+    r2 = bc_k2(n);
+    QueryPerformanceCounter(&e2);
+    QueryPerformanceCounter(&s3);
+    r3 = bc_k3(n);
+    QueryPerformanceCounter(&e3);
+    t1 = t1 + (e1.lo - s1.lo);
+    t2 = t2 + (e2.lo - s2.lo);
+    t3 = t3 + (e3.lo - s3.lo);
+    u = u + r1;
+    v = v + r2;
+    a = a + 1;
+  }
+
+  print(["impl=flint\n"]);
+  print(["qpf=", qf.lo, " qpcraw=", qraw, "\n"]);
+  print(["n=", n, " i=", iters, "\n"]);
+  print(["k1=", r1, " t1=", t1, "\n"]);
+  print(["k2=", r2, " t2=", t2, "\n"]);
+  print(["k3=", r3, " t3=", t3, "\n"]);
+  return u + v + r3;
+}

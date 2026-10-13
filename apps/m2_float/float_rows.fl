@@ -1,0 +1,590 @@
+// float_rows.fl — 浮窗「行构建器」（第 4 步）：8 行结构 + 三档配色 + 格式化规则
+// 对标权威：`浮窗规格-对C#逐细节.md` §3（格式化）、§4（行构建顺序）、§2.1（三档颜色阈值）
+//   对应 C# 源码 `E:\HardwareMonitor\MonitorForm.cs`：BuildRows(811-899) / 格式化(914-941) / TempColor(943-957)
+//
+// 设计（FLINT 没有动态数组 → 固定容量 + 扁平结构）：
+//   段全部按行顺序扁平存放（固定 ≤32 段）。文字段在 build 时把文字装进调用方给的 buf（段里只存
+//   **偏移** texts[]）；数值段延迟到 draw 时按 mode 格式化（那时值必须精确按 GDI 量宽摆放）。
+//   动态段文字由调用方给的 pads 区按「每段 48B」切片。
+//
+// ⚠️ 本轮撞出的 FLINT 边界（都写在这里，免得后人重踩）：
+//   ① 不允许 char 数组整体初始化（`char a[8]="PWR"`）→ 逐字节装填；
+//   ② 不允许相邻字符串字面量拼接（`"a\xE3" "C"` → 期望 ';'）→ 一律逐字节装填；
+//   ③ 函数参数最多 4 个（rcx/rdx/r8/r9）→ 段信息拆成平行数组、mode 走 fr_mode、颜色走 fr_setcol；
+//   ④ struct 字段只支持 char/int/double/int*：**不能是数组**（`int rn[9]` 语法报错）、
+//      **不能是 struct\* / char\***（char 指针字段直接拒）｜**没有 C 风格转型**（`(char*)x` 语法错）
+//      ｜**没有 sizeof** → 缓冲区地址存成 int\* 字段，段里存偏移；**字段上限 32**（FRead 已用 23）；
+//   ⑤ **位掩码判断的坑（真踩过，但根因是我的写法而不是编译器的 bug，详见下）**：
+//      开关位统一用 `swtest(v, bit)` = `(v / 2^bit) % 2`。教训：`2^bit` 要**除**（右移），
+//      我一开始写成 `s = s * 2` 后**又按右移去理解**，于是 `swtest(4094,7)` 被判成 1 →
+//      凭空多出一行 DISK。**判据：位测试函数必须拿「已知位模式」的输入单测一遍**
+//      （例：4094 = 0b111111111110 → bit0..0 = 0、bit1..12 = 1），别信脑内推导。
+//      *（附带澄清：`&` / `|` 的异常读数也是这场自误的产物——probe16/18 反汇编逐行看，
+//      `and eax,ecx` 的上下文完全正确，`(a & 32) == 32` 实测通过；`&` 没被证明有问题。）*
+//   ⑥ 非 ASCII 一律 GBK 字节（°C = A1 E3 + 'C'；功耗≈ = B9A6 BAC4 A1D6；↓=A1FD ↑=A1FC ·=A1A4）。
+include "fmt_lib.fl"
+include "num_lib.fl"
+include "str_lib.fl"
+
+// —— 颜色（GDI COLORREF = 0x00BBGGRR；C# 是 ARGB，这里只取 RGB）——
+// C# §2.1：温度与占用各自三档（阈值不同）：≥80/≥60 → 红/橙，其余白；无值灰
+int C_MAIN() { return 0x00EBEBEB; }
+int C_DIM() { return 0x00AAAAAA; }
+int C_GREY() { return 0x00AAAAAA; }
+int C_RED() { return 0x005A5AFF; }
+int C_ORANGE() { return 0x003CAAFF; }
+// 面板与描边（规格圣经 §2：填充 ARGB(200,16,16,18)、描边 ARGB(70,130,200,255) 1px）
+int C_PANEL() { return 0x00121010; }
+int C_RING() { return 0x00FFC882; }
+
+// 显示开关位（对齐 C# config：Disk=false，其余 true；ShowPowerDetail=true）
+// ⚠️ 用 `swtest`（右移+取模）而不是 `&` —— FLINT 的 `&` 目前算错（见文件头 ⑤ bug 条）
+int SW_FPS() { return 0; }
+int SW_CPUTEMP() { return 1; }
+int SW_CPULOAD() { return 2; }
+int SW_GPUTEMP() { return 3; }
+int SW_GPULOAD() { return 4; }
+int SW_GPUMEM() { return 5; }
+int SW_RAM() { return 6; }
+int SW_DISK() { return 7; }
+int SW_NET() { return 8; }
+int SW_FAN() { return 9; }
+int SW_POWER() { return 10; }
+int SW_POWERDETAIL() { return 11; }
+int SW_FPSSRC() { return 12; }
+// 位测试：返回 0/1（位序从 0 起）
+// ⚠️ 取第 bit 位 = `(v / 2^bit) % 2` —— 2^bit 要**除**（相当于右移），别乘（乘出来的是 bit0）。
+// ⚠️ 旧注释的误判已纠正（2026-09-16，同 hw.fl 内存那处）：这里曾写着"FLINT 的 `&`/`|` 在 32 位路径上有实测异常
+//    （`4094 & 128` 得 128、`4094 | 128` 得 4094）" —— 那两个结果**本来就是对的**（4094 的 bit7 已是 1），
+//    当时是把正确答案读成了异常。同日探针实测位运算 255/255 全对，故 swtest 改用直接的位取。
+//    改法经 A/B 自证：同一 demo 数据下新旧实现的 rows-dump.txt 逐字节相同（见 main.fl 的 dump/demo 通道）。
+int swtest(int v, int bit) {
+  return (v >> bit) & 1;
+}
+// C# 发布 config.json 的默认开关：Disk=false（config 里 ShowDisk=false）⇒ 本行不该出现 DISK 行；
+// 其余 true（ShowPowerDetail=true）。4095 去掉 bit7(Disk) = 3967。
+int SW_DEFAULT() { return 3967; }
+
+// 数值段 mode（0 = 文字段）
+int M_INT() { return 1; }        // v1 → 整数
+int M_PCT() { return 2; }        // v1=有效位 v2=值 → "45%" / "--"
+int M_TEMP() { return 3; }       // v1=有效位 v2=值 → "45°C" / "--"
+int M_CLOCK() { return 4; }      // v1=MHz → "3.1G" / "2700M"
+int M_G1() { return 5; }         // v1=x10 → "3.1G"
+int M_GPAIR() { return 6; }      // v1=used x10 v2=total x10 → "9.8/15.9G"
+int M_SPEED() { return 7; }      // v1=KB/s v2=1 下箭头 / 2 上箭头
+int M_SYSW() { return 8; }       // v1=sys 功耗；v2=cpu_pwr<<12|gpu_pwr<<24|显示明细位
+
+// —— 格式（对齐 C# 914-941；F1 = 一位小数，用「×10 四舍五入」的整数路，不引浮点）——
+// 功耗行的三个值（sys / cpu / gpu 瓦数）用这个结构体传
+struct PwSt { int sys; int cpu; int gpu; }
+int fmt_int(char *d, int v) { return std::itoa(v, d); }
+
+int fmt_percent(char *d, int valid, int v) {
+  int p;
+  if (valid == 0) { d[0] = '-'; d[1] = '-'; d[2] = 0; return 2; }
+  p = fmt_int(d, v);
+  d[p] = '%'; p = p + 1; d[p] = 0;
+  return p;
+}
+// "45°C" / "--"（对齐 C# FormatTemp；° = GBK A1E3）
+int fmt_temp(char *d, int valid, int v) {
+  int p;
+  if (valid == 0) { d[0] = '-'; d[1] = '-'; d[2] = 0; return 2; }
+  p = fmt_int(d, v);
+  d[p] = 0xA1; d[p + 1] = 0xE3; d[p + 2] = 'C'; d[p + 3] = 0;
+  return p + 3;
+}
+// "3.1G" / "2700M"（对齐 C# FormatClock：≥1000 → x.xG，否则 xM）
+int fmt_clock(char *d, int mhz) {
+  int p;
+  int t;
+  if (mhz >= 1000) {
+    t = (mhz + 50) / 100;
+    p = fmt_int(d, t / 10);
+    d[p] = '.'; p = p + 1;
+    p = p + fmt_int(d + p, t % 10);
+    d[p] = 'G'; p = p + 1; d[p] = 0;
+    return p;
+  }
+  p = fmt_int(d, mhz);
+  d[p] = 'M'; p = p + 1; d[p] = 0;
+  return p;
+}
+// 单位 x10 的定点 F1："31" → "3.1"
+int fmt_f1x10(char *d, int x10) {
+  int p;
+  if (x10 < 0) x10 = 0;
+  p = fmt_int(d, x10 / 10);
+  d[p] = '.'; p = p + 1;
+  p = p + fmt_int(d + p, x10 % 10);
+  d[p] = 0;
+  return p;
+}
+int fmt_g1(char *d, int x10) {
+  int p = fmt_f1x10(d, x10);
+  d[p] = 'G'; p = p + 1; d[p] = 0;
+  return p;
+}
+// "9.8/15.9G"
+int fmt_gpair(char *d, int used_x10, int total_x10) {
+  int p = fmt_f1x10(d, used_x10);
+  d[p] = '/'; p = p + 1;
+  p = p + fmt_f1x10(d + p, total_x10);
+  d[p] = 'G'; p = p + 1; d[p] = 0;
+  return p;
+}
+// "12K" / "1.5M"（对齐 C# FormatSpeed）
+int fmt_speed(char *d, int kbs) {
+  int p;
+  if (kbs < 0) kbs = 0;
+  if (kbs >= 1024) {
+    p = fmt_f1x10(d, (kbs * 10 + 512) / 1024);
+    d[p] = 'M'; p = p + 1; d[p] = 0;
+    return p;
+  }
+  p = fmt_int(d, kbs);
+  d[p] = 'K'; p = p + 1; d[p] = 0;
+  return p;
+}
+// "功耗≈120W" + 明细 " CPU74" / " GPU18"（对齐 C# 889-893）
+// 值走 struct 传（函数参数上限 4 个；且**不做大整数打包**——打包会被算错，见文件头 ⑤）
+int fmt_power(char *d, struct PwSt *w, int detail) {
+  int p;
+  d[0] = 0xB9; d[1] = 0xA6; d[2] = 0xBA; d[3] = 0xC4; d[4] = 0xA1; d[5] = 0xD6;   // 功耗≈
+  p = 6;
+  p = p + fmt_int(d + p, w->sys);
+  d[p] = 'W'; p = p + 1;
+  if (detail == 1 && w->cpu > 0) {
+    d[p] = ' '; p = p + 1;
+    d[p] = 'C'; d[p + 1] = 'P'; d[p + 2] = 'U'; p = p + 3;
+    p = p + fmt_int(d + p, w->cpu);
+  }
+  if (detail == 1 && w->gpu > 0) {
+    d[p] = ' '; p = p + 1;
+    d[p] = 'G'; d[p + 1] = 'P'; d[p + 2] = 'U'; p = p + 3;
+    p = p + fmt_int(d + p, w->gpu);
+  }
+  d[p] = 0;
+  return p;
+}
+
+// —— 三档配色（温度 80/60，占用 90/70；对齐 C# TempColor / LoadColor）——
+int color_temp(int valid, int v) {
+  if (valid == 0) return C_GREY();
+  if (v >= 80) return C_RED();
+  if (v >= 60) return C_ORANGE();
+  return C_MAIN();
+}
+int color_load(int valid, int v) {
+  if (valid == 0) return C_GREY();
+  if (v >= 90) return C_RED();
+  if (v >= 70) return C_ORANGE();
+  return C_MAIN();
+}
+
+// —— 段表 / 行容器 ——// 段信息用**平行数组**（struct 字段不支持数组 / char 指针 / struct 指针）：
+//   texts[i] = 文字段在 buf 里的**偏移**（-1 = 数值段）｜m[i] = 文字长度或数值 mode
+//   col[i] = GDI 颜色 ｜ cur = buf 已用字节数 ｜ v1/v2[i] = 数值段参数
+//   buf / src / pads 是**地址**，存成 int* 字段（char* 字段不被支持；int 字段只有 4 字节装不下地址）。
+struct FSegs {
+  int *texts; int *m; int *col; int *v1; int *v2;
+  int *buf; int *src; int *src2; int *pads;
+  int *dc;            // M3：量宽用的 DC（FLGUI 绘制路径要它算 x 推进；旧 DC 路径用 dr->dc，不读这个）
+  int *sb;            // M3：row_seg_text 的输出 —— 本段文本的地址（int* 载体，char* 由调用方按字节视图取）
+  int mode; int cap; int cur;
+}
+struct RowSet {
+  int n;              // 已用段数（≤32）
+  int rows;           // 行数（≤8）
+  int *rn;            // 每行段数（int[9]；调用方给）
+}
+// 显示数据（第 5 步接 8080 JSON 后 GPU/NET/FAN/FPS 就有真值）
+// ⚠️ 开关打包成一个 sw 位掩码字段（字段数上限 128〔2026-09-27 由 64 抬上来〕，且 FLINT 的 `&` 算错 → 一律用 swtest 测位）
+struct FRead {
+  int sw;
+  int have_fps; int fps; int have_low; int fps_low; int fps_src_len; int have_src;
+  int cpu_temp_v; int cpu_temp; int cpu_load_v; int cpu_load; int cpu_clock;
+  int gpu_temp_v; int gpu_temp; int gpu_load_v; int gpu_load;
+  int gpu_mem_used_mb; int gpu_mem_total_mb;
+  int ram_used_x10; int ram_total_x10;
+  int disk_pct_v; int disk_pct; int disk_used_g; int disk_total_g;
+  int net_down; int net_up;
+  int fan_rpm;
+  int cpu_pwr; int gpu_pwr;
+}
+
+// 起一行：只记起点；段数等收行时再算
+//   ⚠️ 别在起行时写 rn[rows]=rs->n —— 会被后一行覆盖成「下一行起点」，本行只剩 1 段 → 越界 AV
+int fr_begin_row(struct RowSet *rs) {
+  int *rn;
+  if (rs->rows >= 8) return 0;
+  rn = rs->rn;
+  rn[rs->rows] = rs->n;
+  rs->rows = rs->rows + 1;
+  return 0;
+}
+// 收一行：段数 = 当前段总数 - 本行起点
+int fr_end_row(struct RowSet *rs) {
+  int *rn;
+  if (rs->rows <= 0) return 0;
+  rn = rs->rn;
+  rn[rs->rows - 1] = rs->n - rn[rs->rows - 1];
+  return 0;
+}
+// 段 mode（1..8）：设一次，随后 fr_num 用它（这样 fr_num 只需 3 个参数）
+int fr_mode(struct FSegs *g, int mode) {
+  g->mode = mode;
+  return 0;
+}
+// 数值段：值放进 v1/v2，颜色用 fr_setcol 随后设
+int fr_num(struct RowSet *rs, struct FSegs *g, int v1, int v2) {
+  int i = rs->n;
+  int *t = g->texts;
+  t[i] = 0 - 1;
+  g->m[i] = g->mode; g->col[i] = C_MAIN(); g->v1[i] = v1; g->v2[i] = v2;
+  rs->n = i + 1;
+  return 0;
+}
+// 给「刚登记的那一段」上色（对齐 C# 的 per-segment 颜色）
+int fr_setcol(struct RowSet *rs, struct FSegs *g, int color) {
+  int *c;
+  if (rs->n <= 0) return 0;
+  c = g->col;
+  c[rs->n - 1] = color;
+  return 0;
+}
+// 文字段（把 g->src 的 len 字节装进 g->buf，段里存**偏移**；颜色用 fr_setcol 随后设）
+int fr_text(struct RowSet *rs, struct FSegs *g, int len) {
+  int *d;
+  int *s;
+  int *buf;
+  int k = 0;
+  int i;
+  int *t;
+  if (g->cur + len + 4 > g->cap) return 0;
+  buf = g->buf;
+  i = rs->n;
+  t = g->texts;
+  d = buf + g->cur;
+  s = g->src;
+  while (k < len) { d[k] = s[k]; k = k + 1; }
+  d[len] = 0;
+  t[i] = g->cur;
+  g->cur = g->cur + len + 1;
+  g->m[i] = len; g->col[i] = C_MAIN(); g->v1[i] = 0; g->v2[i] = 0;
+  rs->n = i + 1;
+  return 0;
+}
+// v1.4.7：登记"已经在 buf 里"的文字段（**不搬运**，只记偏移）——给帧率来源名用。
+// 为什么要它：来源名是**建行之后**才算出来的（要等 PresentMon 有帧率），没法在 fr_text 的搬运流程里出现；
+//   而文字段的表达方式就是"buf 里的偏移"，所以直接把算好的偏移登记进去即可（g->cur 不受影响）。
+int fr_text_off(struct RowSet *rs, struct FSegs *g, int off, int len) {
+  int i = rs->n;
+  int *t;
+  if (i >= 32) return 0;
+  t = g->texts;
+  t[i] = off;
+  g->m[i] = len; g->col[i] = C_MAIN(); g->v1[i] = 0; g->v2[i] = 0;
+  rs->n = i + 1;
+  return 0;
+}
+// 静态标签（GBK 逐字节装填；不用相邻字面量拼接——FLINT 不支持）
+int fr_static(struct RowSet *rs, struct FSegs *g, int which) {
+  char t[12];
+  int *src;
+  int n = 0;
+  if (which == 0) { t[0] = 'F'; t[1] = 'P'; t[2] = 'S'; n = 3; }
+  else if (which == 1) { t[0] = 'C'; t[1] = 'P'; t[2] = 'U'; n = 3; }
+  else if (which == 2) { t[0] = 'G'; t[1] = 'P'; t[2] = 'U'; n = 3; }
+  else if (which == 3) { t[0] = 'R'; t[1] = 'A'; t[2] = 'M'; n = 3; }
+  else if (which == 4) { t[0] = 'D'; t[1] = 'I'; t[2] = 'S'; t[3] = 'K'; n = 4; }
+  else if (which == 5) { t[0] = 'N'; t[1] = 'E'; t[2] = 'T'; n = 3; }
+  else if (which == 6) { t[0] = 'F'; t[1] = 'A'; t[2] = 'N'; n = 3; }
+  else if (which == 7) { t[0] = '1'; t[1] = '%'; n = 2; }
+  else if (which == 8) { t[0] = '-'; t[1] = '-'; n = 2; }
+  else if (which == 9) { t[0] = ' '; t[1] = 'R'; t[2] = 'P'; t[3] = 'M'; n = 4; }
+  src = t;                       // char[] 地址先落 int* 变量（FLINT 无 (int*) 转型写法）
+  g->src = src;
+  return fr_text(rs, g, n);
+}
+
+int fr_fallback(struct RowSet *rs, struct FSegs *g, struct FRead *d) {
+  fr_begin_row(rs);
+  fr_static(rs, g, 1);
+  fr_setcol(rs, g, C_MAIN());
+  fr_mode(g, M_TEMP());
+  fr_num(rs, g, d->cpu_temp_v, d->cpu_temp);
+  fr_setcol(rs, g, color_temp(d->cpu_temp_v, d->cpu_temp));
+  return 0;
+}
+
+// —— 行构建（判定顺序与 C# BuildRows 811-899 逐条对齐）——
+int build_rows(struct RowSet *rs, struct FSegs *g, struct FRead *d) {
+  int t;
+  int sum;
+  int used_x10;
+  int total_x10;
+  int have_any;
+  int n0;
+  rs->n = 0; rs->rows = 0; g->cur = 0;
+  // rn[] 整表清零（没建的行位别留上一帧的段数）
+  n0 = 0;
+  while (n0 < 9) { rs->rn[n0] = 0; n0 = n0 + 1; }
+  // ==== 1. FPS ====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_FPS()) == 1 && (d->have_fps == 1 || d->have_low == 1)) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 0); fr_setcol(rs, g, C_MAIN());
+    if (d->have_fps == 1) {
+      fr_mode(g, M_INT()); fr_num(rs, g, d->fps, 0); fr_setcol(rs, g, C_MAIN());
+      if (d->have_low == 1) {
+        fr_static(rs, g, 7); fr_setcol(rs, g, C_DIM());
+        fr_mode(g, M_INT()); fr_num(rs, g, d->fps_low, 0); fr_setcol(rs, g, C_DIM());
+      }
+      if (d->have_src == 1 && swtest(d->sw, SW_FPSSRC()) == 1 && g_pm_src_off >= 0) {
+        // v1.4.7：来源名由调用方在建行**之后**写进 buf 尾部（stitch_sync_src），这里只记偏移
+        //   （文字段的表达方式就是"buf 里的偏移"，没有"指向另一块缓冲"这回事——见 stitch.fl 的说明）
+        g->src = g->buf;
+        g->src2 = g->buf;
+        fr_text_off(rs, g, g_pm_src_off, d->fps_src_len); fr_setcol(rs, g, C_DIM());
+      }
+    } else {
+      fr_static(rs, g, 8); fr_setcol(rs, g, C_DIM());
+      fr_static(rs, g, 7); fr_setcol(rs, g, C_DIM());
+      fr_mode(g, M_INT()); fr_num(rs, g, d->fps_low, 0); fr_setcol(rs, g, C_DIM());
+    }
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 2. CPU ====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_CPUTEMP()) == 1 || swtest(d->sw, SW_CPULOAD()) == 1) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 1); fr_setcol(rs, g, C_MAIN());
+    if (swtest(d->sw, SW_CPUTEMP()) == 1) {
+      fr_mode(g, M_TEMP()); fr_num(rs, g, d->cpu_temp_v, d->cpu_temp);
+      fr_setcol(rs, g, color_temp(d->cpu_temp_v, d->cpu_temp));
+    }
+    if (swtest(d->sw, SW_CPULOAD()) == 1) {
+      fr_mode(g, M_PCT()); fr_num(rs, g, d->cpu_load_v, d->cpu_load);
+      fr_setcol(rs, g, color_load(d->cpu_load_v, d->cpu_load));
+    }
+    if (d->cpu_clock > 0) { fr_mode(g, M_CLOCK()); fr_num(rs, g, d->cpu_clock, 0); fr_setcol(rs, g, C_DIM()); }
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 3. GPU ====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_GPUTEMP()) == 1 || swtest(d->sw, SW_GPULOAD()) == 1 || swtest(d->sw, SW_GPUMEM()) == 1) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 2); fr_setcol(rs, g, C_MAIN());
+    if (swtest(d->sw, SW_GPUTEMP()) == 1) {
+      fr_mode(g, M_TEMP()); fr_num(rs, g, d->gpu_temp_v, d->gpu_temp);
+      fr_setcol(rs, g, color_temp(d->gpu_temp_v, d->gpu_temp));
+    }
+    if (swtest(d->sw, SW_GPULOAD()) == 1) {
+      fr_mode(g, M_PCT()); fr_num(rs, g, d->gpu_load_v, d->gpu_load);
+      fr_setcol(rs, g, color_load(d->gpu_load_v, d->gpu_load));
+    }
+    if (swtest(d->sw, SW_GPUMEM()) == 1) {
+      if (d->gpu_mem_used_mb > 0) {
+        used_x10 = (d->gpu_mem_used_mb * 10 + 512) / 1024;
+        if (d->gpu_mem_total_mb > 0) {
+          total_x10 = (d->gpu_mem_total_mb * 10 + 512) / 1024;
+          fr_mode(g, M_GPAIR()); fr_num(rs, g, used_x10, total_x10);
+        } else {
+          fr_mode(g, M_G1()); fr_num(rs, g, used_x10, 0);
+        }
+      } else {
+        fr_static(rs, g, 8);
+      }
+      fr_setcol(rs, g, C_DIM());
+    }
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 4. RAM（百分比由 used/total 现算，同 C# 860）====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_RAM()) == 1 && d->ram_total_x10 > 0) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 3); fr_setcol(rs, g, C_MAIN());
+    fr_mode(g, M_GPAIR()); fr_num(rs, g, d->ram_used_x10, d->ram_total_x10); fr_setcol(rs, g, C_MAIN());
+    t = (d->ram_used_x10 * 100) / d->ram_total_x10;
+    fr_mode(g, M_PCT()); fr_num(rs, g, 1, t); fr_setcol(rs, g, color_load(1, t));
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 5. DISK ====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_DISK()) == 1 && d->disk_pct_v == 1) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 4); fr_setcol(rs, g, C_MAIN());
+    fr_mode(g, M_PCT()); fr_num(rs, g, 1, d->disk_pct); fr_setcol(rs, g, color_load(1, d->disk_pct));
+    fr_mode(g, M_GPAIR()); fr_num(rs, g, d->disk_used_g * 10, d->disk_total_g * 10); fr_setcol(rs, g, C_DIM());
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 6. NET（↓ main 色 / ↑ dim 色）====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_NET()) == 1 && (d->net_down >= 0 || d->net_up >= 0)) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 5); fr_setcol(rs, g, C_MAIN());
+    fr_mode(g, M_SPEED()); fr_num(rs, g, d->net_down, 1); fr_setcol(rs, g, C_MAIN());
+    fr_mode(g, M_SPEED()); fr_num(rs, g, d->net_up, 2); fr_setcol(rs, g, C_DIM());
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 7. FAN ====
+  n0 = rs->n;
+  if (swtest(d->sw, SW_FAN()) == 1 && d->fan_rpm > 0) {
+    fr_begin_row(rs);
+    fr_static(rs, g, 6); fr_setcol(rs, g, C_MAIN());
+    fr_mode(g, M_INT()); fr_num(rs, g, d->fan_rpm, 0); fr_setcol(rs, g, C_DIM());
+    fr_static(rs, g, 9); fr_setcol(rs, g, C_DIM());
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  // ==== 8. 功耗（sys 有值才显示；底噪常数 45 = config PowerBaseWatts）====
+  n0 = rs->n;
+  have_any = 0;
+  sum = 0;
+  if (d->cpu_pwr > 0) { sum = sum + d->cpu_pwr; have_any = 1; }
+  if (d->gpu_pwr > 0) { sum = sum + d->gpu_pwr; have_any = 1; }
+  if (swtest(d->sw, SW_POWER()) == 1 && have_any == 1) {
+    sum = sum + 45;
+    fr_begin_row(rs);
+    fr_mode(g, M_SYSW());
+    fr_num(rs, g, sum, d->cpu_pwr + d->gpu_pwr * 1000);
+    fr_setcol(rs, g, C_MAIN());
+
+  }
+  if (rs->n > n0) fr_end_row(rs);
+  if (rs->rows == 0) { fr_fallback(rs, g, d); fr_end_row(rs); }
+  return rs->rows;
+}
+
+// —— 段文本求值（**单一真值源**：旧 DC 路径与 M3 的 FLGUI 路径共用这一段，别各写一遍）——
+// 输入 = **全局段号** idx（不是行内偏移）；输出 = 返回长度（0 = 本段不画）＋ 文本地址落在 g->sb。
+// 段文本要么在 buf 里（文字段，存偏移），要么现算进 pads[idx*48]（数值段）—— 与旧实现逐字一致。
+int row_seg_text(struct FSegs *g, int detail, int idx) {
+  int *b;
+  int mode;
+  int off;
+  int len;
+  int *buf = g->buf;
+  int *pads = g->pads;
+  mode = g->m[idx];
+  off = g->texts[idx];
+  len = 0;
+  b = 0;
+  if (off >= 0) {
+    b = buf + off;
+    len = mode;
+  } else {
+    b = pads + idx * 48;
+    if (mode == M_INT()) len = fmt_int(b, g->v1[idx]);
+    else if (mode == M_PCT()) len = fmt_percent(b, g->v1[idx], g->v2[idx]);
+    else if (mode == M_TEMP()) len = fmt_temp(b, g->v1[idx], g->v2[idx]);
+    else if (mode == M_CLOCK()) len = fmt_clock(b, g->v1[idx]);
+    else if (mode == M_G1()) len = fmt_g1(b, g->v1[idx]);
+    else if (mode == M_GPAIR()) len = fmt_gpair(b, g->v1[idx], g->v2[idx]);
+    else if (mode == M_SPEED()) {
+      // ⚠️⚠️ 双字节字符**必须走字节视图**：动态段缓冲是 int*（FLINT 的 struct 不能放 char* 字段），
+      //   直接写 `b[0] = 0xA1; b[1] = 0xFD;` 会各写 4 字节 → 实际只发出 `A1 00`
+      //   → GDI 拿到**半个 DBCS 对** → 屏幕上画成 **'?'**（2026-09-16 实测原始字节：
+      //   NET 行 = 4E 45 54 7C A1 00 33 38 4B，期望 A1 FD；用户报的就是"箭头是问号"）。
+      //   同一个缓冲里 °C 为什么对？因为它走 `fmt_temp(char *d)` —— 形参是 char*，写的就是字节。
+      char *bb = b;                       // 字节视图（idiom 同 lib\http_lib.fl 的 http_sb/http_pb）
+      if (g->v2[idx] == 1) { bb[0] = 0xA1; bb[1] = 0xFD; len = 2; }   // ↓
+      else { bb[0] = 0xA1; bb[1] = 0xFC; len = 2; }                      // ↑
+      len = len + fmt_speed(bb + 2, g->v1[idx]);
+    }
+    else if (mode == M_SYSW()) {
+      // v2 = cpu + gpu*1000（两者都 <1000，小整数乘法不会踩到大数运算的坑）
+      int pw = g->v2[idx];
+      struct PwSt w;
+      w.sys = g->v1[idx];
+      w.cpu = pw % 1000;
+      w.gpu = pw / 1000;
+      len = fmt_power(b, &w, detail);
+    }
+  }
+  g->sb = b;
+  return len;
+}
+
+// —— 绘制：一行行画；数值段在这里格式化并量宽推进 x（对齐 C# 988-999：x += 宽 + 3）——
+// 返回最大行尾 x（含尾随 3px，同 C# 公式），供窗口宽度自适应用
+// detail = 功耗明细开关（0/1；fmt_power 用它决定要不要追加 CPU/GPU 瓦数）
+// 【旧路 · ui_lib DC 直画】M3 起主路径改为 draw_rows_gui（FLGUI draw list）；
+//   本函数**保留**用于 A/B 对照与回退（同一份数据、同一条排版口径，只有"画到哪儿"不同）。
+int draw_rows(struct Drw *dr, struct RowSet *rs, struct FSegs *g, int detail) {
+  struct Seg sg;
+  int r;
+  int k;
+  int idx;
+  int x;
+  int y;
+  int wmax;
+  int len;
+  int *b;
+  wmax = 0; idx = 0; r = 0;
+  while (r < rs->rows) {
+    x = 8;                            // x0 = Pad（C# §2）
+    y = 8 + r * 19;                   // 行距 19（C# LineHeight = 16 + 3）
+    k = 0;
+    while (k < rs->rn[r]) {
+      len = row_seg_text(g, detail, idx + k);
+      b = g->sb;
+      if (len > 0) {
+        SetTextColor(dr->dc, g->col[idx + k]);
+        seg_mk(&sg, b, len);
+        ui_text(dr, &sg, &x, y);
+      }
+      x = x + 3;                       // 段间 3px（C# 口径）
+      k = k + 1;
+    }
+    if (x > wmax) wmax = x;
+    idx = idx + rs->rn[r];
+    r = r + 1;
+  }
+  return wmax;
+}
+
+// M3(a)：**行绘制走 FLGUI draw list** —— 每段 = 一条 kind 5 文本命令（带逐段显式颜色），
+//   由平台层 `gui_win_render` 统一遍历命令表上屏（面板/描边也由它按主题色画）。
+// 与旧路的关系：**同一套排版口径**（起点 8,8 + 行距 19 + 量宽推进 + 段间 3px，量宽同样走 GetTextExtentPoint32A），
+//   唯一差别 = 文本不再直接写 DC，而是进命令表 ⇒ 这才叫"换绘制层"。
+// 参数上限 4 ⇒ 量宽用的 DC 走 g->dc（不加第 5 个参数）。
+int draw_rows_gui(struct GuiCtx *c, struct RowSet *rs, struct FSegs *g, int detail) {
+  struct SZ sz;
+  struct GuiRect rc;
+  char *cp;
+  int r;
+  int k;
+  int idx;
+  int x;
+  int y;
+  int wmax;
+  int len;
+  int *b;
+  wmax = 0; idx = 0; r = 0;
+  while (r < rs->rows) {
+    x = 8;
+    y = 8 + r * 19;
+    k = 0;
+    while (k < rs->rn[r]) {
+      len = row_seg_text(g, detail, idx + k);
+      b = g->sb;
+      if (len > 0) {
+        GetTextExtentPoint32A(g->dc, b, len, &sz);     // 量宽一次（与 ui_text 同一条 API、同一口径）
+        cp = b;                                        // 字节视图（int* 缓冲 → char*）
+        rc.x = x; rc.y = y; rc.w = sz.cx; rc.h = 16;
+        gui_item_at(c, &rc);
+        gui_text_put_col_n(c, cp, len, g->col[idx + k]);   // ⚠️ 必须带长度：段缓冲不保证有 NUL
+        gui_push(c, 5);
+        x = x + sz.cx;
+      }
+      x = x + 3;
+      k = k + 1;
+    }
+    if (x > wmax) wmax = x;
+    idx = idx + rs->rn[r];
+    r = r + 1;
+  }
+  return wmax;
+}

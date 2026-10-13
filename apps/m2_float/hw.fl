@@ -1,0 +1,638 @@
+// hw.fl — FLINT 直读硬件库（v1.0.3 自 m2_float 抽出）
+// 内容：WinRing0 READ_MSR 通道 + CPU/内存/磁盘/频率/温度/RAPL 读数原语
+// 用法：应用顶部 `include "hw.fl"`；读数状态由调用方持有（FLINT 无全局变量）
+// 依赖：WinRing0 驱动须已启动（E:\FLINT\start-driver.ps1，UAC）
+// ⚠️ FLINT 边界：函数不能返回指针——设备句柄用 struct 指针字段承接（ptr 返回 API 直写）
+
+// —— api 声明（kernel32 系统/硬件集）——
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int DeviceIoControl(int, int, int, int, int, int, int, int);
+api kernel32 int GetSystemTimes(int, int, int);
+api kernel32 int GlobalMemoryStatusEx(int);
+api kernel32 int GetDiskFreeSpaceA(int, int, int, int, int);
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+api kernel32 int GetTickCount();                      // M4d：本库**自留**这条（库要自含依赖）；FLGUI 平台层另有一条同名声明 —— 同名不合并、各占一格导入预算
+api kernel32 ptr VirtualAlloc(int, int, int, int);   // ADL 内存分配回调用
+api kernel32 int GetCurrentThread();
+api kernel32 int SetThreadAffinityMask(int, int);    // v1.4.6.1：逐核读温度（钉住线程到某逻辑核）
+api kernel32 int GetActiveProcessorCount(int);       // 参数 0xFFFF = ALL_PROCESSOR_GROUPS
+// ⚠️ 第 8 步的 HwBridge api 声明**不在这里**：FLINT 的 collect_apis 只认「合并后 token 流最开头连续的那批 api」，
+// 而 hw.fl 是被 include 进来的（流前面已经有 flint_ui.fl 的内容）⇒ 声明挂在 main.fl 的绝对顶部。
+// 实现与用法见 apps\m2_float\stitch.fl；产物目录必须有 HwBridge.dll（导入表解析需要）。
+// —— AMD ADL（显卡驱动自带，用户态免提权）——
+api atiadlxx int ADL2_Main_Control_Create(int, int, int);
+api atiadlxx int ADL2_Adapter_NumberOfAdapters_Get(int, int);
+api atiadlxx int ADL2_OverdriveN_Temperature_Get(int, int, int, int);
+api atiadlxx int ADL2_OverdriveN_PerformanceStatus_Get(int, int, int);
+// v1.4.6.1：GPU 功耗（ADL Overdrive6 CurrentPower；原始值 = 瓦数<<8，见下方 hw_gpu_pwr 注释）
+api atiadlxx int ADL2_Overdrive6_CurrentPower_Get(int, int, int, int);
+
+// —— 读数用结构体（真实 C 布局；FT/Q 为 FILETIME/QPC 的 lo/hi）——
+struct FT { int lo; int hi; }
+struct Q { int lo; int hi; }
+struct MEM { int f0; int f1; int f2; int f3; int f4; int f5; int f6; int f7;
+             int f8; int f9; int f10; int f11; int f12; int f13; int f14; int f15; }
+struct IN4 { int idx; }
+struct OUT { int lo; int hi; }
+
+// —— WinRing0 设备（句柄由 s->h 承接；h 初始须为 0）——
+struct HwSt { int *h; }
+
+int hw_open(struct HwSt *s) {
+  // 2026-09-16 22:2x 修两处（实测：C# 参考版在跑时本 app 的 CPU 温度/功耗整条通道静默失效）：
+  //   ① dwShareMode **必须共享（3）**：C# 版（LHM/R0HardwareMonitor）会同时持有
+  //      `\\.\WinRing0_1_2_0`，独占打开（0）会失败 ⇒ 后面的 READ_MSR 全失败。
+  //   ② 失败值是 **INVALID_HANDLE_VALUE(-1) 不是 0** —— 原来写 `!= 0` 会把"打开失败"判成"成功"，
+  //      于是症状只是"温度显示 --、功耗少一截"，根本看不出是句柄没拿到（同族坑见记忆速查表）。
+  s->h = CreateFileA("\\\\.\\WinRing0_1_2_0", 0xC0000000, 3, 0, 3, 0, 0);
+  return s->h != 0 - 1;
+}
+
+// READ_MSR：in = 4B MSR 地址，out = 8B（eax:edx），METHOD_BUFFERED。
+// 成功返回 1，失败 0。
+int hw_rdmsr(int *hd, int idx, struct OUT *o) {
+  struct IN4 in;
+  int ret = 0;
+  in.idx = idx;
+  return DeviceIoControl(hd, 0x9C402084, &in, 4, o, 8, &ret, 0) != 0;
+}
+
+// —— CPU 占用（1 秒两采样差值法；忙/总 防越界，无效返回 -1）——
+struct CpuSt { int pi0; int pi1; int pk0; int pk1; int pu0; int pu1; }
+
+// 周期起点：记录首采样（GetSystemTimes 三份 8B 写到字段对）
+int hw_cpu_begin(struct CpuSt *s) {
+  GetSystemTimes(&s->pi0, &s->pk0, &s->pu0);
+  return 0;
+}
+
+// 周期末（≥1s 后）：再采样算占用率；无效返回 -1（busy 越界不更新，防乱码字符）
+int hw_cpu_pct(struct CpuSt *s) {
+  struct FT ci;
+  struct FT ck;
+  struct FT cu;
+  int dk;
+  int du;
+  int di;
+  int total;
+  int busy;
+  GetSystemTimes(&ci, &ck, &cu);
+  dk = ck.lo - s->pk0;
+  du = cu.lo - s->pu0;
+  di = ci.lo - s->pi0;
+  if (dk < 0 || du < 0 || di < 0) return -1;
+  total = dk + du;
+  busy = total - di;
+  if (total <= 0 || busy < 0 || busy > total) return -1;
+  return busy * 100 / total;
+}
+
+// —— 内存占用 %（dwMemoryLoad；MEM = GlobalMemoryStatusEx 的 64B 缓冲）——
+int hw_mem_pct(struct MEM *m) {
+  m->f0 = 64;
+  GlobalMemoryStatusEx(m);
+  return m->f1;
+}
+
+// —— 内存占用 % + GB 对（v1.0.4 C# 排版：RAM used/totalG pct%）——
+// MEM 布局 = MEMORYSTATUSEX：dwLength@0 dwMemoryLoad@4 ullTotalPhys@8(f2=低32,f3=高32)
+// ullAvailPhys@16(f4,f5)；GB = 64 位字节 >>30 = 高32×4 + 低32>>30（32 位安全）
+struct MemGb { int total; int used; int pct; }
+
+int hw_mem_snap(struct MEM *m, struct MemGb *g) {
+  m->f0 = 64;
+  GlobalMemoryStatusEx(m);
+  // ⚠️ low32 可能 ≥2^31（存 int 为负）——位移前 &3 掩码（算术右移会填 1）
+  g->total = m->f3 * 4 + ((m->f2 >> 30) & 3);
+  g->used = m->f5 * 4 + ((m->f4 >> 30) & 3);   // avail → used = total - avail
+  g->pct = m->f1;
+  g->used = g->total - g->used;
+  if (g->used < 0) g->used = 0;
+  return g->pct;
+}
+
+// —— v1.4.2：内存 GB×10（第 4 步行构建器要 C# 那种 F1 一位小数）——
+// ⚠️ v1.4.6.1 实测纠正（2026-09-16）：旧实现把总量**截成整数 GB**，再用"占用率 × 总量"反推小数
+//   → 自主模式打出 `RAM|8.0/15.0G|`，而 C#（8080 `ram.totalGb=15.92374 / usedGb=8.515`）是 `8.5/15.9G`，
+//   **差一整档**（用户可见）。现在直接按字节换算，口径与 C# 对齐：
+//     MB = 高32×4096 + ((低32>>20) & 0xFFF)   ← 取字节数的高 12 位小数部分（>4GB 必走高位）
+//     GB×10 = round(MB×10/1024) = (MB*10 + 512) >> 10
+//   全程 32 位安全（MB ≤ 3.2e4、×10 后 ≤ 3.2e5），不需要 64 位也不需要 double。
+//   （顺带纠正旧注释里"FLINT 的 `&` 已确认算错"的误判 —— 那条后来实测已推翻，位运算是对的。）
+struct MemRate { int total_x10; int used_x10; int pct; }
+
+int hw_mem_rate(struct MEM *m, struct MemRate *o) {
+  int mb_total;
+  int mb_avail;
+  int used10;
+  m->f0 = 64;
+  GlobalMemoryStatusEx(m);
+  mb_total = m->f3 * 4096 + ((m->f2 >> 20) & 0xFFF);
+  mb_avail = m->f5 * 4096 + ((m->f4 >> 20) & 0xFFF);
+  o->pct = m->f1;
+  o->total_x10 = (mb_total * 10 + 512) >> 10;
+  used10 = ((mb_total - mb_avail) * 10 + 512) >> 10;
+  if (used10 < 0) used10 = 0;
+  if (used10 > o->total_x10) used10 = o->total_x10;
+  o->used_x10 = used10;
+  return o->pct;
+}
+int hw_mem_total_gb10(struct MEM *m) {
+  struct MemRate r;
+  hw_mem_rate(m, &r);
+  return r.total_x10;
+}
+int hw_mem_used_gb10(struct MEM *m) {
+  struct MemRate r;
+  hw_mem_rate(m, &r);
+  return r.used_x10;
+}
+
+// —— 磁盘占用 % + GB 对（v1.0.4：C: 簇计数；GB = dtot×spc×bps>>30 拆两步防溢出）——
+struct DiskSt { int spc; int bps; int dfree; int dtot; }
+struct DskGb { int total; int used; int pct; }
+
+int hw_disk_snap(struct DiskSt *d, struct DskGb *g) {
+  int scale;
+  int t1;
+  int t2;
+  GetDiskFreeSpaceA("C:\\", &d->spc, &d->bps, &d->dfree, &d->dtot);
+  // pct（簇级，免溢出）
+  scale = d->dtot / 100;
+  if (scale > 0) g->pct = 100 - d->dfree / scale;
+  else g->pct = 0;
+  // GB：字节=dtot×spc×bps；先 (spc/2)(bps/2) 再移位（spc/bps 为 2 幂时精确）
+  t1 = d->dtot * (d->spc / 2);
+  if (t1 < 0) t1 = 0;
+  t2 = (t1 >> 8) * (d->bps / 2);
+  if (t2 < 0) t2 = 0;
+  g->total = t2 >> 20;
+  t1 = d->dfree * (d->spc / 2);
+  if (t1 < 0) t1 = 0;
+  t2 = (t1 >> 8) * (d->bps / 2);
+  if (t2 < 0) t2 = 0;
+  g->used = g->total - (t2 >> 20);
+  if (g->used < 0) g->used = 0;
+  return g->pct;
+}
+
+// ═══ v1.4.3：磁盘占用率（真·IOCTL_DISK_PERFORMANCE）═══
+// 探针实测（2026-09-16，tmp\data-probe\disk_final4.fl）：
+//   `\\.\C:` 以 dwDesiredAccess=0（不加 GENERIC_READ）就能打开（h 有效、err=0）→ **不需要管理员**
+//   （`\\.\PhysicalDrive0` 才要管理员，err=5 ACCESS_DENIED）
+//   DeviceIoControl(0x00070020) 返回 1、bytes=88；**输出缓冲必须给 256 字节**（给 72 → ret=0）
+// 结构 DISK_PERFORMANCE（权威偏移用本机 .NET SDK Marshal 实测，非文档推算）：
+//   BytesRead@0 / BytesWritten@8 / ReadTime@16 / WriteTime@24 / IdleTime@32 / QueryTime@40
+//   → int 下标 = 0 / 2 / 4 / 6 / 8 / 10（均为 LARGE_INTEGER，取低 32 位做差足够）
+// 占用率口径：本机驱动的 QueryTime/IdleTime 实测**不更新**（恒 0）→ 用
+//   **「(ΔReadTime+ΔWriteTime) ÷ 实际经过毫秒×10000」**（100ns 单位换算）
+//
+// ⚠️ FLINT 边界：struct 里不能放数组字段 → 缓冲只能放结构体外（本实现用局部 int 数组 buf[64]）
+struct DiskPerfSt { int *h; int rt0; int wt0; int ready; int lastms; int bytes_read; int bytes_written; }
+// ADL 性能状态输出结构（ADLODNPerformanceStatus）：**必须给足大小**——实测给 10 个 int 会被
+// ADL 写越界 → 进程 0xC0000005 崩（2026-09-16 实测）。前 10 个字段的位置不变，后面纯垫片。
+struct PerfSt { int f0; int f1; int f2; int f3; int f4; int f5; int f6; int f7; int f8; int f9;
+                int f10; int f11; int f12; int f13; int f14; int f15; int f16; int f17;
+                int f18; int f19; int f20; int f21; int f22; int f23; int f24; int f25;
+                int f26; int f27; int f28; int f29; int f30; int f31; }
+
+// 打开一次卷句柄（access=0；失败则 h = -1，调用方须按 INVALID_HANDLE_VALUE 判）
+int hw_diskp_open(struct DiskPerfSt *s) {
+  s->h = CreateFileA("\\\\.\\C:", 0, 3, 0, 3, 0, 0);
+  s->ready = 0;
+  s->rt0 = 0;
+  s->wt0 = 0;
+  return s->h != 0 - 1;          // ⚠️ 句柄失败返回 -1，不是 0
+}
+
+// 采一次；返回占用率 %（0..100）；无有效数据返回 -1（调用方保留旧值）
+// 前几次调用只记基线（返回 -1），之后每次调用算「上次以来的忙碌占比」
+int hw_diskp_pct(struct DiskPerfSt *s) {
+  int buf[64];
+  int ret = 0;
+  int wrote = 0;
+  int rt = 0;
+  int wt = 0;
+  int d = 0;
+  int busy = 0;
+  int dtms = GetTickCount() - s->lastms;
+  int pct = 0;
+  if (s->h == 0 - 1) return -1;
+  buf[0] = 0;
+  ret = DeviceIoControl(s->h, 0x00070020, 0, 0, buf, 256, &wrote, 0);
+  if (ret == 0) return -1;
+  rt = buf[4];
+  wt = buf[6];
+  if (s->ready == 0) {
+    s->rt0 = rt;
+    s->wt0 = wt;
+    s->ready = 1;
+    s->lastms = GetTickCount();
+    return -1;
+  }
+  d = (rt - s->rt0) + (wt - s->wt0);
+  s->rt0 = rt;
+  s->wt0 = wt;
+  s->lastms = GetTickCount();
+  if (d < 0) return -1;                    // 计数器回绕（100ns 单位 42 秒才回绕，罕见）
+  if (dtms <= 0) return -1;
+  busy = dtms * 10000;                     // 实际经过时间（100ns 单位）
+  if (busy <= 0) return -1;
+  pct = d * 100 / busy;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  s->bytes_read = buf[0];
+  s->bytes_written = buf[2];
+  return pct;
+}
+
+// ═══ v1.4.3：GPU 读数（AMD ADL，免提权）═══
+// 探针实测（2026-09-16，tmp\data-probe\gpu_adl2.fl / gpu_adl3.fl）：
+//   `ADL2_Main_Control_Create(&myalloc, 1, &ctx)` → hr=0、ctx 有效
+//   `ADL2_Adapter_NumberOfAdapters_Get` → 6
+//   `ADL2_OverdriveN_Temperature_Get(ctx, i, 1(EDGE), &t)` → hr=0、t=**42000 = 42.0°C**
+//     （与 C# 版 8080 报的 gpu.temp=42 吻合 ⇒ 单位 = 千分之一度）
+//   `ADL2_OverdriveN_PerformanceStatus_Get(ctx, i, ps)` → hr=0；
+//     ps[0]=coreClk(76085 = 76.085MHz？待正文校正)、ps[6]=coreActivity%、
+//     ps[8]=功耗原始值（850，单位待定；8080 报 16W ⇒ 不是直接瓦数）、ps[9]=ASIC 温度(-1=无效)
+// ⚠️ FLINT 边界：**禁止动态函数指针**（GetProcAddress 结果不能当函数调）→ 只能静态 api 声明；
+//    回调用 `&函数名` 传（ADL 要求外部提供内存分配器）。
+// ⚠️ ADL 的 OD5/OD6 结构（ADLPMActivity / MemoryInfo）实测调用即崩 → 暂不碰，只用 ODN 两件套。
+
+// 内存分配回调（ADL_Main_Memory_Alloc）：返回 VirtualAlloc 出来的指针
+int *hw_adl_alloc(int sz) {
+  int *p = VirtualAlloc(0, sz, 0x3000, 4);
+  return p;
+}
+
+struct GpuSt { int ctx; int ok; int nadapters; int core_clk; int core_act; int pwr_raw; int asic_t; }
+
+// 初始化（ADL 要求先建上下文；失败则 ok=0，调用方按"无 GPU 数据"处理）
+int hw_gpu_open(struct GpuSt *s) {
+  struct IN4 tmp;
+  tmp.idx = 0;
+  s->ctx = 0;
+  s->ok = 0;
+  s->nadapters = 0;
+  s->core_clk = 0;
+  s->core_act = 0;
+  s->pwr_raw = 0;
+  s->asic_t = -1;
+  if (ADL2_Main_Control_Create(&hw_adl_alloc, 1, &s->ctx) != 0) return 0;
+  if (s->ctx == 0) return 0;
+  tmp.idx = 0;
+  if (ADL2_Adapter_NumberOfAdapters_Get(s->ctx, &tmp) != 0) return 0;
+  s->nadapters = tmp.idx;
+  s->ok = 1;
+  return s->nadapters;
+}
+
+// 读一次 GPU 温度（°C）；无效返回 -1
+int hw_gpu_temp(struct GpuSt *s) {
+  struct IN4 t;
+  if (s->ok == 0) return -1;
+  t.idx = -1;
+  if (ADL2_OverdriveN_Temperature_Get(s->ctx, 0, 1, &t) != 0) return -1;
+  if (t.idx < 0) return -1;
+  return t.idx / 1000;                  // 千分之一度 → 度
+}
+
+// 读一次 GPU 性能状态（占用% / 核心频率 / 功耗原始值）；无效返回 -1
+int hw_gpu_perf(struct GpuSt *s) {
+  struct PerfSt ps;
+  if (s->ok == 0) return -1;
+  ps.f0 = 0; ps.f1 = 0; ps.f2 = 0; ps.f3 = 0; ps.f4 = 0; ps.f5 = 0; ps.f6 = 0;
+  if (ADL2_OverdriveN_PerformanceStatus_Get(s->ctx, 0, &ps) != 0) return -1;
+  s->core_clk = ps.f0;
+  s->core_act = ps.f6;
+  s->pwr_raw = ps.f8;
+  s->asic_t = ps.f9;
+  return s->core_act;
+}
+
+// —— GPU 功耗（ADL Overdrive6 CurrentPower；单位换算口径照抄 LHM，别自己猜）——
+// 来源（2026-09-16 查 LHM 源码 `LibreHardwareMonitorLib/Hardware/Gpu/AmdGpu.cs`）：
+//   ① 四种功耗类型都要问一遍：`ODN_GPU_TOTAL_POWER=0` / `PPT=1` / `SOCKET=2` / `CHIP=3`
+//      （LHM 把四条都建成传感器，C# 侧 `HardwareReader` 再**取最大** ⇒ 我们照做）
+//   ② **原始值是定点数：`>> 8` 才是瓦**（LHM 原话 `sensor.Value = powerOf8 >> 8;`）
+//      —— 本机实测 raw≈4700 ⇒ 18W，与 C# 的 16~18W 吻合；不 >>8 会得到 4700 这种离谱数。
+//   ③ 本机（RX 560 / Polaris）只有 type 0 返回成功，其余 rc=-1（不支持）—— 取最大天然兼容。
+// 返回瓦数；全部失败返回 -1
+int hw_gpu_pwr(struct GpuSt *s) {
+  int best = 0;
+  int v = 0;
+  int i = 0;
+  if (s->ok == 0) return -1;
+  while (i < 4) {
+    v = 0;
+    if (ADL2_Overdrive6_CurrentPower_Get(s->ctx, 0, i, &v) == 0) {
+      v = v >> 8;
+      if (v > best) best = v;
+    }
+    i = i + 1;
+  }
+  if (best > 0) return best;
+  return -1;
+}
+
+// —— CPU 温度（WinRing0 READ_MSR：TjMax 0x1A2 缓存 + DTS 0x19C **逐核取最热**）——
+struct TmpSt { int *hd; int tjmax; int ncpu; int mask_all; }
+
+// 读一次温度；无有效读数返回 -1。tjmax 初始给 100（TjMax 读不到时兜底）
+// ⚠️ v1.4.6.1 实测纠正（2026-09-16，探针 `tmp\msr-probe\cores.fl`）：**0x19C 是每逻辑核各自的 DTS**，
+//   单线程读只能拿到"此刻恰好在跑的那个核" → 随机偏冷（实测同刻 C# 报 53~55C，单核读到 43~49C）。
+//   逐核钉住线程读一遍、取 dts 最小（最热）者后：16 核最大 63~65C，再经 C# 同款自动校准 `-11`
+//   （调用方 main.fl 施加）得 52~54C ⇒ 与 C# 对上。**C#/LHM 报的是全核最热（package）**。
+//   代价：每次采样 16 次 READ_MSR（1 秒一次，可忽略）；用 SetThreadAffinityMask 逐个钉核。
+int hw_temp_c(struct TmpSt *s) {
+  struct OUT mo;
+  int t;
+  int d;
+  int best;
+  int i;
+  if (s->hd == 0) return -1;
+  if (hw_rdmsr(s->hd, 0x1A2, &mo)) {
+    t = (mo.lo >> 16) & 0xFF;
+    if (t != 0) s->tjmax = t;
+  }
+  if (s->ncpu <= 0) {
+    s->ncpu = GetActiveProcessorCount(0xFFFF);
+    if (s->ncpu <= 0) s->ncpu = 1;
+    if (s->ncpu > 31) s->ncpu = 31;                 // 亲和性掩码按 32 位算，够本机 16 核
+    s->mask_all = (1 << s->ncpu) - 1;
+  }
+  best = 1000;                                       // 最小 dts（最热核）
+  i = 0;
+  while (i < s->ncpu) {
+    if (SetThreadAffinityMask(GetCurrentThread(), 1 << i) != 0) {
+      if (hw_rdmsr(s->hd, 0x19C, &mo) && (((mo.lo >> 31) & 1) == 1)) {
+        d = (mo.lo >> 16) & 0x7F;
+        if (d < best) best = d;
+      }
+    }
+    i = i + 1;
+  }
+  if (s->mask_all != 0) SetThreadAffinityMask(GetCurrentThread(), s->mask_all);   // 还原全核
+  if (best == 1000) return -1;
+  return s->tjmax - best;
+}
+
+// —— CPU 频率（当前核心频率 = 0x198 IA32_PERF_STATUS 当前倍频 × BCLK）——
+// ⚠️ 别用 TSC(0x10) 当实时频率（v1.0.3.1 实测纠正）：invariant TSC = 最大非睿频频率恒定
+// （本机 2.69G = 27 × BCLK≈99.6），核心睿频到 3.1G 它纹丝不动——原「TSC÷QPC 比率法」永远
+// 显示 ~2700 而非实时。正确源：0x198 [15:8] = 当前倍频（本机 31 → 3.09G，8 核睿频档）；
+// BCLK = TSC ÷ 0xCE [15:8]（最大非睿频倍频，27），每机器一次校准即可。
+struct FreqSt { int *hd; int have; int ts; int q; int bclk100; }
+
+// 每 ~240ms 调一次：TSC+QPC 差校准 BCLK（商+余数保 1MHz 精度，仅首次），
+// 0x198 当前倍频 × BCLK = MHz（倍频随睿频变化实时更新）。无效返回 -1（调用方保留旧值）。
+int hw_freq(struct FreqSt *s) {
+  struct OUT mo;
+  struct Q q1;
+  struct OUT st;
+  int dts;
+  int dq;
+  int ratio;
+  int nt;
+  int tscm;
+  int m;
+  if (s->hd == 0) return -1;
+  if (!hw_rdmsr(s->hd, 0x10, &mo)) return -1;
+  QueryPerformanceCounter(&q1);
+  if (!s->have) {
+    s->have = 1;
+    s->ts = mo.lo;
+    s->q = q1.lo;
+    s->bclk100 = 0;
+    return -1;
+  }
+  dts = mo.lo - s->ts;
+  dq = q1.lo - s->q;
+  s->ts = mo.lo;
+  s->q = q1.lo;
+  if (dts <= 0 || dq <= 0) return -1;
+  if (s->bclk100 == 0) {
+    if (!hw_rdmsr(s->hd, 0xCE, &st)) return -1;
+    nt = (st.lo >> 8) & 0xFF;                 // 最大非睿频倍频（本机 27）
+    if (nt < 8 || nt > 60) return -1;
+    tscm = (dts / dq) * 10 + ((dts % dq) * 10) / dq;   // TSC MHz 带 1MHz 精度（~269x）
+    s->bclk100 = tscm * 100 / nt;             // BCLK×100（~9962 = 99.62MHz）
+    if (s->bclk100 < 5000 || s->bclk100 > 20000) { s->bclk100 = 0; return -1; }
+  }
+  if (!hw_rdmsr(s->hd, 0x198, &st)) return -1;
+  ratio = (st.lo >> 8) & 0xFF;                // 当前倍频（31 = 3.09G；睿频档变化实时跟）
+  if (ratio < 8 || ratio > 60) return -1;
+  m = ratio * s->bclk100 / 100;
+  if (m <= 0) return -1;
+  return m;
+}
+
+// —— 整机功耗（RAPL 0x611 能量差 ÷ 2^esu × QPC 校正；esu 0x606 bit8:12）——
+struct RapSt { int *hd; int esu_div; int have; int ep; int qe; int qf_lo; }
+
+// 周期起点：ESU 就绪检查（0x606 → esu_div=2^esu）+ 记起点能量与 QPC
+int hw_rapl_begin(struct RapSt *s) {
+  struct OUT mo;
+  struct Q q1;
+  int esu;
+  if (s->hd == 0) return 0;
+  if (s->esu_div == 0) {
+    if (hw_rdmsr(s->hd, 0x606, &mo)) {
+      esu = (mo.lo >> 8) & 0x1F;
+      if (esu > 0 && esu <= 20) s->esu_div = 1 << esu;
+    }
+  }
+  if (s->esu_div == 0) return 0;
+  if (!hw_rdmsr(s->hd, 0x611, &mo)) return 0;
+  s->ep = mo.lo;
+  QueryPerformanceCounter(&q1);
+  s->qe = q1.lo;
+  s->have = 1;
+  return 1;
+}
+
+// 周期末（≥1s 后）：算瓦数；无效返回 -1（have 复位，等待下次 begin）
+int hw_rapl_end(struct RapSt *s) {
+  struct OUT mo;
+  struct Q q1;
+  int dc;
+  int dq;
+  int w;
+  if (s->hd == 0 || !s->have || s->esu_div == 0) return -1;
+  if (!hw_rdmsr(s->hd, 0x611, &mo)) { s->have = 0; return -1; }
+  QueryPerformanceCounter(&q1);
+  s->have = 0;
+  dc = mo.lo - s->ep;
+  dq = q1.lo - s->qe;
+  if (dc <= 0 || dq <= 0 || s->qf_lo <= 0) return -1;
+  w = (dc / s->esu_div) * s->qf_lo / dq;
+  if (w <= 0) return -1;
+  return w;
+}
+
+// ═══ v1.4.5：网速（GetIfTable 老 API，**免提权**）═══
+// 定标权威（2026-09-16 01:2x，探针 `tmp\data-probe\netsum.fl` 用**真流量差分**钉死；见 PROGRESS.md「网速定标·最终结论」）：
+//   `MIB_IFROW` **行距就是 860**（文档没错）——上一轮踩的是**行内起算点**：`dwName` 是 **256 个宽字符 = 512 字节**
+//   （按 256 字节算 → 41 行全读出 0，据此误判"行距应为 512"，已纠正）。表头是 4 字节 `dwNumEntries`，
+//   故**行基址 = 4 + r*860**，行内偏移 = ：
+//     dwIndex@512 / dwType@516 / dwMtu@520 / dwSpeed@524 / dwPhysAddrLen@528 / bPhysAddr@532(8)
+//     dwAdminStatus@540 / dwOperStatus@544 / dwLastChange@548
+//     dwInOctets@552  dwInUcastPkts@556  dwInNUcastPkts@560  dwInDiscards@564  dwInErrors@568  dwInUnknownProtos@572
+//     dwOutOctets@576 dwOutUcastPkts@580 dwOutNUcastPkts@584 dwOutDiscards@588 dwOutErrors@592 dwOutQLen@596
+//     dwDescrLen@600  bDescr@604(256 字节 ASCII)
+//   ⚠️ **同一张物理网卡在表里被 WFP/QoS 过滤层重复登记（实测同一份计数器出现在 6 行：r=9/28/29/30/31/32）**
+//      → **绝不能"全表求和"**（会重复计 6 倍）；必须按**描述文本**把过滤层排除，只留真网卡。
+//   选行口径**对标 C# 版**（`HardwareMonitor\HardwareReader.cs` 的 `NetworkSpeed.PhysicalNics`）：
+//     ① `OperationalStatus == Up` ② 只要真实网卡类型（Ethernet / Wireless / WWAN）③ 名字里带
+//     virtual / loopback / tap / wfp / qos / miniport 等一律排除；C# 是"合格网卡全部相加"，本实现同口径。
+api iphlpapi int GetIfTable(int, int, int);
+
+struct NetSt { int *a; int *b; int in0; int out0; int ms0; int have; int down; int up; int rows; int n; }
+
+// 从 char 基址 + off 读 32 位小端
+int net_rd32(int *base, int off) {
+  char *c = base;
+  int v = 0;
+  int i = 3;
+  while (i >= 0) { v = v * 256 + (c[off + i] % 256); i = i - 1; }
+  return v;
+}
+
+// 读 1 个字节（无符号）
+int net_rd8(int *base, int off) {
+  char *c = base;
+  return c[off] % 256;
+}
+
+// 在 base+off 起、最多 maxn 字节的 NUL 结尾 ASCII 串里找子串 sub（找到返回 1）
+int net_has(int *base, int off, int maxn, char *sub) {
+  char *c = base;
+  int i = 0;
+  int j = 0;
+  while (i < maxn) {
+    if (c[off + i] == 0) return 0;
+    j = 0;
+    while (sub[j] != 0 && c[off + i + j] != 0 && c[off + i + j] == sub[j]) j = j + 1;
+    if (sub[j] == 0) return 1;
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 描述文本里出现这些词 = 虚拟网卡/过滤层/隧道/环回 → 排除
+int net_desc_bad(int *base, int rowoff) {
+  int o = rowoff + 604;
+  if (net_has(base, o, 250, "WFP") == 1) return 1;
+  if (net_has(base, o, 250, "QoS") == 1) return 1;
+  if (net_has(base, o, 250, "LightWeight") == 1) return 1;
+  if (net_has(base, o, 250, "Virtual") == 1) return 1;
+  if (net_has(base, o, 250, "Tunnel") == 1) return 1;
+  if (net_has(base, o, 250, "Miniport") == 1) return 1;
+  if (net_has(base, o, 250, "Loopback") == 1) return 1;
+  if (net_has(base, o, 250, "Debug") == 1) return 1;
+  if (net_has(base, o, 250, "Wi-Fi Direct") == 1) return 1;
+  if (net_has(base, o, 250, "Native WiFi") == 1) return 1;      // 「-Native WiFi Filter Driver-0000」= 同一网卡的过滤层
+  if (net_has(base, o, 250, "Filter Driver") == 1) return 1;
+  if (net_has(base, o, 250, "Npcap") == 1) return 1;
+  return 0;
+}
+
+// 这一行算不算「真网卡」。探针逐行打印判定也用它（同一个判据，不复制一份）
+int net_row_ok(int *base, int rowoff) {
+  int ty = net_rd32(base, rowoff + 516);
+  int oper = net_rd32(base, rowoff + 544);
+  int mtu = net_rd32(base, rowoff + 520);
+  int okty = 0;
+  if (oper != 5) return 0;                       // IF_OPER_STATUS_OPERATIONAL = 5（实测 up 行）
+  if (mtu <= 0) return 0;
+  if (ty == 6) okty = 1;                         // ETHERNET_CSMACD
+  if (ty == 71) okty = 1;                        // IEEE80211（本机 WLAN 就是这条）
+  if (ty == 243) okty = 1;                       // WWANPP
+  if (ty == 244) okty = 1;                       // WWANPP2
+  if (okty == 0) return 0;
+  if (net_desc_bad(base, rowoff) == 1) return 0;
+  return 1;
+}
+
+// 32 位计数器的"无符号差值"→ KB/s（计数器 4G 会回绕：负差值按 +2^32 补，误差 ≤1KB）
+int net_rate(int d, int dt) {
+  int k = 0;
+  if (dt <= 0) return 0;
+  if (d >= 0) k = d / 1024;
+  else k = d / 1024 + 4194304;                   // 2^32 / 1024
+  if (k <= 0) return 0;
+  if (k > 2000000) return 0;                     // 异常值（防 k*1000 溢出）
+  return (k * 1000) / dt;
+}
+
+// 采一次：合格网卡收发字节求和 → 与上次差值 ÷ 实际经过毫秒 = KB/s（首次调用速率恒 0）
+// ⚠️ **同一张网卡会被过滤层重复登记**（实测 WLAN 在表里出现 6 行、计数器完全同步）→ 光靠描述词过滤不够，
+//    这里再用 **MAC 地址去重**（bPhysAddr@532 6 字节）兜底：同一 MAC 只算一次。两者缺一不可。
+int net_sample(struct NetSt *s) {
+  int sz[2];
+  int rc = 0;
+  int n = 0;
+  int r = 0;
+  int rowoff = 0;
+  int tin = 0;
+  int tout = 0;
+  int rows = 0;
+  int ms = 0;
+  int macs[128];
+  int mcmax = 60;
+  int mc = 0;
+  int plen = 0;
+  int m0 = 0;
+  int m1 = 0;
+  int k = 0;
+  int dup = 0;
+  sz[0] = 524288; sz[1] = 0;
+  rc = GetIfTable(s->a, sz, 1);
+  if (rc != 0) return 0;
+  n = net_rd32(s->a, 0);
+  s->n = n;
+  r = 0;
+  while (r < n) {
+    rowoff = 4 + r * 860;
+    if (net_row_ok(s->a, rowoff) == 1) {
+      dup = 0;
+      plen = net_rd32(s->a, rowoff + 528);        // dwPhysAddrLen
+      if (plen >= 6) {
+        m0 = net_rd8(s->a, rowoff + 532) + net_rd8(s->a, rowoff + 533) * 256
+           + net_rd8(s->a, rowoff + 534) * 65536 + net_rd8(s->a, rowoff + 535) * 16777216;
+        m1 = net_rd8(s->a, rowoff + 536) + net_rd8(s->a, rowoff + 537) * 256;
+        k = 0;
+        while (k < mc) {
+          if (macs[k * 2] == m0 && macs[k * 2 + 1] == m1) dup = 1;
+          k = k + 1;
+        }
+      }
+      if (dup == 0) {
+        if (mc < mcmax) { macs[mc * 2] = m0; macs[mc * 2 + 1] = m1; mc = mc + 1; }
+        tin = tin + net_rd32(s->a, rowoff + 552);   // dwInOctets
+        tout = tout + net_rd32(s->a, rowoff + 576); // dwOutOctets
+        rows = rows + 1;
+      }
+    }
+    r = r + 1;
+  }
+  s->rows = rows;
+  ms = GetTickCount();
+  if (s->have == 1 && ms > s->ms0) {
+    s->down = net_rate(tin - s->in0, ms - s->ms0);
+    s->up = net_rate(tout - s->out0, ms - s->ms0);
+  } else {
+    s->down = 0; s->up = 0;
+  }
+  s->in0 = tin; s->out0 = tout; s->ms0 = ms; s->have = 1;
+  return 1;
+}
+
+// 初始化：绑定两块缓冲（调用方给，见「struct 不能当全局变量」），并采第一次建基线
+int net_open(struct NetSt *s, int *a, int *b) {
+  s->a = a; s->b = b;
+  s->in0 = 0; s->out0 = 0; s->ms0 = 0;
+  s->have = 0; s->down = 0; s->up = 0; s->rows = 0; s->n = 0;
+  return net_sample(s);
+}

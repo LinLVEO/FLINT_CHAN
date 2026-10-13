@@ -1,0 +1,6 @@
+// decl1.fl — 多重声明混合初始化：int a=1, b, c=3; → b=2 后 a+b+c=6
+int main() {
+  int a = 1, b, c = 3;
+  b = 2;
+  return a + b + c;
+}

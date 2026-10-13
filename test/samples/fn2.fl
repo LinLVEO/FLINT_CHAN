@@ -1,0 +1,6 @@
+int sub3(int a, int b, int c) {
+  return a - b - c;
+}
+int main() {
+  return sub3(10, 3, 2);
+}

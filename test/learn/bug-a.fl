@@ -1,0 +1,7 @@
+// learn-bug-a.fl —— 浮点 bug (a) 现况复现：int n = 7.5;（声明带初始化）该报错却放过
+// 对照：赋值路径 int n; n = 7.5; 是拦得住的
+int main() {
+  int n = 7.5;
+  print(["声明带初始化 n = ", n, "\n"]);
+  return 0;
+}

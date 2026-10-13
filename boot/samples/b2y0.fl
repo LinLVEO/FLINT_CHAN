@@ -1,0 +1,10 @@
+// b2y0.fl — 先定义函数，再 include 带 api 声明的库（io 库落地前提：位置冲突不存在）
+int b2y0_before() { return 1; }
+
+include "b2y0_lib.fl"
+
+int main() {
+  if (b2y0_before() != 1) return 1;
+  if (b2y0_tick() < 0) return 2;
+  return 42;
+}

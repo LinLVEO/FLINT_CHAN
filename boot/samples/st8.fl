@@ -1,0 +1,2 @@
+struct Node { int val; int *next; }
+int main() { int a[2]; struct Node n; n.val = 40; n.next = a; int *q = n.next; q[0] = 2; return n.val + q[0]; }

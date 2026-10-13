@@ -1,0 +1,54 @@
+// align_probe.fl — 回归：间接赋值 = API 调用结果（结构体字段承接句柄）
+// v1.0.3 修前：ND_ASSIGN 间接路径「地址先压栈 → 再求值 rhs」→ rhs 含 CreateWindowExA 时
+// call 前 rsp≡8 → movaps 类 API（user32 RegisterClassW）崩溃 0xC0000005；
+// 修后：先求值 rhs 存帧底暂存槽（不压栈），再算目标地址写入——所有 API 调用点 rsp≡0。
+api kernel32 ptr GetModuleHandleA(int);
+api kernel32 void Sleep(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct W { int *cls; int *h; }   // cls=类名、h=句柄承接（间接写目标）
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+int make_window(struct W *w) {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = w->cls;
+  if (RegisterClassA(&wc) == 0) return 0;
+  w->h = CreateWindowExA(0x00080008, w->cls, "", 0x80000000, 100, 100, 120, 120, 0, 0, 0, 0);
+  if (w->h == 0) return 0;
+  ShowWindow(w->h, 1);
+  return 1;
+}
+int main() {
+  struct W w;
+  struct MSG m;
+  int running = 1;
+  int frames = 0;
+  w.cls = "ALIGNPROBE";
+  w.h = 0;
+  if (!make_window(&w)) return 91;
+  if (w.h == 0) return 92;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;
+      if (running) DispatchMessageA(&m);
+    }
+    frames++;
+    if (frames > 60) running = 0;
+    Sleep(5);
+  }
+  return 0;
+}

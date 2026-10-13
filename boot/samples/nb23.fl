@@ -1,0 +1,4 @@
+// nb23.fl — B2w 负例：结构体重复定义必须报错（对齐真 flint；boot 原静默放行）
+struct D23 { int x; }
+struct D23 { int y; }
+int main() { return 42; }

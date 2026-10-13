@@ -1,0 +1,7 @@
+// bit15.fl — 位测试做条件（Win32 flag 检测演练）：x=0x08
+int main() {
+  int x = 0x08;
+  if ((x & 0x04) != 0) return 1;
+  if ((x & 0x08) != 0) return 2;
+  return 0;   // 2
+}

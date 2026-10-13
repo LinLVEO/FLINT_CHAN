@@ -1,0 +1,101 @@
+// bench_flint.fl 鈥斺€?FLINT 渚у熀鍑嗗涓伙紙鑷鏃讹紱n 璇?bench_flint.cfg锛?// 绔嬪崱锛歍-20260919-010437锛堝懆鏈?銆屽昂瀛愪笌璐︽湰銆嶏級
+// 缂栬瘧锛欵:\FLINT-lab\flint.exe bench_flint.fl -o bench_flint.exe
+//
+// 杈撳嚭鏍煎紡锛堜笌 bench_c / bench_runner.js 鍚屾棌锛屼緵 瀵硅处.ps1 瑙ｆ瀽锛夛細
+//   impl=flint
+//   qpf=<棰戠巼> qpcraw=<涓ゆ QPC 宸€硷紙楂?32 浣嶏級> qpcns=<鍚屾鑰楁椂 ns=raw脳1e9/qpf>
+//   n=<鍚勬牳杞暟> i=<鍚勬牳閲嶅娆℃暟>锛堝悓涓€浠芥簮鐮佸唴鐨勭紪璇戞湡甯搁噺锛岃 consts.fl锛?//   k1=<鍊? t1=<璇ユ牳瀹炴祴 ns>
+//   k2=<鍊? t2=<璇ユ牳瀹炴祴 ns>
+//   k3=<鍊? t3=<璇ユ牳瀹炴祴 ns>
+//
+// 鈿狅笍 璁℃暟涓?n 鐢?*鍚屼竴浠界紪璇戞湡甯搁噺**锛坈onsts.fl锛夛紝淇濊瘉"缁撴灉瀵瑰緱涓?涓?鐪熺殑璺戜簡 n 杞?鍚屾椂鎴愮珛銆?// 鈿狅笍 FLINT 渚ц鏁版寜 QPC 浣?32 浣嶆棤绗﹀彿宸鐞嗭紙QueryPerformanceCounter 澹版槑涓?int锛?//    浣?32 浣嶅樊鍊煎湪 600ms 绐楀彛鍐呮棤鍥炵粫锛夛紱瑁稿樊鍊煎彧鐢ㄤ簬鎹㈣鎹㈠垪鐨勮瘖鏂紝鐪熻€楁椂浠?t* 涓哄噯銆?
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+
+struct QPC { int lo; int hi; }
+
+include "bench_core.fl"
+include "consts.fl"
+include "io_lib.fl"
+
+// n 璇昏繘鏉ワ紙鍝ㄥ叺锛歝fg 缂哄け/涓虹┖ 鈫?鐢ㄥ閫夊€硷紝缁濅笉闈欓粯璺?0 杞級
+int bf_read_n() {
+  char buf[64];
+  int n = std::file_read("cfg_b.cfg", buf, 63);
+  if (n <= 0) { return 2000000; }
+  buf[n] = 0;
+  int i = 0;
+  int acc = 0;
+  int got = 0;
+  while (i < n) {
+    int c = buf[i];
+    if (c >= 48) {
+      if (c <= 57) {
+        acc = acc * 10 + (c - 48);
+        got = 1;
+      } else {
+        if (got == 1) { return acc; }
+      }
+    } else {
+      if (got == 1) { return acc; }
+    }
+    i = i + 1;
+  }
+  if (got == 1) { return acc; }
+  return 2000000;
+}
+
+int main() {
+  int n = bf_read_n();
+  int iters = ITERS;
+
+  // 鈥斺€?QPC 鑷瘉锛氶鐜囬潪 0 + 浣?32 浣嶇湡鐨勪細鍙橈紙闃?鏃堕挓璇讳笉鍒?鎭掍负 0"鐨勫亣缁匡級鈥斺€?  struct QPC qa;
+  struct QPC qb;
+  QueryPerformanceFrequency(&qa);
+  QueryPerformanceCounter(&qa);
+  QueryPerformanceCounter(&qb);
+  int qraw = qb.lo - qa.lo;
+  QueryPerformanceCounter(&qb);
+  qraw = qb.lo - qa.lo;
+  if (qraw < 0) { qraw = 0 - qraw; }
+  int qpcns = 0;
+  if (qa.lo > 0) { qpcns = qraw * 1000 / (qa.lo / 1000); }
+
+  int i = 0;
+  while (i < 1000) { i = i + 1; }
+
+  struct QPC s1; struct QPC e1;
+  struct QPC s2; struct QPC e2;
+  struct QPC s3; struct QPC e3;
+  int r1 = 0; int r2 = 0; int r3 = 0;
+  int t1 = 0; int t2 = 0; int t3 = 0;
+  int a = 0;
+  int u = 0;
+  int v = 0;
+
+  while (a < iters) {
+    QueryPerformanceCounter(&s1);
+    r1 = bc_k1(n);
+    QueryPerformanceCounter(&e1);
+    QueryPerformanceCounter(&s2);
+    r2 = bc_k2(n);
+    QueryPerformanceCounter(&e2);
+    QueryPerformanceCounter(&s3);
+    r3 = bc_k3(n);
+    QueryPerformanceCounter(&e3);
+    t1 = t1 + (e1.lo - s1.lo);
+    t2 = t2 + (e2.lo - s2.lo);
+    t3 = t3 + (e3.lo - s3.lo);
+    u = u + r1;
+    v = v + r2;
+    a = a + 1;
+  }
+
+  print(["impl=flint\n"]);
+  print(["qpf=", qa.lo, " qpcraw=", qraw, " qpcns=", qpcns, "\n"]);
+  print(["n=", n, " i=", iters, "\n"]);
+  print(["k1=", r1, " t1=", t1, "\n"]);
+  print(["k2=", r2, " t2=", t2, "\n"]);
+  print(["k3=", r3, " t3=", t3, "\n"]);
+  return u + v + r3;
+}

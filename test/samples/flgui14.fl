@@ -1,0 +1,422 @@
+// flgui14.fl — FLGUI M4n（2026-09-28，卡 T-20260928-031004）：**UI 美术第 2 批**的无头契约
+//   不建真窗：控件全走"合成输入喂 gui_begin"；命令表逐字段对账（形状是渲染端的事 ⇒ 这里能钉的正是
+//   "命令流零改动"与"新 API 的组合语义"）。真窗像素那半在 `tmp\artprobe\art-probe.fl`（24 位）。
+//
+// 本刀四组判据（每组都钉"改前会红"的那个数）：
+//   ① **两个新字段**：深色默认 = 0/0（不调预设有 app 零扰动）；蓝白预设 = `theme_check 255` /
+//      `theme_focus #2563EB`（且**等于** `theme_box` —— 与"焦点圈复用 theme_box"那条老口径对齐）。
+//   ② **形状全在渲染端 ⇒ 命令流一个字节不动**：同一份控件代码在
+//      `theme_check 0/255`、`theme_radius 0/4`、`theme_focus 0/非0` 三种变更下，命令表**逐字段**
+//      （kind/x/y/w/h/toff/tlen/col/a ± 条数）完全相同；且 `POOLSUM` 也不动（新开关不进状态池）。
+//   ③ **`gui_radio` 的命令流形状 + 组语义**：未选 = `kind 8`（圆环）+ `kind 5`；选中 = `kind 8` +
+//      `kind 9`（内实心点）+ `kind 5` —— **零新 kind**；圆环/圆点带形状通道（`gui_cmd_col`），标签不带。
+//      组语义（本刀定的口径，见 lib\FLGUI.md §3）：**组名相同 ⇒ 互斥**；组名不同 ⇒ 各自独立；
+//      选中态住**状态池**（自己 k=0、本组选中者 k=3）⇒ 跨帧存活、`gui_init` 清。
+//   ④ **间距栅格入口**（`gui_space_grid`）：`pad 6 / spacing 4` 归到 n 的倍数；**默认值一个字节不动**
+//      （不调它 / n<=0 ⇒ 原样）。
+// 位掩码 25 位，全亮 = 33554431 → return 42。
+//   bit 1  深色默认 `theme_check == 0` ｜ bit 2  深色默认 `theme_focus == 0`
+//   bit 3  蓝白预设 `theme_check == 255` ｜ bit 4  蓝白预设 `theme_focus == #2563EB` 且 == `theme_box`
+//   bit 5  `theme_check` 0/255：命令表逐字段相同 ｜ bit 6  `theme_radius` 0/4：相同
+//   bit 7  `theme_focus` 0/非0：相同 ｜ bit 8  三种变更下 POOLSUM 都不动
+//   bit 9  未选单选钮的命令形状（1×8 + 1×5、无 9）
+//   bit 10 选中单选钮的命令形状（1×8 + 1×9 + 1×5）
+//   bit 11 圆环矩形 = `box_w×box_w`、垂直居中、贴控件左端；标签 x = `box_w + spacing`
+//   bit 12 圆点矩形：居中且更小（= `box_w/2`）
+//   bit 13 圆环/圆点带形状通道（`col` 非 0 且两者相同）、标签 `col == 0`
+//   bit 14 状态池：点中 "ra" 后池里 a=1 / b=0
+//   bit 15 跨帧存活：帧 N 点中 ⇒ 帧 N+1（无输入）仍返回 1
+//   bit 16 同组互斥：点第二个 ⇒ 第一个变 0、第二个 1
+//   bit 17 返回值与状态池一致（`gui_pool_get("rb") == 返回值`）
+//   bit 18 不同组互不干扰：`gui_radio_g("g1")` 与 `gui_radio_g("g2")` 可同时选中
+//   bit 19 显式同名组互斥：`gui_radio_g("g1")` 两个标签互斥
+//   bit 20 组名空间与控件名空间分开：默认组的 "x" 与组名 "x" 不互相顶掉
+//   bit 21 再点已选中的钮 ⇒ **保持选中**（单选钮不是勾选框，不来回切）
+//   bit 22 `gui_space_snap`：6→8(n4) / 4→4(n4) / 4→8(n8) / 0→0 / 6→6(n0)
+//   bit 23 `gui_space_grid(c,4)`：pad 6→8、spacing 4→4
+//   bit 24 `gui_space_grid(c,8)`：pad 6→8、spacing 4→8
+//   bit 25 `gui_space_grid(c,0)` / 负值：不动；且**新 ctx 仍是 pad 6 / spacing 4**（默认值未改）
+include "flgui_widgets.fl"
+
+// 命令表快照（每帧重建 ⇒ 必须抄下来再比）—— 大容量载体一律全局数组
+int f14_sk[256];
+int f14_sx[256];
+int f14_sy[256];
+int f14_sw[256];
+int f14_sh[256];
+int f14_st[256];
+int f14_sl[256];
+int f14_sc[256];
+int f14_sa[256];
+int f14_sn = 0;
+
+int f14_snap() {
+  int i = 0;
+  f14_sn = gui_cmd_n;
+  while (i < gui_cmd_n) {
+    f14_sk[i] = gui_cmd_kind[i];
+    f14_sx[i] = gui_cmd_x[i];
+    f14_sy[i] = gui_cmd_y[i];
+    f14_sw[i] = gui_cmd_w[i];
+    f14_sh[i] = gui_cmd_h[i];
+    f14_st[i] = gui_cmd_toff[i];
+    f14_sl[i] = gui_cmd_tlen[i];
+    f14_sc[i] = gui_cmd_col[i];
+    f14_sa[i] = gui_cmd_a[i];
+    i = i + 1;
+  }
+  return f14_sn;
+}
+
+// 逐字段比（条数也要同）
+int f14_same() {
+  int i = 0;
+  if (gui_cmd_n != f14_sn) { return 0; }
+  while (i < gui_cmd_n) {
+    if (f14_sk[i] != gui_cmd_kind[i]) { return 0; }
+    if (f14_sx[i] != gui_cmd_x[i]) { return 0; }
+    if (f14_sy[i] != gui_cmd_y[i]) { return 0; }
+    if (f14_sw[i] != gui_cmd_w[i]) { return 0; }
+    if (f14_sh[i] != gui_cmd_h[i]) { return 0; }
+    if (f14_st[i] != gui_cmd_toff[i]) { return 0; }
+    if (f14_sl[i] != gui_cmd_tlen[i]) { return 0; }
+    if (f14_sc[i] != gui_cmd_col[i]) { return 0; }
+    if (f14_sa[i] != gui_cmd_a[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 命令表里第 n 条（0 = 第一条）指定 kind 的矩形/颜色（找不到 = 全部置 0）
+int f14_hx = 0; int f14_hy = 0; int f14_hw = 0; int f14_hh = 0; int f14_hc = 0;
+int f14_kind_at(int kind, int nth) {
+  int i = 0;
+  int n = 0;
+  f14_hx = 0; f14_hy = 0; f14_hw = 0; f14_hh = 0; f14_hc = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) {
+      if (n == nth) {
+        f14_hx = gui_cmd_x[i]; f14_hy = gui_cmd_y[i];
+        f14_hw = gui_cmd_w[i]; f14_hh = gui_cmd_h[i];
+        f14_hc = gui_cmd_col[i];
+        return 1;
+      }
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int f14_count_kind(int kind) {
+  int i = 0;
+  int n = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+
+int f14_in(struct GuiInput *in) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0; in->wheel = 0; in->key = 0; in->ms = 0;
+  return 0;
+}
+
+// 一组"控件动物园"：勾选框两态 + 滑块 + 进度条 + 只读文本域 + 可编辑文本域（焦点）+ 单选钮两个
+//   —— 用来做"新开关不改命令流"的逐字段比对（覆盖面要够宽，否则比的是空表）
+int f14_ga = 0;
+int f14_ra = 0;
+int f14_rb = 0;
+int f14_zoo(struct GuiCtx *c) {
+  struct GuiRect r;
+  r.x = 10; r.y = 10; r.w = 120; r.h = 14; gui_next_rect(c, &r);
+  f14_ga = gui_checkbox(c, "c1");
+  r.x = 10; r.y = 30; r.w = 160; r.h = 20; gui_next_rect(c, &r);
+  gui_slider(c, "s1", 60, 100);
+  r.x = 10; r.y = 56; r.w = 160; r.h = 14; gui_next_rect(c, &r);
+  gui_progressbar(c, "p1", 40, 100);
+  r.x = 10; r.y = 76; r.w = 160; r.h = 14; gui_next_rect(c, &r);
+  gui_textfield(c, "ro");
+  r.x = 10; r.y = 96; r.w = 160; r.h = 14; gui_next_rect(c, &r);
+  gui_textfield_edit(c, 0, 32);
+  r.x = 10; r.y = 116; r.w = 80; r.h = 14; gui_next_rect(c, &r);
+  f14_ra = gui_radio(c, "ra");
+  r.x = 10; r.y = 136; r.w = 80; r.h = 14; gui_next_rect(c, &r);
+  f14_rb = gui_radio(c, "rb");
+  return 0;
+}
+
+// 只画一个单选钮（命令形状专用：表里就只有它那一组命令，好逐条判）
+int f14_one_radio(struct GuiCtx *c, char *s) {
+  struct GuiRect r;
+  r.x = 10; r.y = 10; r.w = 80; r.h = 14;
+  gui_next_rect(c, &r);
+  return gui_radio(c, s);
+}
+
+int f14_grp_radio(struct GuiCtx *c, char *g, char *s) {
+  struct GuiRect r;
+  r.x = 10; r.y = 10; r.w = 80; r.h = 14;
+  gui_next_rect(c, &r);
+  return gui_radio_g(c, g, s);
+}
+
+// 一帧：喂输入 → 画 zoo → 关帧
+int f14_frame(struct GuiCtx *c, struct GuiInput *in) {
+  gui_begin(c, in);
+  f14_zoo(c);
+  gui_end(c);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiCtx c0;
+  struct GuiInput in;
+  int res = 0;
+  int v1 = 0; int v2 = 0; int v3 = 0; int v4 = 0;
+  int same_check = 0; int same_radius = 0; int same_focus = 0; int pool_same = 0;
+  int ps0 = 0; int ps1 = 0; int ps2 = 0; int ps3 = 0;
+  int un8 = 0; int un9 = 0; int un5 = 0;
+  int se8 = 0; int se9 = 0; int se5 = 0;
+  int ringx = 0; int ringy = 0; int ringw = 0; int ringh = 0; int ringc = 0;
+  int dotx = 0; int doty = 0; int dotw = 0; int doth = 0; int dotc = 0;
+  int lblx = 0; int lblc = 0;
+  int ra = 0; int rb = 0;
+  int ra2 = 0; int rb2 = 0;
+  int g1 = 0; int g2 = 0; int g3 = 0; int g4 = 0;
+  int px = 0; int py = 0;
+  int n = 0;
+
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 200;
+  f14_in(&in);
+
+  // ============ 一、两个新字段：深色默认 + 蓝白预设（bit 1~4）============
+  v1 = c.theme_check;
+  v2 = c.theme_focus;
+  print(["ART14 def check=", v1, " focus=", v2, "\n"]);
+  if (v1 == 0) { res = res | 1; }
+  if (v2 == 0) { res = res | 2; }
+
+  gui_theme_light_blue(&c);
+  v1 = c.theme_check;
+  v2 = c.theme_focus;
+  v3 = c.theme_box;
+  print(["ART14 lb check=", v1, " focus=", v2, " box=", v3, "\n"]);
+  if (v1 == 255) { res = res | 4; }
+  if (v2 == 0x00EB6325) { if (v2 == v3) { res = res | 8; } }
+
+  // ============ 二、"形状全在渲染端" ⇒ 三个开关都不动命令流（bit 5~8）============
+  // ⚠️ 先造出"表里有内容"的稳态：勾选框点成选中（kind 9 进来）、可编辑文本域点进焦点（kind 15 光标条进来）
+  //   —— 否则"三个开关不改命令流"比的是空表 / 缺 kind 的表，那是**假绿**。
+  gui_theme_default(&c);
+  f14_in(&in);
+  in.mx = 20; in.my = 16; in.down = 1; in.pressed = 1;
+  f14_frame(&c, &in);                                  // 勾选框：按下
+  in.pressed = 0; in.down = 0; in.released = 1;
+  f14_frame(&c, &in);                                  // 勾选框：抬起 ⇒ 选中
+  in.mx = 20; in.my = 100; in.down = 1; in.pressed = 1; in.released = 0;
+  f14_frame(&c, &in);                                  // 可编辑文本域：按下 ⇒ 聚焦
+  in.pressed = 0; in.down = 0; in.released = 1;
+  f14_frame(&c, &in);                                  // 抬起（焦点保留）
+  f14_in(&in);                                         // 之后四帧一律"无输入"（稳态）
+  f14_frame(&c, &in);
+  f14_snap();
+  ps0 = gui_pool_sum();
+  v1 = f14_count_kind(9) + f14_count_kind(12) + f14_count_kind(15);
+  print(["ART14 zoo cmdn=", f14_sn, " kinds=", v1, " k8=", f14_count_kind(8), " k15=", f14_count_kind(15),
+         " poolsum=", ps0, "\n"]);
+
+  c.theme_check = 255;
+  f14_frame(&c, &in);
+  same_check = f14_same();
+  ps1 = gui_pool_sum();
+  c.theme_check = 0;
+
+  c.theme_radius = 4;
+  f14_frame(&c, &in);
+  same_radius = f14_same();
+  ps2 = gui_pool_sum();
+  c.theme_radius = 0;
+
+  c.theme_focus = 0x00EB6325;
+  f14_frame(&c, &in);
+  same_focus = f14_same();
+  ps3 = gui_pool_sum();
+  c.theme_focus = 0;
+
+  pool_same = 0;
+  if (ps0 == ps1) { if (ps0 == ps2) { if (ps0 == ps3) { pool_same = 1; } } }
+  print(["ART14 cmd same_check=", same_check, " same_radius=", same_radius, " same_focus=", same_focus,
+         " poolsum_same=", pool_same, "\n"]);
+  if (same_check == 1) { res = res | 16; }
+  if (same_radius == 1) { res = res | 32; }
+  if (same_focus == 1) { res = res | 64; }
+  if (pool_same == 1) { res = res | 128; }
+
+  // ============ 三、gui_radio 的命令流形状（bit 9~13）============
+  // 未选：只画一个没点过的单选钮（名字没出现过 ⇒ 本组没选过任何人）
+  f14_in(&in);
+  gui_begin(&c, &in);
+  f14_one_radio(&c, "shp-un");
+  gui_end(&c);
+  un8 = f14_count_kind(8);
+  un9 = f14_count_kind(9);
+  un5 = f14_count_kind(5);
+  print(["ART14 radio un kind8=", un8, " kind9=", un9, " kind5=", un5, "\n"]);
+  if (un8 == 1) { if (un9 == 0) { if (un5 == 1) { res = res | 256; } } }
+
+  // 选中：点一次（按下 + 抬起两帧）⇒ 圆环 + 实心点 + 标签
+  in.mx = 20; in.my = 16; in.down = 1; in.pressed = 1;
+  gui_begin(&c, &in);
+  f14_one_radio(&c, "shp-se");
+  gui_end(&c);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in);
+  v1 = f14_one_radio(&c, "shp-se");
+  gui_end(&c);
+  se8 = f14_count_kind(8);
+  se9 = f14_count_kind(9);
+  se5 = f14_count_kind(5);
+  print(["ART14 radio sel on=", v1, " kind8=", se8, " kind9=", se9, " kind5=", se5, "\n"]);
+  if (v1 == 1) { if (se8 == 1) { if (se9 == 1) { if (se5 == 1) { res = res | 512; } } } }
+
+  // 圆环 / 圆点 / 标签的矩形与形状通道（期望值全部从 ctx 字段现算）
+  f14_kind_at(8, 0);
+  ringx = f14_hx; ringy = f14_hy; ringw = f14_hw; ringh = f14_hh; ringc = f14_hc;
+  f14_kind_at(9, 0);
+  dotx = f14_hx; doty = f14_hy; dotw = f14_hw; doth = f14_hh; dotc = f14_hc;
+  f14_kind_at(5, 0);
+  lblx = f14_hx; lblc = f14_hc;
+  n = c.box_w / 2;
+  if (n < 2) { n = 2; }
+  print(["ART14 radio ring=", ringx, ",", ringy, ",", ringw, ",", ringh, " dot=", dotx, ",", doty, ",", dotw, ",", doth,
+         " lblx=", lblx, " col8=", ringc, " col9=", dotc, " col5=", lblc, " boxw=", c.box_w, " sp=", c.spacing, "\n"]);
+  if (ringw == c.box_w) { if (ringh == c.box_w) { if (ringx == 10) { if (ringy == 10 + (14 - c.box_w) / 2) { if (lblx == 10 + c.box_w + c.spacing) { res = res | 1024; } } } } }
+  if (dotw == n) { if (doth == n) { if (dotx == 10 + (c.box_w - n) / 2) { if (doty == 10 + (14 - c.box_w) / 2 + (c.box_w - n) / 2) { res = res | 2048; } } } }
+  if (ringc != 0) { if (dotc != 0) { if (lblc == 0) { if (ringc == dotc) { res = res | 4096; } } } }
+
+  // ============ 四、gui_radio 组语义 + 状态池（bit 14~20）============
+  // 帧 1~2：点 "ra"；帧 3：无输入 ⇒ 跨帧仍选中；帧 4~5：点 "rb" ⇒ 互斥
+  f14_in(&in);
+  in.mx = 20; in.my = 120; in.down = 1; in.pressed = 1;
+  f14_frame(&c, &in);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  f14_frame(&c, &in);
+  ra = f14_ra;                                        // 点中的是 "ra"（(20,120) 落在 ra 的矩形里）
+  in.released = 0;
+  f14_frame(&c, &in);
+  ra2 = f14_ra;
+  rb = f14_rb;
+  if (ra == 1) { if (rb == 0) { res = res | 8192; } }
+  print(["ART14 radio clickA a=", ra, " b=", rb, " pool_a=", gui_pool_get(gui_id("ra")),
+         " pool_b=", gui_pool_get(gui_id("rb")), " again=", ra2, "\n"]);
+  if (ra2 == 1) { res = res | 16384; }                // 跨帧存活：无输入那一帧 ra 仍返回 1
+
+  in.mx = 20; in.my = 140; in.down = 1; in.pressed = 1;
+  f14_frame(&c, &in);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  f14_frame(&c, &in);
+  in.released = 0;
+  v3 = gui_pool_get(gui_id("ra"));                     // 点击那一帧：画在**前面**的 ra 还读到旧组值
+  v4 = gui_pool_get(gui_id("rb"));
+  f14_frame(&c, &in);                                  // 再走一帧（无输入）⇒ 互斥对**所有**钮生效
+  v1 = gui_pool_get(gui_id("ra"));
+  v2 = gui_pool_get(gui_id("rb"));
+  print(["ART14 radio clickB same_frame a=", v3, " b=", v4, " next_frame a=", v1, " b=", v2,
+         " rb_ret=", f14_rb, "\n"]);
+  if (v1 == 0) { if (v2 == 1) { res = res | 32768; } }   // 同组互斥（池里的值也一致）
+  if (v2 == f14_rb) { res = res | 65536; }               // 返回值与池一致（选中者 1）
+
+  // 再点一次已选中的 "rb" ⇒ 保持选中（不来回切）
+  in.pressed = 1; in.down = 1; in.released = 0;
+  f14_frame(&c, &in);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  f14_frame(&c, &in);
+  v1 = gui_pool_get(gui_id("rb"));
+  print(["ART14 radio reclickB b=", v1, "\n"]);
+  if (v1 == 1) { res = res | 1048576; }
+  in.released = 0;
+
+  // 不同组：各自独立
+  gui_init(&c);
+  c.lay_w = 200; c.lay_h = 200;
+  f14_in(&in);
+  in.mx = 20; in.my = 16; in.down = 1; in.pressed = 1;
+  gui_begin(&c, &in); f14_grp_radio(&c, "g1", "x"); gui_end(&c);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in); g1 = f14_grp_radio(&c, "g1", "x"); gui_end(&c);
+  in.released = 0;
+  in.pressed = 1; in.down = 1;
+  gui_begin(&c, &in); f14_grp_radio(&c, "g2", "y"); gui_end(&c);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in); g2 = f14_grp_radio(&c, "g2", "y"); g3 = f14_grp_radio(&c, "g1", "x"); gui_end(&c);
+  in.released = 0;
+  print(["ART14 radio groups g1x=", g1, " g2y=", g2, " g1x_after=", g3, "\n"]);
+  if (g1 == 1) { if (g2 == 1) { if (g3 == 1) { res = res | 131072; } } }
+
+  // 显式同名组互斥
+  in.mx = 20; in.my = 16; in.down = 1; in.pressed = 1;
+  gui_begin(&c, &in); f14_grp_radio(&c, "g1", "z"); gui_end(&c);
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in); g4 = f14_grp_radio(&c, "g1", "z"); g3 = f14_grp_radio(&c, "g1", "x"); gui_end(&c);
+  in.released = 0;
+  print(["ART14 radio samegroup g1z=", g4, " g1x=", g3, "\n"]);
+  if (g4 == 1) { if (g3 == 0) { res = res | 262144; } }
+
+  // 组名空间与控件名空间分开：默认组的 "x" 与组名 "x" 不互相顶掉
+  gui_init(&c);
+  c.lay_w = 200; c.lay_h = 200;
+  f14_in(&in);
+  in.mx = 20; in.my = 16; in.down = 1; in.pressed = 1;
+  gui_begin(&c, &in); gui_radio(&c, "x"); gui_end(&c);          // 默认组（组名 ""）里的标签 "x"
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in); gui_radio(&c, "x"); gui_end(&c);
+  in.released = 0;
+  in.pressed = 1; in.down = 1;
+  gui_begin(&c, &in); f14_grp_radio(&c, "x", "y"); gui_end(&c);  // 组名 "x" 里的标签 "y"
+  in.pressed = 0; in.released = 1; in.down = 0;
+  gui_begin(&c, &in);
+  px = gui_radio(&c, "x");
+  py = f14_grp_radio(&c, "x", "y");
+  gui_end(&c);
+  in.released = 0;
+  print(["ART14 radio namespaces defx=", px, " grpx_y=", py, "\n"]);
+  if (px == 1) { if (py == 1) { res = res | 524288; } }
+
+  // ============ 五、间距栅格入口（bit 21~24）============
+  v1 = gui_space_snap(6, 4);
+  v2 = gui_space_snap(4, 4);
+  v3 = gui_space_snap(4, 8);
+  v4 = gui_space_snap(0, 4);
+  n = gui_space_snap(6, 0);
+  print(["ART14 snap n4_6=", v1, " n4_4=", v2, " n8_4=", v3, " n4_0=", v4, " n0_6=", n, "\n"]);
+  if (v1 == 8) { if (v2 == 4) { if (v3 == 8) { if (v4 == 0) { if (n == 6) { res = res | 2097152; } } } } }
+
+  gui_init(&c);
+  gui_space_grid(&c, 4);
+  print(["ART14 grid n=4 pad=", c.pad, " spacing=", c.spacing, "\n"]);
+  if (c.pad == 8) { if (c.spacing == 4) { res = res | 4194304; } }
+
+  gui_init(&c);
+  gui_space_grid(&c, 8);
+  print(["ART14 grid n=8 pad=", c.pad, " spacing=", c.spacing, "\n"]);
+  if (c.pad == 8) { if (c.spacing == 8) { res = res | 8388608; } }
+
+  gui_init(&c);
+  gui_space_grid(&c, 0);
+  v1 = c.pad; v2 = c.spacing;
+  gui_space_grid(&c, 0 - 3);
+  v3 = c.pad; v4 = c.spacing;
+  gui_init(&c0);                                 // 另一个全新 ctx：默认值必须还是 6 / 4
+  print(["ART14 grid n=0 pad=", v1, " spacing=", v2, " neg=", v3, ",", v4,
+         " fresh=", c0.pad, ",", c0.spacing, "\n"]);
+  if (v1 == 6) { if (v2 == 4) { if (v3 == 6) { if (v4 == 4) { if (c0.pad == 6) { if (c0.spacing == 4) { res = res | 16777216; } } } } } }
+
+  print(["M4N res=", res, " want=", 33554431, "\n"]);
+  if (res == 33554431) { return 42; }
+  return res;
+}

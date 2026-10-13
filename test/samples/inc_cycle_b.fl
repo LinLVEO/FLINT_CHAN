@@ -1,0 +1,3 @@
+// inc_cycle_b.fl — B2v 负例：见 inc_cycle_a.fl
+include "inc_cycle_a.fl"
+int inc_cycle_b() { return 2; }

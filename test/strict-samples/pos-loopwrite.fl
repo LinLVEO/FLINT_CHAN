@@ -1,0 +1,10 @@
+// pos-loopwrite.fl -- -strict 正例：循环体里"先写后读"、循环外读循环里写过的变量
+//   （文本序单遍分析的已知漏报面：这里要求它**不报** —— 宁可漏报也不误报）
+int main() {
+  int i;
+  int sum = 0;
+  for (i = 0; i < 5; i = i + 1) {
+    sum = sum + i;
+  }
+  return sum + i;
+}

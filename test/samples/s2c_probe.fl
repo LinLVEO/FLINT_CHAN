@@ -1,0 +1,20 @@
+// s2c_probe.fl — 回归：ptr 字段清零/赋整数字面量必须 64 位写（v1.0.4.1 S2 补漏）
+// 修前：写宽只看 rhs 是否地址类——`s.p = 0`（0 非地址类）走 32 位写，只清低 4 字节，
+// 高 4 字节残留旧值 → 指针字段变巨值（RegisterClassA 读 hCursor=0x7ffc…err 87 的根因）。
+// 验证：先把 s.p 指向 >4GB 堆（addr class 64 位写，高 4 字节非 0），再 s.p = 0 清零，
+// 读回必须 == 0（32 位写会残留高 4 字节 → 读回非 0）。
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+struct S { int *p; }
+int main() {
+  struct S s;
+  int *big;
+  int ok;
+  big = VirtualAlloc(0, 4096, 0x103000, 4);   // RESERVE|COMMIT|TOP_DOWN → >4GB 高地址
+  if (big == 0) return 92;
+  s.p = big;              // addr class → 64 位写 ✓ 高 4 字节非 0
+  s.p = 0;                // 修前 32 位写 → 高 4 字节残留；修后 64 位清零
+  ok = 0;
+  if (s.p == 0) ok = 1;   // 读 ptr 字段 64 位
+  if (!ok) return 91;
+  return 0;
+}

@@ -1,0 +1,17 @@
+// sample2.fl — tokenizer 测试样本2：双字符运算符与各种符号
+int main() {
+  int x = 10;
+  int y = 20;
+  if (x <= y && x != y) {
+    x = x + y;
+  } else {
+    x = x - y;
+  }
+  while (x > 0) {
+    x = x - 1;
+  }
+  for (x = 0; x < 10; x = x + 1) {
+    x;
+  }
+  return x;
+}

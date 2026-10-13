@@ -1,0 +1,42 @@
+# 编译产物
+flint.exe
+flint_*.exe
+
+# 手工实验残留 / 临时目录
+tmp/
+test/tmp/
+editor/tmp/
+
+# FLINT Studio 编译临时文件（写在被打开文件同目录）
+.studio_*.fl
+.studio_*.exe
+
+# samples 里手工编译的残留 exe（测试产物只写 test/tmp 且自清理）
+test/samples/*.exe
+
+# 学习轨道实验目录的编译产物（test/learn/ 只留 .fl 样本）
+test/learn/*.exe
+
+# boot 自举样本编译产物（B2b：boot <a.fl> → 同目录 a.exe）
+boot/*.exe
+boot/samples/*.exe
+
+# apps 编译产物（v1.0.3 多文件应用）
+apps/**/*.exe
+# examples 的编译产物（README 第一个示例随手编出来的，别提交）
+examples/**/*.exe
+# B2i 自举闭环临时副本（verify.ps1 生成）
+boot/self*.fl
+
+# 缝合产物（AOT 编出来的原生 DLL，体积大且可重建：重建步骤见 FLINT明细.md §4.8）
+apps/**/*.dll
+libcs/**/out/
+libcs/**/bin/
+libcs/**/obj/
+libcs/**/*.exe
+# 本地回退留底（*.bak-<时间戳>）
+*.bak-*
+
+# 实验/调试输出残留（2026-09-19 收干净；这些是跑出来的日志，不是源码/样本）
+apps/**/*.pmdebug.txt
+libcs/**/*.log

@@ -1,0 +1,40 @@
+item	1	lock	锁定位置
+popup	100	pos	位置
+item	10	pos_lt	左上角
+item	11	pos_rt	右上角
+item	12	pos_lb	左下角
+item	13	pos_rb	右下角
+item	14	pos_c	屏幕中央
+popup	101	font	字号
+item	20	font_s	小
+item	21	font_m	中
+item	22	font_l	大
+popup	102	op	透明度
+item	30	op60	60%
+item	31	op80	80%
+item	32	op100	100%
+popup	103	cal	CPU温度校准
+item	40	cal_auto	自动检测(推荐)
+item	41	cal0	不校准(0°C)
+item	42	cal5	-5°C
+item	43	cal11	-11°C
+item	44	cal20	-20°C
+popup	104	show	显示项
+item	50	show_fps	帧率 FPS
+item	51	show_fpssrc	帧率来源标注
+item	52	show_cputemp	CPU 温度
+item	53	show_cpuload	CPU 占用
+item	54	show_gputemp	GPU 温度
+item	55	show_gpuload	GPU 占用
+item	56	show_gpumem	显存使用
+item	57	show_ram	内存
+item	58	show_disk	磁盘占用
+item	59	show_net	网速
+item	60	show_fan	风扇转速
+item	61	show_power	整机功耗
+item	62	show_powerdetail	功耗构成
+item	70	mini	最小化模式(小方框)
+item	80	help	使用说明
+item	90	exit	退出
+helptitle	98	helptitle	使用说明
+helptext	99	helptext	硬件监测浮窗（FLINT 版）\n\n• 左键按住拖动 = 移动位置\n• 双击 = 锁定 / 解锁位置\n• 右键 = 打开主菜单（位置 / 字号 / 透明度 / CPU温度校准 / 显示项 / 最小化模式 / 退出）\n• 最小化模式：右键 → 最小化模式，浮窗缩成一个小方框\n  （显示 CPU 占用%），单击小方框即可恢复完整浮窗\n• 显示项里可开关：帧率 / CPU / GPU / 内存 / 磁盘占用 / 网速 / 风扇 / 功耗\n\n• 整机功耗为软件估算：CPU/GPU 取真实传感器读数，再加一个\n  "底噪"常数（主板/内存/硬盘/风扇+电源损耗，默认 45W，\n  可在 config.json 的 PowerBaseWatts 调整）。仅供参考，\n  要精确值需插物理功率计。\n\n• config.json 与 exe 同目录（apps\m2_float\config.json），改完重启生效。

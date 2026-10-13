@@ -1,0 +1,502 @@
+// flgui15.fl — FLGUI M4o（2026-09-28）：**键盘焦点链（Tab 导航）**的无头契约
+//   不建真窗：键盘/鼠标全走"合成输入喂 gui_begin"；焦点态从**池**与**命令表**两侧读回。
+//   真窗那半不在这道门里：真按键 = `apps\flgui_demo\tab-probe.ps1`、像素 = `tmp\tabprobe\tab-probe.fl`。
+//
+// 本刀要补的缺口（M4n 诚实边界②）：`theme_focus` 焦点圈与渲染端画法上一刀已落好，但"谁是焦点"
+//   只有一个来源 = 点进可编辑文本域 —— **键盘 Tab 导航没做**。本样本钉的就是这条链。
+//
+// 四组判据（每组都钉"改前会红"的那个数）：
+//   ① **清单与顺序**：可聚焦 = 按钮/勾选框/单选钮/滑块/可编辑文本域；**不可聚焦** = 标签/进度条/
+//      只读文本域。场景里**故意把不可聚焦控件夹在可聚焦控件中间**（label 夹在 B1 与 C1 之间、
+//      进度条夹在 C1 与 S1 之间）⇒ "跳过"不是靠"恰好只有可聚焦控件"成立的。
+//   ② **双向导航 ＋ 两端回绕**：Tab 前进 / Shift+Tab 后退；末尾 ⇒ 第 0 个、开头 ⇒ 最后一个；
+//      **本来没有焦点**时 Tab ⇒ 第 0 个、Shift+Tab ⇒ 最后一个；`n = 1` / `n = 0` 两个退化档也钉。
+//   ③ **焦点圈只画在焦点那一项**：`kind 16`（焦点标记命令）**同帧恒 ≤ 1 条**、且它的 rect 就是
+//      当前焦点控件的**整个矩形**；没有焦点 ⇒ **一条都没有**。文本域那半仍走 M4n 的老路
+//      （`kind 14` 盒 ＋ `kind 15` 光标条 ⇒ 渲染端画圈），这里顺带钉"被 Tab 聚焦 ⇒ 编辑焦点跟上、
+//      离开 ⇒ 收回"。
+//   ④ **焦点态不进命令流 / 不进 POOLSUM**：`theme_focus = 0` 与 `非 0` 两帧的命令表**逐字段相同**
+//      （形状是渲染端的事）；焦点序号/计数住池的 k=1/k=2/k=3 ⇒ **k=0 恒 0**（`gui_pool_sum` 只摘 k=0）。
+// 位掩码 25 位，全亮 = 33554431 → return 42。
+//   bit 1  初始没有焦点（焦点序号 = **-1**；读法 = `gui_pool_at(gui_focus_key(), 1) - 1`）
+//   bit 2  可聚焦清单数 = 4（标签/进度条/只读文本域都不登记）
+//   bit 3  没有焦点 ⇒ `kind 16` 条数 = 0
+//   bit 4  无焦点时第一下 Tab ⇒ 序号 0（落在**第一个可聚焦控件**上）
+//   bit 5  焦点 id == `gui_id("B1")`
+//   bit 6  同帧 `kind 16` 恰好 1 条（**只画在焦点那一项**）
+//   bit 7  圈 rect == 按钮**整个矩形** (10,30,80,20)
+//   bit 8  Tab 被焦点链**消费**（帧末 `c.key == 0`；文本域内容与 `gui_key_pending` 都没动）
+//   bit 9  再 Tab ⇒ 序号 1 / id == C1 / 圈 rect == (10,80,100,14)（**跳过夹在中间的 label**）
+//   bit 10 再 Tab ⇒ 序号 2 / id == S1 / 圈 rect == (10,120,120,14)（**跳过进度条**）
+//   bit 11 再 Tab ⇒ 序号 3 / id == 文本域 id / `edit_slot == 0` / 同帧出现 `kind 15`
+//   bit 12 再 Tab ⇒ **回绕**到序号 0（B1）＋ 编辑焦点收回
+//   bit 13 在序号 0 上 Shift+Tab ⇒ **反向回绕**到序号 3（文本域，编辑焦点跟上）
+//   bit 14 再 Shift+Tab ⇒ 序号 2（S1，后退一格；编辑焦点收回）
+//   bit 15 **全新 ctx 第一帧**正向 Tab ⇒ 序号 0（不需要"上一帧的清单数"）
+//   bit 16 **预热过一帧**、无焦点时 Shift+Tab ⇒ **最后一个**（序号 3）
+//   bit 17 只有 1 个可聚焦控件：Tab 恒为序号 0、再 Tab 仍是 0（n = 1 回绕不越界）
+//   bit 18 一个可聚焦控件都没有：Tab 之后序号仍是 -1（**不许乱动**）
+//   bit 19 序号越界（2 个的场景 ⇒ 只有 1 个的场景）⇒ `gui_end` **收回焦点**（不留悬空焦点）
+//   bit 20 鼠标点进文本域 ⇒ 链焦点 = 序号 3 ＋ `edit_slot == 0` ＋ `gui_focus_get` 能报出它的 id
+//   bit 21 鼠标点盒子外 ⇒ 链焦点收回（序号 -1）＋ `edit_slot == -1` ＋ 没有 `kind 16` / `kind 15`
+//   bit 22 `theme_focus` 0 / 非 0：命令表**逐字段**相同（含条数）＋ POOLSUM 相同
+//   bit 23 焦点态住池 k=1/k=2/k=3，**k=0 恒 0**（⇒ `gui_pool_sum` 零扰动）
+//   bit 24 停一帧圈不动、Tab 之后**旧控件不再发** `kind 16`（同帧仍只有 1 条，rect 已换到新焦点）
+//   bit 25 单选钮也在焦点链里（radio × 2 ＋ button：清单数 = 3、第一下落在**先画的**那个钮上）
+include "flgui_widgets.fl"
+
+// ===== 场景（固定坐标：判据能"从命令表读回"圈挂在哪个矩形上）=====
+// 可聚焦顺序（= **本帧绘制顺序**）= B1(0) / C1(1) / S1(2) / EDIT(3)。
+int f15_sld = 40;                 // 滑块值（immediate mode：调用方持有）
+
+// 命令表快照（每帧重建 ⇒ 必须抄下来再比）—— 大容量载体一律全局数组
+int f15_sk[24];
+int f15_sx[24];
+int f15_sy[24];
+int f15_sw[24];
+int f15_sh[24];
+int f15_sc[24];
+int f15_sa[24];
+int f15_sn = 0;
+// 本帧扫出来的"焦点标记"账（kind 16 条数与矩形）与 kind 15 条数
+int f15_mark_n = 0;
+int f15_mark_x = 0;
+int f15_mark_y = 0;
+int f15_mark_w = 0;
+int f15_mark_h = 0;
+int f15_k15 = 0;
+
+int f15_idx(struct GuiCtx *c) { return gui_pool_at(gui_focus_key(), 1) - 1; }   // 焦点序号（-1 = 无）
+int f15_cnt(struct GuiCtx *c) { return gui_pool_at(gui_focus_key(), 2); }        // 上一帧的可聚焦清单数
+
+int f15_scan() {
+  int i = 0;
+  f15_sn = gui_cmd_n;
+  f15_mark_n = 0;
+  f15_k15 = 0;
+  f15_mark_x = 0;
+  f15_mark_y = 0;
+  f15_mark_w = 0;
+  f15_mark_h = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 16) {
+      f15_mark_n = f15_mark_n + 1;
+      f15_mark_x = gui_cmd_x[i];
+      f15_mark_y = gui_cmd_y[i];
+      f15_mark_w = gui_cmd_w[i];
+      f15_mark_h = gui_cmd_h[i];
+    }
+    if (gui_cmd_kind[i] == 15) { f15_k15 = f15_k15 + 1; }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < f15_sn) {
+    f15_sk[i] = gui_cmd_kind[i];
+    f15_sx[i] = gui_cmd_x[i];
+    f15_sy[i] = gui_cmd_y[i];
+    f15_sw[i] = gui_cmd_w[i];
+    f15_sh[i] = gui_cmd_h[i];
+    f15_sc[i] = gui_cmd_col[i];
+    f15_sa[i] = gui_cmd_a[i];
+    i = i + 1;
+  }
+  return f15_sn;
+}
+
+// 逐字段比（条数也要同）
+int f15_same() {
+  int i = 0;
+  if (gui_cmd_n != f15_sn) { return 0; }
+  while (i < gui_cmd_n) {
+    if (f15_sk[i] != gui_cmd_kind[i]) { return 0; }
+    if (f15_sx[i] != gui_cmd_x[i]) { return 0; }
+    if (f15_sy[i] != gui_cmd_y[i]) { return 0; }
+    if (f15_sw[i] != gui_cmd_w[i]) { return 0; }
+    if (f15_sh[i] != gui_cmd_h[i]) { return 0; }
+    if (f15_sc[i] != gui_cmd_col[i]) { return 0; }
+    if (f15_sa[i] != gui_cmd_a[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+int f15_in(struct GuiInput *in) {
+  in->mx = 0; in->my = 0;
+  in->down = 0; in->pressed = 0; in->released = 0;
+  in->wheel = 0; in->key = 0; in->ms = 0;
+  return 0;
+}
+
+// 场景。mode：0 = 全场景（4 可聚焦 ＋ 3 不可聚焦，**夹在中间**）｜1 = 只有 1 个可聚焦
+//            2 = 一个可聚焦都没有｜3 = 只有 2 个可聚焦（造"序号越界"）｜4 = 单选钮两个 ＋ 按钮
+int f15_scene(struct GuiCtx *c, int mode) {
+  struct GuiRect r;
+  if (mode == 0) {
+    r.x = 10; r.y = 10; r.w = 64; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_label(c, "title");                                    // 不可聚焦
+    r.x = 10; r.y = 30; r.w = 80; r.h = 20;
+    gui_next_rect(c, &r);
+    gui_button(c, "B1");                                      // 可聚焦 #0
+    r.x = 10; r.y = 60; r.w = 64; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_label(c, "mid");                                      // 不可聚焦（**夹在中间**）
+    r.x = 10; r.y = 80; r.w = 100; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_checkbox(c, "C1");                                    // 可聚焦 #1
+    r.x = 10; r.y = 100; r.w = 120; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_progressbar(c, "P1", 50, 100);                        // 不可聚焦（**夹在中间**）
+    r.x = 10; r.y = 120; r.w = 120; r.h = 14;
+    gui_next_rect(c, &r);
+    f15_sld = gui_slider(c, "S1", f15_sld, 100);              // 可聚焦 #2
+    r.x = 10; r.y = 140; r.w = 140; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_textfield(c, "RO");                                   // 不可聚焦（只读）
+    r.x = 10; r.y = 160; r.w = 140; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_textfield_edit(c, 0, 16);                             // 可聚焦 #3
+  }
+  if (mode == 1) {
+    r.x = 10; r.y = 10; r.w = 80; r.h = 20;
+    gui_next_rect(c, &r);
+    gui_button(c, "B1");
+    r.x = 10; r.y = 40; r.w = 64; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_label(c, "only label");
+  }
+  if (mode == 2) {
+    r.x = 10; r.y = 10; r.w = 64; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_label(c, "no focusable");
+  }
+  if (mode == 3) {
+    r.x = 10; r.y = 10; r.w = 80; r.h = 20;
+    gui_next_rect(c, &r);
+    gui_button(c, "B1");
+    r.x = 10; r.y = 40; r.w = 100; r.h = 14;
+    gui_next_rect(c, &r);
+    gui_checkbox(c, "C1");
+  }
+  if (mode == 4) {
+    r.x = 10; r.y = 10; r.w = 80; r.h = 16;
+    gui_next_rect(c, &r);
+    gui_radio(c, "RA");                                       // 可聚焦 #0
+    r.x = 100; r.y = 10; r.w = 80; r.h = 16;
+    gui_next_rect(c, &r);
+    gui_radio(c, "RB");                                       // 可聚焦 #1
+    r.x = 10; r.y = 40; r.w = 80; r.h = 20;
+    gui_next_rect(c, &r);
+    gui_button(c, "B1");                                      // 可聚焦 #2
+  }
+  return 0;
+}
+
+// 走一帧：**键盘显式给**（0 = 这一帧没有键）—— 别看"上一帧设过就一直在"（`gui_begin` 只清 `c->key`，
+//   不清 `in->key`），键不会自己消失 ⇒ 每帧都得明说。
+int f15_step(struct GuiCtx *c, struct GuiInput *in, int mode, int key) {
+  in->key = key;
+  gui_begin(c, in);
+  f15_scene(c, mode);
+  gui_end(c);
+  f15_scan();
+  return 0;
+}
+
+int f15_setup(struct GuiCtx *c, struct GuiInput *in) {
+  gui_init(c);
+  c->lay_w = 200;
+  c->lay_h = 220;
+  f15_in(in);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiCtx c0;
+  struct GuiInput in;
+  int res = 0;
+  int v1 = 0; int v2 = 0; int v3 = 0; int v4 = 0;
+  int n = 0; int ps = 0;
+  int bid = 0; int cid = 0; int sid = 0; int eid = 0;
+  int rid = 0;
+  int len0 = 0; int pend0 = 0;
+
+  f15_setup(&c, &in);
+  bid = gui_id("B1");
+  cid = gui_id("C1");
+  sid = gui_id("S1");
+  eid = gui_id_in("__flgui_edit", 0);
+
+  // ============ ① 初始状态：没有焦点 / 清单 = 4 / 一条 kind 16 都没有 ============
+  f15_step(&c, &in, 0, 0);
+  v1 = f15_idx(&c);
+  v2 = f15_cnt(&c);
+  v3 = f15_mark_n;
+  print(["F15 init idx=", v1, " cnt=", v2, " mark=", v3, " k15=", f15_k15, "\n"]);
+  if (v1 == 0 - 1) { res = res | 1; }
+  if (v2 == 4) { res = res | 2; }
+  if (v3 == 0) { res = res | 4; }
+
+  // ============ ② 无焦点时第一下 Tab ⇒ 第 0 个（B1），圈 = 按钮整个矩形 ============
+  len0 = gui_edit_size(0);
+  pend0 = gui_key_pending;
+  f15_step(&c, &in, 0, 9);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  v3 = f15_mark_n;
+  print(["F15 tab1 idx=", v1, " id_is_b1=", v2 == bid, " mark=", v3, " rect=", f15_mark_x, ",",
+         f15_mark_y, ",", f15_mark_w, ",", f15_mark_h, " key=", c.key, " len=", gui_edit_size(0),
+         " pend=", gui_key_pending, "\n"]);
+  if (v1 == 0) { res = res | 8; }
+  if (v2 == bid) { res = res | 16; }
+  if (v3 == 1) { res = res | 32; }
+  if (f15_mark_x == 10) { if (f15_mark_y == 30) { if (f15_mark_w == 80) { if (f15_mark_h == 20) { res = res | 64; } } } }
+  if (c.key == 0) {
+    if (gui_edit_size(0) == len0) {
+      if (gui_key_pending == pend0) { res = res | 128; }
+    }
+  }
+
+  // ============ ③ 前进三格：跳过夹在中间的不可聚焦控件 ============
+  f15_step(&c, &in, 0, 9);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  print(["F15 tab2 idx=", v1, " id_is_c1=", v2 == cid, " rect=", f15_mark_x, ",", f15_mark_y, ",",
+         f15_mark_w, ",", f15_mark_h, " mark=", f15_mark_n, "\n"]);
+  if (v1 == 1) {
+    if (v2 == cid) {
+      if (f15_mark_x == 10) { if (f15_mark_y == 80) { if (f15_mark_w == 100) { if (f15_mark_h == 14) { res = res | 256; } } } }
+    }
+  }
+
+  f15_step(&c, &in, 0, 9);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  print(["F15 tab3 idx=", v1, " id_is_s1=", v2 == sid, " rect=", f15_mark_x, ",", f15_mark_y, ",",
+         f15_mark_w, ",", f15_mark_h, " mark=", f15_mark_n, "\n"]);
+  if (v1 == 2) {
+    if (v2 == sid) {
+      if (f15_mark_x == 10) { if (f15_mark_y == 120) { if (f15_mark_w == 120) { if (f15_mark_h == 14) { res = res | 512; } } } }
+    }
+  }
+
+  // ============ ④ 第 4 格 = 可编辑文本域（编辑焦点跟上、kind 15 出现）============
+  f15_step(&c, &in, 0, 9);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  v3 = gui_edit_focused(&c);
+  print(["F15 tab4 idx=", v1, " id_is_edit=", v2 == eid, " edit_slot=", v3, " k15=", f15_k15,
+         " mark=", f15_mark_n, "\n"]);
+  if (v1 == 3) {
+    if (v2 == eid) {
+      if (v3 == 0) {
+        if (f15_k15 == 1) { res = res | 1024; }
+      }
+    }
+  }
+
+  // ============ ⑤ 末尾回绕：第 4 格再 Tab ⇒ 回到第 0 格（编辑焦点收回）============
+  f15_step(&c, &in, 0, 9);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  print(["F15 wrapfwd idx=", v1, " id_is_b1=", v2 == bid, " edit_slot=", gui_edit_focused(&c),
+         " mark=", f15_mark_n, "\n"]);
+  if (v1 == 0) {
+    if (v2 == bid) {
+      if (gui_edit_focused(&c) == 0 - 1) { res = res | 2048; }
+    }
+  }
+
+  // ============ ⑥ 反向：序号 0 上 Shift+Tab ⇒ 反向回绕到最后一个；再 Shift+Tab ⇒ 后退一格 ============
+  f15_step(&c, &in, 0, 0x0109);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  v3 = gui_edit_focused(&c);
+  print(["F15 wrapback idx=", v1, " id_is_edit=", v2 == eid, " edit_slot=", v3, " k15=", f15_k15, "\n"]);
+  if (v1 == 3) {
+    if (v2 == eid) {
+      if (v3 == 0) { res = res | 4096; }
+    }
+  }
+
+  f15_step(&c, &in, 0, 0x0109);
+  v1 = f15_idx(&c);
+  v2 = gui_focus_get(&c);
+  print(["F15 back1 idx=", v1, " id_is_s1=", v2 == sid, " edit_slot=", gui_edit_focused(&c),
+         " mark=", f15_mark_n, " rect=", f15_mark_x, ",", f15_mark_y, "\n"]);
+  if (v1 == 2) {
+    if (v2 == sid) {
+      if (gui_edit_focused(&c) == 0 - 1) { res = res | 8192; }
+    }
+  }
+
+  // ============ ⑦ 全新 ctx：**第一帧**正向 Tab ⇒ 序号 0（不依赖"上一帧的清单数"）============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 0, 9);
+  v1 = f15_idx(&c0);
+  v2 = gui_focus_get(&c0);
+  print(["F15 freshfwd idx=", v1, " id_is_b1=", v2 == bid, " mark=", f15_mark_n, "\n"]);
+  if (v1 == 0) {
+    if (v2 == bid) { res = res | 16384; }
+  }
+
+  // 预热过一帧（无键）之后、无焦点时 Shift+Tab ⇒ 最后一个（序号 3）
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 0, 0);
+  f15_step(&c0, &in, 0, 0x0109);
+  v1 = f15_idx(&c0);
+  v2 = gui_focus_get(&c0);
+  print(["F15 warmback idx=", v1, " id_is_edit=", v2 == eid, " cnt=", f15_cnt(&c0), "\n"]);
+  if (v1 == 3) {
+    if (v2 == eid) { res = res | 32768; }
+  }
+
+  // ============ ⑧ 退化档：n = 1（恒为 0）／n = 0（不许乱动）============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 1, 0);
+  v1 = f15_cnt(&c0);
+  f15_step(&c0, &in, 1, 9);
+  v2 = f15_idx(&c0);
+  f15_step(&c0, &in, 1, 9);
+  v3 = f15_idx(&c0);
+  print(["F15 n1 cnt=", v1, " idx_a=", v2, " idx_b=", v3, " mark=", f15_mark_n, "\n"]);
+  if (v1 == 1) {
+    if (v2 == 0) {
+      if (v3 == 0) { res = res | 65536; }
+    }
+  }
+
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 2, 0);
+  f15_step(&c0, &in, 2, 9);
+  v1 = f15_cnt(&c0);
+  v2 = f15_idx(&c0);
+  v3 = f15_mark_n;
+  print(["F15 n0 cnt=", v1, " idx=", v2, " mark=", v3, "\n"]);
+  if (v1 == 0) {
+    if (v2 == 0 - 1) {
+      if (v3 == 0) { res = res | 131072; }
+    }
+  }
+
+  // ============ ⑨ 序号越界 ⇒ gui_end 收回焦点 ============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 3, 9);
+  v1 = f15_idx(&c0);
+  f15_step(&c0, &in, 3, 9);     // 序号 1（2 个可聚焦控件里的最后一个）
+  v2 = f15_idx(&c0);
+  f15_step(&c0, &in, 1, 0);                 // 场景缩成 1 个 ⇒ 序号 1 越界
+  v3 = f15_idx(&c0);
+  v4 = gui_focus_get(&c0);
+  print(["F15 dangling idx_a=", v1, " idx_b=", v2, " idx_after=", v3, " id_after=", v4, "\n"]);
+  if (v1 == 0) {
+    if (v2 == 1) {
+      if (v3 == 0 - 1) { res = res | 262144; }
+    }
+  }
+
+  // ============ ⑩ 鼠标：点进文本域 ⇒ 链焦点跟上；点盒子外 ⇒ 两个一起收回 ============
+  f15_setup(&c0, &in);
+  in.mx = 60; in.my = 166; in.down = 1; in.pressed = 1;
+  f15_step(&c0, &in, 0, 0);
+  v1 = f15_idx(&c0);
+  v2 = gui_edit_focused(&c0);
+  v3 = gui_focus_get(&c0);
+  print(["F15 clickin idx=", v1, " edit_slot=", v2, " id_is_edit=", v3 == eid, "\n"]);
+  if (v1 == 3) {
+    if (v2 == 0) {
+      if (v3 == eid) { res = res | 524288; }
+    }
+  }
+
+  in.pressed = 0; in.released = 1; in.down = 0;
+  f15_step(&c0, &in, 0, 0);
+  in.mx = 250; in.my = 250; in.pressed = 1; in.down = 1;
+  f15_step(&c0, &in, 0, 0);
+  v1 = f15_idx(&c0);
+  v2 = gui_edit_focused(&c0);
+  v3 = f15_mark_n;
+  v4 = f15_k15;
+  print(["F15 clickout idx=", v1, " edit_slot=", v2, " mark=", v3, " k15=", v4, "\n"]);
+  if (v1 == 0 - 1) {
+    if (v2 == 0 - 1) {
+      if (v3 == 0) {
+        if (v4 == 0) { res = res | 1048576; }
+      }
+    }
+  }
+
+  // ============ ⑪ theme_focus 0 / 非 0：命令表逐字段相同 ＋ POOLSUM 相同 ============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 0, 0);                 // 空帧：先把清单数登记出来
+  f15_step(&c0, &in, 0, 9);     // Tab ⇒ 焦点 = B1（序号 0）
+  gui_pool_set(gui_id("C1"), 1);            // 让池的 k=0 **有东西**（否则"POOLSUM 相同"= 空表比空表，不算判据）
+  c0.theme_focus = 0;
+  f15_step(&c0, &in, 0, 0);
+  ps = gui_pool_sum();
+  c0.theme_focus = 0x00EB6325;
+  f15_step(&c0, &in, 0, 0);
+  v1 = f15_same();
+  v2 = gui_pool_sum();
+  print(["F15 themefocus same=", v1, " poolsum_a=", ps, " poolsum_b=", v2, " mark=", f15_mark_n,
+         " idx=", f15_idx(&c0), "\n"]);
+  if (v1 == 1) {
+    if (v2 == ps) {
+      if (ps != 0) { res = res | 2097152; }
+    }
+  }
+
+  // ============ ⑫ 焦点态住池 k=1/2/3，k=0 恒 0（⇒ POOLSUM 零扰动）============
+  v1 = gui_pool_at(gui_focus_key(), 0);
+  v2 = gui_pool_at(gui_focus_key(), 1);
+  v3 = gui_pool_at(gui_focus_key(), 2);
+  v4 = gui_pool_at(gui_focus_key(), 3);
+  print(["F15 poolfocus k0=", v1, " k1=", v2, " k2=", v3, " k3=", v4, " key=", gui_focus_key(), "\n"]);
+  if (v1 == 0) {
+    if (v2 == 1) {
+      if (v3 == 4) {
+        if (v4 == bid) { res = res | 4194304; }
+      }
+    }
+  }
+
+  // ============ ⑬ 停一帧圈不动；Tab 之后旧控件不再发 kind 16 ============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 0, 9);     // 焦点 = B1
+  v1 = f15_mark_n;
+  v2 = f15_mark_y;
+  f15_step(&c0, &in, 0, 0);                 // 停一帧：圈仍在 B1
+  v3 = f15_mark_n;
+  v4 = f15_mark_y;
+  f15_step(&c0, &in, 0, 9);     // 移到 C1
+  n = f15_mark_y;
+  print(["F15 movealone mark_a=", v1, " y_a=", v2, " mark_b=", v3, " y_b=", v4, " y_c=", n,
+         " mark_c=", f15_mark_n, "\n"]);
+  if (v1 == 1) {
+    if (v4 == 30) {
+      if (f15_mark_n == 1) {
+        if (n == 80) { res = res | 8388608; }
+      }
+    }
+  }
+
+  // ============ ⑭ 单选钮也在焦点链里（绘制顺序：RA → RB → B1）============
+  f15_setup(&c0, &in);
+  f15_step(&c0, &in, 4, 0);
+  v1 = f15_cnt(&c0);
+  f15_step(&c0, &in, 4, 9);
+  v2 = gui_focus_get(&c0);
+  rid = gui_id("RA");
+  print(["F15 radio cnt=", v1, " first_is_ra=", v2 == rid, " rect=", f15_mark_x, ",", f15_mark_y, ",",
+         f15_mark_w, ",", f15_mark_h, "\n"]);
+  if (v1 == 3) {
+    if (v2 == rid) {
+      if (f15_mark_x == 10) { if (f15_mark_y == 10) { if (f15_mark_w == 80) { if (f15_mark_h == 16) { res = res | 16777216; } } } }
+    }
+  }
+
+  print(["M4O res=", res, " want=", 33554431, "\n"]);
+  if (res == 33554431) { return 42; }
+  return res;
+}

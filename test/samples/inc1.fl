@@ -1,0 +1,5 @@
+// inc1.fl — 后缀 return x++ 返回旧值 5
+int main() {
+  int x = 5;
+  return x++;   // 值 = 旧值 5（x 变 6）
+}

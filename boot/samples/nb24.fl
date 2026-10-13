@@ -1,0 +1,3 @@
+// nb24.fl — B2w 负例：main 重复定义必须报错（对齐真 flint「main 函数重复定义」）
+int main() { return 1; }
+int main() { return 2; }

@@ -1,0 +1,25 @@
+// b2n1.fl — B2n：&函数名 = 函数地址值（回调地基；boot 与真 flint 差分对照；期望 42）
+// 覆盖：&已定义函数 / 前向引用（取后定义的函数）/ 存指针变量 / 存 struct 指针字段 / 等值·不等比较 / 非零判真
+struct W { int *fn; int id; }
+
+int cb_a() { return 1; }
+
+int main() {
+  int *p = &cb_a;              // 取已定义函数
+  int *q = &cb_late;           // 前向引用（cb_late 定义在下方）
+  struct W w;
+  w.fn = &cb_a;                // 存 struct 指针字段（WNDCLASS.lpfnWndProc 形态）
+  w.id = 7;
+
+  int r = 0;
+  if (p == &cb_a) r |= 1;
+  if (q == &cb_late) r |= 2;
+  if (w.fn == p) r |= 4;
+  if (p != q) r |= 8;
+  if (p != 0) r |= 16;
+  if (w.fn != 0) r |= 32;
+  if (r == 63) return 42;
+  return r;
+}
+
+int cb_late() { return 3; }

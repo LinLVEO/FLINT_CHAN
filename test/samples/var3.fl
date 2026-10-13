@@ -1,0 +1,11 @@
+// var3.fl — 多变量 + 表达式语句 + 中间结果：斐波那契手写两轮
+// a=1,b=1 → a=a+b=2,b=a+b=3 → a=a+b=5,b=a+b=8 → return a+b = 13
+int main() {
+  int a = 1;
+  int b = 1;
+  a = a + b;
+  b = a + b;
+  a = a + b;
+  b = a + b;
+  return a + b;
+}

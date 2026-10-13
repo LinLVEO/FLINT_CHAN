@@ -1,0 +1,2 @@
+// nb6（负例）：++ 只能作用于左值
+int main() { int x = ++5; return x; }

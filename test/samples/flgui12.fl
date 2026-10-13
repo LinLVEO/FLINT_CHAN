@@ -1,0 +1,142 @@
+// flgui12.fl — FLGUI M4j：**主题预设（蓝白）**的无头契约样本（不建窗）
+// 这一刀只干一件事：把"现代 UI · 蓝白"做成**单点预设函数** `gui_theme_light_blue(c)`（用户 ① 拍板选"预设"这条路），
+//   而不是改 `gui_theme_default` 的默认值 —— 后者会影响所有 app（demo/画廊/浮窗的覆盖都要重看）。
+// 判据钉四件事（这就是本刀的"形状"）：
+//   ① **深色默认一个字节没动**：`gui_init` 之后那 13 个 theme_* 逐个等于改前记录的常量（10 个老的 + 3 个新增的深色默认）
+//      ⇒ "不调预设的 app 行为零扰动"是被**逐字段数出来的**。
+//      （⚠️ 只加了 3 个：`GuiCtx` 标量已 **63/64** —— 焦点圈复用 `theme_box`、阴影本刀不做，见 lib\flgui.fl 的 struct 注释）
+//   ② 预设**真的把 13 个字段都设成蓝白色板**（每个字段与字面量逐个比，计数 = 13）。
+//   ③ 预设**不动布局字段**（app 自己调过的 pad/spacing/btn_h/lay_w/lay_h 原样）⇒ 换皮不换骨架。
+//   ④ **换皮不动命令流**：同一帧（同样的控件代码）在深色与蓝白下跑一遍，命令表**逐字段**
+//      （kind/x/y/w/h/toff/tlen/col）完全一致 ⇒ "只换皮、不动布局/能力"的机械证据（同 §C4 的口径）。
+// 位掩码 4 位，全亮 = 15 → return 42。
+//   bit 1  深色默认 13 个 theme_* 逐个对（计数 = 13）
+//   bit 2  蓝白预设 13 个 theme_* 逐个对（计数 = 13）
+//   bit 3  预设不动 5 个布局字段
+//   bit 4  两套主题下命令表逐字段相同（条数也相同）
+include "flgui_widgets.fl"
+
+int f12_in(struct GuiInput *in, int ms) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0; in->wheel = 0; in->key = 0; in->ms = ms;
+  return ms;
+}
+
+// 同一帧画同一套控件（两套主题各跑一次，用来比命令表）
+int f12_paint(struct GuiCtx *c) {
+  struct GuiRect r;
+  gui_label(c, "主题预设");
+  gui_button(c, "确定");
+  r.x = 12; r.y = 90; r.w = 60; r.h = 18;
+  gui_item_at(c, &r);
+  gui_text_put(c, "");
+  gui_push(c, 1);
+  gui_separator(c);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiCtx c2;
+  struct GuiCtx c3;
+  struct GuiInput in;
+  int rr = 0;
+  int n = 0;
+  int i = 0;
+  int nd = 0;
+  int same = 0;
+  int sk[256];
+  int sx[256];
+  int sy[256];
+  int sw[256];
+  int sh[256];
+  int st[256];
+  int sl[256];
+
+  // ================= 一、深色默认（= 改前的值，一个字段一个字段对）=================
+  gui_init(&c);
+  n = 0;
+  if (c.theme_bg == 0x00101010) { n = n + 1; }
+  if (c.theme_panel == 0x00202020) { n = n + 1; }
+  if (c.theme_btn == 0x00404040) { n = n + 1; }
+  if (c.theme_btn_hot == 0x00505050) { n = n + 1; }
+  if (c.theme_btn_down == 0x00303030) { n = n + 1; }
+  if (c.theme_border == 0x00808080) { n = n + 1; }
+  if (c.theme_text == 0x00E0E0E0) { n = n + 1; }
+  if (c.theme_box == 0x0060A0E0) { n = n + 1; }
+  if (c.theme_track == 0x00303030) { n = n + 1; }
+  if (c.theme_fill == 0x00E0A060) { n = n + 1; }
+  if (c.theme_text_dim == 0x00A0A0A0) { n = n + 1; }
+  if (c.theme_accent_soft == 0x00303030) { n = n + 1; }
+  if (c.theme_danger == 0x004545D6) { n = n + 1; }
+  print(["F12 dark_matched=", n, " want=13\n"]);
+  if (n == 13) { rr = rr | 1; }
+
+  // ================= 二、蓝白预设（15 个字段与色板字面量逐个比）=================
+  gui_theme_light_blue(&c);
+  n = 0;
+  if (c.theme_bg == 0x00FBF6F3) { n = n + 1; }        // #F3F6FB
+  if (c.theme_panel == 0x00FFFFFF) { n = n + 1; }     // #FFFFFF
+  if (c.theme_btn == 0x00FFFFFF) { n = n + 1; }       // #FFFFFF
+  if (c.theme_btn_hot == 0x00FEF2EA) { n = n + 1; }   // #EAF2FE
+  if (c.theme_btn_down == 0x00FBE8D8) { n = n + 1; }  // #D8E8FB
+  if (c.theme_border == 0x00E8DED6) { n = n + 1; }    // #D6DEE8
+  if (c.theme_text == 0x00241F1B) { n = n + 1; }      // #1B1F24
+  if (c.theme_box == 0x00EB6325) { n = n + 1; }       // #2563EB
+  if (c.theme_track == 0x00F1E9E3) { n = n + 1; }     // #E3E9F1
+  if (c.theme_fill == 0x00EB6325) { n = n + 1; }      // #2563EB
+  if (c.theme_text_dim == 0x0072645A) { n = n + 1; }  // #5A6472
+  if (c.theme_accent_soft == 0x00FEF2EA) { n = n + 1; } // #EAF2FE
+  if (c.theme_danger == 0x004545D6) { n = n + 1; }    // #D64545
+  print(["F12 light_matched=", n, " want=13\n"]);
+  if (n == 13) { rr = rr | 2; }
+
+  // ================= 三、预设不动布局字段（app 自己调过的原样）=================
+  gui_init(&c2);
+  c2.pad = 7; c2.spacing = 5; c2.btn_h = 21; c2.lay_w = 123; c2.lay_h = 45;
+  gui_theme_light_blue(&c2);
+  if (c2.pad == 7 && c2.spacing == 5 && c2.btn_h == 21 && c2.lay_w == 123 && c2.lay_h == 45) { rr = rr | 4; }
+
+  // ================= 四、换皮不动命令流（同代码两套主题，命令表逐字段比）=================
+  gui_init(&c3);                                    // 深色
+  f12_in(&in, 0);
+  gui_begin(&c3, &in);
+  f12_paint(&c3);
+  gui_end(&c3);
+  nd = gui_cmd_n;
+  i = 0;
+  while (i < nd) {
+    sk[i] = gui_cmd_kind[i]; sx[i] = gui_cmd_x[i]; sy[i] = gui_cmd_y[i];
+    sw[i] = gui_cmd_w[i]; sh[i] = gui_cmd_h[i];
+    st[i] = gui_cmd_toff[i]; sl[i] = gui_cmd_col[i];
+    i = i + 1;
+  }
+  gui_init(&c2);                                    // 蓝白
+  gui_theme_light_blue(&c2);
+  f12_in(&in, 0);
+  gui_begin(&c2, &in);
+  f12_paint(&c2);
+  gui_end(&c2);
+  same = 1;
+  if (gui_cmd_n != nd) { same = 0; }
+  else {
+    i = 0;
+    while (i < nd) {
+      if (gui_cmd_kind[i] != sk[i]) { same = 0; }
+      if (gui_cmd_x[i] != sx[i]) { same = 0; }
+      if (gui_cmd_y[i] != sy[i]) { same = 0; }
+      if (gui_cmd_w[i] != sw[i]) { same = 0; }
+      if (gui_cmd_h[i] != sh[i]) { same = 0; }
+      if (gui_cmd_toff[i] != st[i]) { same = 0; }
+      if (gui_cmd_col[i] != sl[i]) { same = 0; }
+      i = i + 1;
+    }
+  }
+  print(["F12 cmd_dark=", nd, " cmd_light=", gui_cmd_n, " same=", same, "\n"]);
+  if (same == 1 && nd > 0) { rr = rr | 8; }
+
+  print(["FLGUI12 theme=light_blue shadow=none r=", rr, "\n"]);
+  gui_dump(&c2);
+
+  if (rr == 15) { return 42; }
+  return rr;
+}

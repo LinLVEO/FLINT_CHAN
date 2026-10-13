@@ -1,0 +1,316 @@
+// config.fl — 浮窗还原第 6 步（6a）：config.json 读写（对 C# 版逐字段）
+// 权威：`浮窗规格-对C#逐细节.md` §6 config.json 全字段
+// 口径（用户 2026-09-16 02:27 拍板）：
+//   · 路径 = FLINT 产物目录 `apps\m2_float\config.json`（与 C# 各自一份、行为等价）
+//   · 起始内容从 C# 的 `E:\HardwareMonitor\发布\config.json` 复制（两边所见一致）
+//   · **绝不写 C# 那份**（C# 原件只读）
+// 读：std::file_read（io_lib）+ 本文件自带的最小 JSON 取值（只认数值 / 布尔，config 够用）
+// 写：FLINT 没有 JSON 写库 → 本文件自己拼**与 C# 同键名、同顺序**的 JSON 全文再 std::file_write
+//     （全文重建最稳；C# 侧 Newtonsoft 读得进，字段名逐一照抄）
+// ⚠️ include 无守卫：fmt_lib / num_lib / str_lib 已被 float_rows.fl 引入 →
+//     本文件**只 include io_lib.fl**，其余一律自己实现（重复 include 会撞重复定义）
+// ⚠️ FLINT 边界（本步沿用）：struct 不能当全局变量｜函数参数 ≤4｜char 数组不能整体初始化
+include "io_lib.fl"
+
+// —— 配置值（全 int；未实现对应功能的档位如 ShotFormat 在写回时用常量）——
+struct Cfg {
+  int x; int y;              // X / Y
+  int have_xy;               // 1 = 文件里 X 与 Y 都有（可以按它定位）
+  int fontsize;              // FontSize
+  int opacity;               // OpacityPercent（60 = C# 初值；映射到 surf.const_a = 255×n/100）
+  int locked;                // Locked
+  int minimode;              // MiniMode
+  int sw;                    // ShowXxx 位掩码（位号 = float_rows.fl 的 SW_*）
+  int cpu_offset;            // CpuTempOffset
+  int calibrated;            // Calibrated
+  int fps_src;               // v1.4.7（2026-09-17）：FpsMode —— 0 = presentmon（默认，桥内置通道）/ 1 = rtss（退回共享内存）
+  int have_file;             // 1 = config.json 读到了（0 = 用默认值）
+  int loaded;                // 诊断：读到的字节数
+}
+// 取值结果（ok=1 = 键存在且值可解析）——⚠️ 别在同一次调用里既写它又读它（实参求值顺序）
+struct CfgVal { int v; int ok; }
+
+// —— 字符串小工具（自己实现，见文件头：不能重复 include fmt_lib）——
+int cfg_len(char *s) {
+  int i = 0;
+  while (s[i] != 0) i = i + 1;
+  return i;
+}
+int cfg_cat(char *t, int pos, char *s) {
+  int i = 0;
+  while (s[i] != 0) { t[pos + i] = s[i]; i = i + 1; }
+  return pos + i;
+}
+int cfg_int(char *t, int pos, int v) {
+  char tmp[12];
+  int i = 0;
+  int neg = 0;
+  if (v < 0) { neg = 1; v = 0 - v; }
+  if (v == 0) { tmp[0] = '0'; i = 1; }
+  while (v != 0) { tmp[i] = 48 + (v - (v / 10) * 10); v = v / 10; i = i + 1; }
+  int j = pos;
+  if (neg == 1) { t[j] = 45; j = j + 1; }
+  while (i > 0) { i = i - 1; t[j] = tmp[i]; j = j + 1; }
+  return j;
+}
+int cfg_booltxt(char *t, int pos, int v) {
+  if (v == 1) return cfg_cat(t, pos, "true");
+  return cfg_cat(t, pos, "false");
+}
+// 位测试 = (v / 2^bit) % 2（与 float_rows.fl 的 swtest 同式；这里独立实现，免跨文件依赖）
+int cfg_pow2(int bit) {
+  int m = 1;
+  int i = 0;
+  while (i < bit) { m = m * 2; i = i + 1; }
+  return m;
+}
+int cfg_bit(int v, int bit) {
+  return (v / cfg_pow2(bit)) % 2;
+}
+int cfg_mark(struct Cfg *c, int bit, int on) {
+  if (on == 1) c->sw = c->sw + cfg_pow2(bit);
+  return 0;
+}
+
+// —— JSON 取值：key 一律写「带两侧引号的字面串」（如 "\"X\""）——
+// 带引号才不会被同尾缀的键串台（"ShowFps" 不会命中 "ShowFpsSource"）
+// 返回 = 值的第一个字符下标；-1 = 没找到键
+int cfg_value_at(char *b, int n, char *key, int from) {
+  int i = from;
+  int j = 0;
+  int kl = cfg_len(key);
+  while (i + kl <= n) {
+    j = 0;
+    while (j < kl) {
+      if (b[i + j] != key[j]) break;
+      j = j + 1;
+    }
+    if (j == kl) {
+      i = i + kl;                                  // 跳过键
+      while (i < n && (b[i] == 32 || b[i] == 9 || b[i] == 58)) i = i + 1;   // 空白与 ':'
+      return i;
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+// 取十进制整数（支持负号）；o->ok = 1 表示取到
+int cfg_num(char *b, int n, char *key, struct CfgVal *o) {
+  int i = cfg_value_at(b, n, key, 0);
+  int neg = 0;
+  int v = 0;
+  o->v = 0;
+  o->ok = 0;
+  if (i < 0 || i >= n) return 0;
+  if (b[i] == 45) { neg = 1; i = i + 1; }
+  if (i >= n) return 0;
+  if (b[i] < 48 || b[i] > 57) return 0;            // 不是数字（true/false/字符串 → ok 保持 0）
+  while (i < n && b[i] >= 48 && b[i] <= 57) { v = v * 10 + (b[i] - 48); i = i + 1; }
+  if (neg == 1) v = 0 - v;
+  o->v = v;
+  o->ok = 1;
+  return 0;
+}
+// 取布尔（true→1 / false→0）；o->ok = 1 表示取到
+int cfg_bool(char *b, int n, char *key, struct CfgVal *o) {
+  int i = cfg_value_at(b, n, key, 0);
+  o->v = 0;
+  o->ok = 0;
+  if (i < 0 || i >= n) return 0;
+  if (b[i] == 116) { o->v = 1; o->ok = 1; return 0; }   // 't'rue
+  if (b[i] == 102) { o->v = 0; o->ok = 1; return 0; }   // 'f'alse
+  return 0;
+}
+
+// 默认值 = C# config.json 的初值（Disk=false、其余 Show* 全 true → sw = 3967 = SW_DEFAULT()）
+int cfg_default(struct Cfg *c) {
+  c->x = 1373; c->y = 138; c->have_xy = 0;          // 位置默认 = C# 当前实测值
+  c->fontsize = 16;
+  c->opacity = 60;
+  c->locked = 0;
+  c->minimode = 0;
+  c->cpu_offset = 0 - 11;
+  c->calibrated = 1;
+  c->fps_src = 0;                                    // FpsMode 默认 "presentmon"（＝C# 参考版的初值档位）
+  c->have_file = 0;
+  c->loaded = 0;
+  c->sw = 0;
+  cfg_mark(c, 0, 1);                                 // ShowFps
+  cfg_mark(c, 1, 1);                                 // ShowCpuTemp
+  cfg_mark(c, 2, 1);                                 // ShowCpuLoad
+  cfg_mark(c, 3, 1);                                 // ShowGpuTemp
+  cfg_mark(c, 4, 1);                                 // ShowGpuLoad
+  cfg_mark(c, 5, 1);                                 // ShowGpuMem
+  cfg_mark(c, 6, 1);                                 // ShowRam
+  cfg_mark(c, 7, 0);                                 // ShowDisk = false（C# 初值）
+  cfg_mark(c, 8, 1);                                 // ShowNet
+  cfg_mark(c, 9, 1);                                 // ShowFan
+  cfg_mark(c, 10, 1);                                // ShowPower
+  cfg_mark(c, 11, 1);                                // ShowPowerDetail
+  cfg_mark(c, 12, 1);                                // ShowFpsSource
+  return 0;
+}
+
+// 读 config.json → struct Cfg。返回 0 = 读到了文件，1 = 文件缺失/不可读（保留默认值）
+// buf / cap 由调用方给（struct 不能全局；本文件只有几百字节）
+int cfg_load(char *path, char *buf, int cap, struct Cfg *c) {
+  struct CfgVal t;
+  int n = std::file_read(path, buf, cap - 1);
+  int hx = 0;
+  int hy = 0;
+  if (n < 0) { c->have_file = 0; return 1; }
+  buf[n] = 0;
+  c->have_file = 1;
+  c->loaded = n;
+  cfg_num(buf, n, "\"X\"", &t);
+  if (t.ok == 1) { c->x = t.v; hx = 1; }
+  cfg_num(buf, n, "\"Y\"", &t);
+  if (t.ok == 1) { c->y = t.v; hy = 1; }
+  c->have_xy = 0;
+  if (hx == 1 && hy == 1) c->have_xy = 1;
+  cfg_num(buf, n, "\"FontSize\"", &t);
+  if (t.ok == 1) c->fontsize = t.v;
+  cfg_num(buf, n, "\"OpacityPercent\"", &t);
+  if (t.ok == 1) c->opacity = t.v;
+  cfg_bool(buf, n, "\"Locked\"", &t);
+  if (t.ok == 1) c->locked = t.v;
+  cfg_bool(buf, n, "\"MiniMode\"", &t);
+  if (t.ok == 1) c->minimode = t.v;
+  cfg_num(buf, n, "\"CpuTempOffset\"", &t);
+  if (t.ok == 1) c->cpu_offset = t.v;
+  cfg_bool(buf, n, "\"Calibrated\"", &t);
+  if (t.ok == 1) c->calibrated = t.v;
+  // v1.4.7（2026-09-17）：FpsMode 是**字符串**键（C# 侧就是 string）→ 用"取到值起点后逐字节找 rtss"
+  //   的办法判断（0 = presentmon / 1 = rtss）。取不到或认不出 → 保持默认 presentmon。
+  //   为什么不用 cfg_num：那里按数值解析，"presentmon" 会解析失败（ok=0）。
+  c->fps_src = 0;
+  int fm = cfg_value_at(buf, n, "\"FpsMode\"", 0);
+  if (fm >= 0) {
+    int fs_i = 0;
+    int is_rtss = 0;
+    while (fs_i < 12 && fm + fs_i + 3 < n) {
+      if (buf[fm + fs_i] == 114 && buf[fm + fs_i + 1] == 116 && buf[fm + fs_i + 2] == 115
+          && buf[fm + fs_i + 3] == 115) { is_rtss = 1; break; }        // 'r''t''s''s'
+      fs_i = fs_i + 1;
+    }
+    if (is_rtss == 1) c->fps_src = 1;
+  }
+  // ShowXxx → sw 位掩码（键名与 float_rows.fl 的 SW_* 位号对应）
+  // ⚠️ 只有在**文件里真的给了 Show* 键**时才重建掩码：否则空文件/被截断的 config 会让 sw 变成 0
+  //   → 所有显示项全关、浮窗只剩兜底行、菜单全不勾选。**实测踩过**（探针把 config 写成空文件后启动）。
+  int sw_saved = c->sw;
+  int nsw = 0;
+  c->sw = 0;
+  cfg_bool(buf, n, "\"ShowFps\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 0, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowCpuTemp\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 1, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowCpuLoad\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 2, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowGpuTemp\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 3, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowGpuLoad\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 4, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowGpuMem\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 5, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowRam\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 6, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowFan\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 9, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowDisk\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 7, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowNet\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 8, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowPower\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 10, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowPowerDetail\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 11, t.v); nsw = nsw + 1; }
+  cfg_bool(buf, n, "\"ShowFpsSource\"", &t);
+  if (t.ok == 1) { cfg_mark(c, 12, t.v); nsw = nsw + 1; }
+  if (nsw == 0) c->sw = sw_saved;              // 一个 Show* 键都没读到 → 原样保留默认掩码
+  return 0;
+}
+
+// 写 config.json（全文重建；键名 / 顺序与 C# 侧文件逐个对齐）。返回 std::file_write 的结果（1 = 成功）
+int cfg_save(char *path, struct Cfg *c) {
+  char t[1024];
+  int p = 0;
+  p = cfg_cat(t, p, "{\n  \"X\": ");
+  p = cfg_int(t, p, c->x);
+  p = cfg_cat(t, p, ",\n  \"Y\": ");
+  p = cfg_int(t, p, c->y);
+  p = cfg_cat(t, p, ",\n  \"FontSize\": ");
+  p = cfg_int(t, p, c->fontsize);
+  p = cfg_cat(t, p, ",\n  \"OpacityPercent\": ");
+  p = cfg_int(t, p, c->opacity);
+  p = cfg_cat(t, p, ",\n  \"Locked\": ");
+  p = cfg_booltxt(t, p, c->locked);
+  p = cfg_cat(t, p, ",\n  \"ShowCpuTemp\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 1));
+  p = cfg_cat(t, p, ",\n  \"ShowCpuLoad\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 2));
+  p = cfg_cat(t, p, ",\n  \"ShowGpuTemp\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 3));
+  p = cfg_cat(t, p, ",\n  \"ShowGpuLoad\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 4));
+  p = cfg_cat(t, p, ",\n  \"ShowGpuMem\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 5));
+  p = cfg_cat(t, p, ",\n  \"ShowRam\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 6));
+  p = cfg_cat(t, p, ",\n  \"ShowFan\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 9));
+  p = cfg_cat(t, p, ",\n  \"ShowFps\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 0));
+  p = cfg_cat(t, p, ",\n  \"ShowPower\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 10));
+  p = cfg_cat(t, p, ",\n  \"ShowPowerDetail\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 11));
+  p = cfg_cat(t, p, ",\n  \"ShowDisk\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 7));
+  p = cfg_cat(t, p, ",\n  \"ShowNet\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 8));
+  p = cfg_cat(t, p, ",\n  \"MiniMode\": ");
+  p = cfg_booltxt(t, p, c->minimode);
+  // —— 以下档位本轮不做对应窗口 / 功能（范围：只做主浮窗），值按 C# 初值原样写回 ——
+  p = cfg_cat(t, p, ",\n  \"ShowTrend\": true");
+  p = cfg_cat(t, p, ",\n  \"ShowExtremes\": true");
+  p = cfg_cat(t, p, ",\n  \"AutoStartDelaySeconds\": 10");
+  p = cfg_cat(t, p, ",\n  \"HistoryLog\": false");
+  p = cfg_cat(t, p, ",\n  \"TrendFontSize\": 14");
+  p = cfg_cat(t, p, ",\n  \"ExtremesFontSize\": 14");
+  p = cfg_cat(t, p, ",\n  \"TrendOpacity\": 100");
+  p = cfg_cat(t, p, ",\n  \"ExtremesOpacity\": 100");
+  // v1.4.7（2026-09-17）：FpsMode 按 c->fps_src 写回（默认 presentmon；=1 写 rtss）
+  if (c->fps_src == 1) p = cfg_cat(t, p, ",\n  \"FpsMode\": \"rtss\"");
+  else p = cfg_cat(t, p, ",\n  \"FpsMode\": \"presentmon\"");
+  p = cfg_cat(t, p, ",\n  \"ShowFpsSource\": ");
+  p = cfg_booltxt(t, p, cfg_bit(c->sw, 12));
+  p = cfg_cat(t, p, ",\n  \"PowerBaseWatts\": 45");
+  p = cfg_cat(t, p, ",\n  \"CpuTempOffset\": ");
+  p = cfg_int(t, p, c->cpu_offset);
+  p = cfg_cat(t, p, ",\n  \"Calibrated\": ");
+  p = cfg_booltxt(t, p, c->calibrated);
+  p = cfg_cat(t, p, ",\n  \"AutoStart\": false");
+  p = cfg_cat(t, p, ",\n  \"ShotHotkey\": \"F12\"");
+  p = cfg_cat(t, p, ",\n  \"ShotFormat\": \"png\"");
+  p = cfg_cat(t, p, ",\n  \"ShotHideSelf\": true");
+  p = cfg_cat(t, p, ",\n  \"ShotJpegQuality\": 90");
+  p = cfg_cat(t, p, ",\n  \"ShotDir\": \"\"");
+  p = cfg_cat(t, p, "\n}\n");
+  t[p] = 0;
+  return std::file_write(path, t, p);
+}
+
+// 翻转 sw 的某一位（菜单里勾选/取消显示项用）；返回翻转后的位值（1 = 现在开着）
+int cfg_flip(struct Cfg *c, int bit) {
+  int p = cfg_pow2(bit);
+  int v = cfg_bit(c->sw, bit);
+  if (v == 1) c->sw = c->sw - p;
+  else c->sw = c->sw + p;
+  return 1 - v;
+}
+
+// 存到默认路径（本产物目录）。路径只此一处：改路径只改这里（与 main 里的读路径一致）
+int cfg_save_default(struct Cfg *c) {
+  return cfg_save("E:\\FLINT-lab\\apps\\m2_float\\config.json", c);
+}

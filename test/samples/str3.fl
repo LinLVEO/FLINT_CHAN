@@ -1,0 +1,6 @@
+// str3.fl — 转义字符串长度：a="A\nB"（3字节+\0=4B）b="\t"（1字节+\0=2B）→ b-a = 4
+int main() {
+  int a = "A\nB";
+  int b = "\t";
+  return b - a;
+}

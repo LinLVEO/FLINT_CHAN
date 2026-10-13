@@ -1,0 +1,2 @@
+// incdup_lib.fl — B2v include 去重样本：被不同写法 include 两次
+int incdup_val() { return 42; }

@@ -1,0 +1,8 @@
+// b1c1.fl — v1.4.28（B1-3）正例：导入模块名（写出名）**恰好 63 字节**（上限内侧）必须编过且能跑
+//   写法 = "C:/Windows/System32//"（21 字节）+ 17 组 "./"（34 字节）+ "kernel32"（8 字节）= **63 字节**；
+//   名字里含 '/' ⇒ 出端**不补** ".dll"（判据单点 = src\pe.c 的 pe_import_module_name_len）。
+//   与 test\边界探针.ps1 的 api_modname_63_ok 同源；进 $pos（boot 产物退出码 42）+ $diff（真 flint 同为 42）
+//   ⇒ 这是"boot 不许比真 flint 窄"的**反方向**守门（外侧 1 字节由 nb38.fl 钉住）。
+//   ⚠️ 本样本假设 Windows 装在 C:（与 test\边界探针.ps1 的 api_str_abs_path 同族假设）。
+api "C:/Windows/System32//./././././././././././././././././kernel32" int GetTickCount();
+int main() { if (GetTickCount() > 0) { return 42; } return 7; }

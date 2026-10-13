@@ -1,0 +1,179 @@
+// lib_token.fl — FLINT 自举共享库：tokenizer（B1a 产物抽库，供 parser/测试 include）
+// 任务卡 T-20260908-020937（B1a）/ 211512（B2g：字符/字符串字面量）/ 215048（B2i：0x 十六进制）
+// 语义：切分 FLINT 源码子集 → 平行数组 token 流
+//   kind: 0 EOF ｜ 1 标识符/关键字 ｜ 2 数字/字符字面量 ｜ 3 符号（单字符）｜ 4 字符串字面量
+//   pos/lens：源码缓冲偏移/长度（字符串 = 引号内原文，转义未解码）；vals：数字值 / 字符字节值
+// B2g：字符字面量 'x' / '\n' '\t' '\r' '\0' '\\' '\'' 走数字 token；字符串 "..." 走 kind 4
+// FLINT 约束应对：函数 ≤4 参；输出平行数组由调用方分配；字段读不能直接下标 → 局部化
+
+struct TokOut {
+  int *kinds;
+  int *pos;
+  int *lens;
+  int *vals;
+  int cap;
+  int count;
+}
+
+int is_ws(int c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+int is_digit(int c) {
+  return c >= '0' && c <= '9';
+}
+int is_ident1(int c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+int is_ident2(int c) {
+  return is_ident1(c) || is_digit(c);
+}
+// B2i：十六进制字面量支持（0x / 0X）——按 32 位位型累加，0x80000000 自然成为负数（同真 flint）
+int is_hex(int c) {
+  return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+int hex_val(int c) {
+  if (c >= '0' && c <= '9') { return c - '0'; }
+  if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+  return c - 'A' + 10;
+}
+// 转义字符 → 字节值（B2g：\n \t \r \0 \\ \' \" 及其余原样）
+int esc_val(int e) {
+  if (e == 'n') return 10;
+  if (e == 't') return 9;
+  if (e == 'r') return 13;
+  if (e == '0') return 0;
+  return e;
+}
+
+// tokenize(src, n, out)：扫描 src[0..n)，切 token 进 out（超 cap 截断；结尾补 EOF token）
+int tokenize(char *src, int n, struct TokOut *o) {
+  int *ks = o->kinds;
+  int *ps = o->pos;
+  int *ls = o->lens;
+  int *vs = o->vals;
+  int cap = o->cap;
+  int cnt = 0;
+  int i = 0;
+  // B2k：跳过 UTF-8 BOM（EF BB BF）——真 flint 跳、boot 原不跳，两边行为不一致最易误判成语法错
+  //   （PowerShell 5.1 `Set-Content -Encoding utf8` 写出的 .fl 就带 BOM；char 读是无符号字节）
+  if (n >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF) { i = 3; }
+  while (i < n && src[i] != 0) {   // FLINT 无 break/continue → if-else 链自然循环
+    int c = src[i];
+    if (is_ws(c)) {
+      i = i + 1;
+    } else if (is_digit(c)) {
+      int start = i;
+      int v = 0;
+      if (c == '0' && i + 1 < n && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
+        i = i + 2;                                   // B2i：0x 十六进制
+        while (i < n && is_hex(src[i])) {
+          v = v * 16 + hex_val(src[i]);
+          i = i + 1;
+        }
+      } else {
+        while (i < n && is_digit(src[i])) {
+          v = v * 10 + (src[i] - '0');
+          i = i + 1;
+        }
+      }
+      if (cnt < cap) {
+        ks[cnt] = 2;
+        ps[cnt] = start;
+        ls[cnt] = i - start;
+        vs[cnt] = v;
+        cnt = cnt + 1;
+      }
+    } else if (c == 39) {                     // B2g：字符字面量 'x' / '\n'
+      i = i + 1;
+      int cv = 0;
+      if (i < n && src[i] == '\\') {
+        i = i + 1;
+        if (i < n) { cv = esc_val(src[i]); i = i + 1; }
+      } else if (i < n) {
+        cv = src[i];
+        i = i + 1;
+      }
+      if (i < n && src[i] == 39) { i = i + 1; }
+      if (cnt < cap) {
+        ks[cnt] = 2;
+        ps[cnt] = i;
+        ls[cnt] = 1;
+        vs[cnt] = cv;
+        cnt = cnt + 1;
+      }
+    } else if (c == 34) {                     // B2g：字符串字面量 "..."（记录引号内原文）
+      i = i + 1;
+      int sstart = i;
+      while (i < n && src[i] != 34 && src[i] != 0) {
+        if (src[i] == '\\' && i + 1 < n) { i = i + 1; }
+        i = i + 1;
+      }
+      if (cnt < cap) {
+        ks[cnt] = 4;
+        ps[cnt] = sstart;
+        ls[cnt] = i - sstart;
+        vs[cnt] = 0;
+        cnt = cnt + 1;
+      }
+      if (i < n && src[i] == 34) { i = i + 1; }
+    } else if (c == 47) {                     // B2g：注释 // 行 与 /* 块 */
+      if (i + 1 < n && src[i + 1] == 47) {
+        while (i < n && src[i] != 10) { i = i + 1; }
+      } else if (i + 1 < n && src[i + 1] == 42) {
+        i = i + 2;
+        int cdone = 0;
+        while (i < n && cdone == 0) {
+          if (src[i] == 42 && i + 1 < n && src[i + 1] == 47) { i = i + 2; cdone = 1; }
+          else { i = i + 1; }
+        }
+      } else {
+        int sstart2 = i;
+        i = i + 1;
+        if (cnt < cap) {
+          ks[cnt] = 3;
+          ps[cnt] = sstart2;
+          ls[cnt] = 1;
+          vs[cnt] = c;
+          cnt = cnt + 1;
+        }
+      }
+    } else if (is_ident1(c)) {
+      int start = i;
+      while (i < n && is_ident2(src[i])) i = i + 1;
+      // B2r 命名空间（轻量）：名字可含 '::' 限定段（str::len）——整段切一个标识符
+      //   （函数表/查找按名字比对，parser/codegen 零改动；'::' 后必须紧跟标识符首字符）
+      while (i + 2 < n && src[i] == ':' && src[i + 1] == ':' && is_ident1(src[i + 2])) {
+        i = i + 2;
+        while (i < n && is_ident2(src[i])) i = i + 1;
+      }
+      if (cnt < cap) {
+        ks[cnt] = 1;
+        ps[cnt] = start;
+        ls[cnt] = i - start;
+        vs[cnt] = 0;
+        cnt = cnt + 1;
+      }
+    } else {
+      // 单字符符号
+      int start = i;
+      i = i + 1;
+      if (cnt < cap) {
+        ks[cnt] = 3;
+        ps[cnt] = start;
+        ls[cnt] = 1;
+        vs[cnt] = c;
+        cnt = cnt + 1;
+      }
+    }
+  }
+  // EOF token
+  if (cnt < cap) {
+    ks[cnt] = 0;
+    ps[cnt] = i;
+    ls[cnt] = 0;
+    vs[cnt] = 0;
+    cnt = cnt + 1;
+  }
+  o->count = cnt;
+  return cnt;
+}

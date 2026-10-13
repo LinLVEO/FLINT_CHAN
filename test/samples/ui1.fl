@@ -1,0 +1,63 @@
+// ui1.fl — v0.8.2 自绘窗口最小实证
+// 链路：WNDCLASS 注册（自写 WNDPROC = &wndproc）+ CreateWindowExA + PeekMessage 主循环
+//       + GetDC/TextOutA/ReleaseDC 每帧自绘——不依赖系统 STATIC 类，绘制全 FLINT 代码
+// 状态全在 main 局部（无全局变量）：消息主循环自己消费，回调只做 DefWindowProc 转发
+// 自动退出：~80 帧（约 1.3s）自动 PostQuitMessage(7)；手动点 X 走 DefWindowProc 链路 → 退出码 0
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 void PostQuitMessage(int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api gdi32 int TextOutA(int, int, int, int, int);   // GDI 函数在 gdi32.dll
+api kernel32 void Sleep(int);
+api kernel32 int GetLastError();
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }  // WM_PAINT：吞掉并清更新区（自绘在主循环 GetDC）
+  return DefWindowProcA(hwnd, msg, wp, lp);              // WM_CLOSE→DestroyWindow→WM_DESTROY→PostQuitMessage(0)
+}
+
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;                 // 自写窗口过程（v0.9.3 &函数名）
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTUI";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0, "FLINTUI", "FLINT v0.8.2 self-draw", 0x00CF0000, 100, 80, 360, 200, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  ShowWindow(h, 1);
+  struct MSG m;
+  int running = 1;
+  int frame = 0;
+  int exitcode = 0;
+  while (running) {
+    // ⚠️ 坑：PeekMessage 取到 WM_QUIT 时返回 0 且（实测）不保证填充 MSG——
+    // 退出不能依赖"取到 WM_QUIT"，改由 running 标志直接掌控（WM_CLOSE 是普通消息能正常取到）
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) { running = 0; exitcode = 0; }  // WM_CLOSE：点 X → 直接退
+      if (running) DispatchMessageA(&m);   // WM_PAINT 等交 wndproc（ValidateRect 吞掉防洪泛）
+    }
+    if (running) {
+      int *dc = GetDC(h);
+      TextOutA(dc, 20, 20, "FLINT v0.8.2", 12);
+      TextOutA(dc, 20, 44, "self-drawn window", 17);
+      ReleaseDC(h, dc);
+      frame++;
+      if (frame > 80) { exitcode = 7; running = 0; }  // 自动退出（~1.3s，自动化可跑）
+      Sleep(16);
+    }
+  }
+  return exitcode;
+}

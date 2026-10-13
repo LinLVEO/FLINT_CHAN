@@ -1,0 +1,1005 @@
+// flgui.fl — FLGUI 内核（M1 最小闭环）：ID 系统 / hot-active 状态机 / 布局游标 / 每 ID 状态池 /
+//   draw list / 裁剪栈。**不含任何窗口与 GDI 调用**（平台层在 flgui_win32.fl，控件层在 flgui_widgets.fl）。
+//
+// 形态铁律（2026-09-22 实测，依据 FLGUI-计划.md §2.4，写错就会踩雷）：
+//   ① **大容量载体一律全局数组**（命令表 / 状态池 / 文本 arena / 裁剪栈）——
+//      boot 侧对"struct 里的定长数组字段"按 8B/元素寻址却按 4B/元素给栈帧 ⇒ 越写越出帧、间歇 0xC0000005。
+//   ② **struct GuiCtx 只放标量字段**（本文件现 **67** 个，语言上限 128 —— 2026-09-27 由 64 抬上来；M4m 加 2 个 ⇒ 65→67）；绝不出现 struct 数组字段、嵌套 struct、
+//      以及局部 `struct X *p;` 声明（真 flint 编不过；需要别名就用形参或 `int *` 载体）。
+//   ③ 函数参数 ≤4 个 ⇒ 多值一律 struct 打包（GuiRect / GuiInput）或"先设 ctx 暂存、再 push"两步走。
+//
+// 帧协议： gui_init(ctx) 一次 → 每帧 [ gui_begin(ctx, in) → 控件… → gui_end(ctx) ] → 平台层读命令表绘制
+// 持久态在池里（跨帧），每帧态在 ctx 里（每帧重置）。
+
+// ===== 容量常量（单点定义；越界一律计数上报，绝不静默越写）=====
+// 命令表 256 条 ｜ 状态池 512 槽 ｜ 文本 arena 4096 字节 ｜ 裁剪栈 8 层
+int gui_cmd_kind[256];
+int gui_cmd_x[256];
+int gui_cmd_y[256];
+int gui_cmd_w[256];
+int gui_cmd_h[256];
+int gui_cmd_toff[256];
+int gui_cmd_tlen[256];
+int gui_cmd_col[256];      // M3：本条命令的**显式颜色**（0 = 用主题色；见 gui_text_put_col）
+int gui_cmd_a[256];        // M4h：本条命令的**生效不透明度**（0..255；255 = 不透明）—— 压栈那一刻由 gui_push 解析
+int gui_cmd_n;
+int gui_cmd_over;          // >0 = 有命令被丢（dump 里看得见）
+
+char gui_text[4096];
+int gui_text_n;
+int gui_text_over;         // >0 = 有字节被丢
+
+// M4f 地基：每 ID 状态池改为 **512 组 × 4 字段**（下标 = (id % 512) * 4 + k）
+//   字段 0 = 既有状态（勾选态 / 滚动偏移 / 弹层开关 …）⇒ **老入口 `gui_pool_get/set(id)` 恒等价 k = 0**，行为与从前一字不差
+//   字段 1..3 = 预留（动画：起始戳 / 起点值 / 标志）—— 语义在动第一行动画代码前定死（见 开工简报-FLGUI动画第一刀.md）
+int gui_pool[2048];
+
+int gui_clip_x0[8];
+int gui_clip_y0[8];
+int gui_clip_x1[8];
+int gui_clip_y1[8];
+
+// M4h：**不透明度栈**（8 层，与裁剪栈同容量同纪律）—— 存的是"压进去的值"（0..255，255 = 不透明）
+int gui_alpha_v[8];
+
+// M2：滚动视图 / 弹层的"布局保存"栈（最多 4 层嵌套；**持久量只有偏移**，按 ID 存在池里）
+int gui_sc_n;
+int gui_sc_x[4];
+int gui_sc_y[4];
+int gui_sc_w[4];
+int gui_sc_h[4];
+int gui_sc_top[4];
+int gui_sc_lx[4];
+int gui_sc_ly[4];
+int gui_sc_ry[4];
+int gui_sc_rh[4];
+int gui_sc_cx[4];
+int gui_sc_id[4];
+int gui_pop_lw;
+int gui_pop_x;
+int gui_pop_y;
+int gui_pop_w;
+int gui_pop_h;
+int gui_pop_lx;
+int gui_pop_ly;
+int gui_pop_ry;
+int gui_pop_rh;
+int gui_pop_cx;
+
+// 命令 kind：1 面板填充 ｜ 2 按钮常态 ｜ 3 按钮悬停 ｜ 4 按钮按下 ｜ 5 文本 ｜ 6 裁剪压栈 ｜ 7 裁剪出栈 ｜ 8 描边 ｜ 9 勾选框
+//            ｜ 10 分隔线 ｜ 11 滑块轨道 ｜ 12 填充条（滑块进度 / 进度条）｜ 13 进度条底 ｜ 14 文本域盒
+//            ｜ 15 文本光标条（M4b）
+//            ｜ **20 不透明度压栈（M4h）｜ 21 不透明度出栈（M4h）** —— 状态命令（与裁剪 6/7 同形）：
+//               平台层"照做"即可；渲染端本刀对它们**无状态**（alpha 由每条命令自带的 gui_cmd_a 决定），
+//               它们的作用是**在命令流里标出层的边界**（将来做"层/组"时靠它找边界，见 lib\FLGUI.md §1.4）
+//            ｜ 15 光标条（M4b 可编辑文本域用：1px 竖条，颜色 = 主题文字色）
+//            ｜ **22 字体档压栈（M4q）｜ 23 字体档出栈（M4q）** —— 第二对状态命令（与 20/21 同形）：
+//               载荷写在 `gui_cmd_w` 上 = **该命令之后生效的档号**（0 标题 / 1 正文 / 2 说明）。
+//               为什么载荷是绝对值：渲染端**不需要维护档栈**，逐条命令读到的就是当时的档。
+//               **不切档 ⇒ 一条都不发**（老 app、老样本的命令流逐字节不变）。
+
+// M4d（动画地基①）：`ms` = 本帧时间戳（毫秒）—— **时间也是"外部世界的事实"**，跟鼠标位置一样由平台层/样本注入。
+//   为什么内核层**不许自己调** `GetTickCount`：dump 基线是**逐字节**判据，内核一旦自己取时，每次跑经过的时间都不同
+//   ⇒ 动画中间值不同 ⇒ 基线全红、确定性当场失效。平台层填真时间，无头样本喂固定序列（0/16/32/48…）
+//   ⇒ **dump 照样逐字节确定、基线照样钉得住**。（同族纪律：`延迟要用被测进程自己的时钟`）
+// M4n（2026-09-28，UI 美术第 2 批）：**形状通道**（`gui_cmd_col` 在填充类命令上的第二种含义）
+//   为什么必须有它：拍板"单选钮的外圈走现成 `kind 8`、选中内实心点走现成 `kind 9`（零新 kind）"——
+//   而**勾选框未选**也发 `kind 8`（`box_w × box_w`）、**勾选框选中**也发 `kind 9`（`box_w × box_w`）
+//   ⇒ 两条命令**逐字段完全相同**，渲染端无从判断"画方还是画圆"。`gui_cmd_col` 在 `kind 8/9` 上
+//   本来就没人读（只有文本命令 `kind 5` 读它当显式文字色）⇒ 拿它当**形状通道**：
+//     `0`（缺省）= 老画法（矩形 / 圆角盒，与 M4k 及以前逐像素同形）｜ `GUI_SHAPE_CIRCLE` = 圆形。
+//   ⚠️ 这只影响**新 API 自己发出来的命令**（老 app 一条都不带）⇒ 13 条 dump 基线一个字节没动。
+//   ⚠️ 形状通道**不随 `theme_radius` 开关**：`gui_radio` 是新控件，没有"经典档老行为"要保（它是圆就是圆）；
+//      `theme_radius = 0` 那条"零变化"口径管的是**既有** kind 的观感。
+// ⚠️⚠️ 为什么形状标记走**函数**而不是"全局 int 常量"（本刀实测踩到的**编译器坑**，务必别改回去）：
+//   加全局变量会**挪动后面所有全局变量的"全局表下标"**，而 v1.3.0 的 T1 分析里 `is_addr_value()` 对全局
+//   `int` 变量查的是 `slot_marked(n->offset)` —— `offset` 对**全局**是"全局表下标"、对**局部**是"帧槽偏移"，
+//   两者同处一张正整数表 ⇒ **下标与某个"装地址的局部槽"撞号就会被误判成地址值**，报
+//   「地址值（64 位）不能装进全局 int」并把编译打断。本刀实测：在 `flgui.fl` 里加 19 个全局后，
+//   `flgui_win32.fl` 的 `gui_key_tr_n` 当场报错（它只是 `= gui_key_tr_n + 1`）。
+//   ⇒ 本刀在 `flgui.fl` **一个全局槽都不加**：形状标记 = 函数，单选钮组态 = 状态池（见 flgui_widgets.fl）。
+int gui_shape_circle() { return 0x43495243; }   // "CIRC"：kind 8 = 1px 圆环 / kind 9 = 实心圆盘
+
+struct GuiInput { int mx; int my; int down; int pressed; int released; int wheel; int key; int ms; }
+struct GuiRect { int x; int y; int w; int h; }
+
+struct GuiCtx {
+  int frame;
+  int mx; int my; int down; int pressed; int released; int wheel;
+  int key;                              // M4b：本帧的键盘读入（0 = 没有；8/13/27 = 退格/回车/Esc；其它 = 字符码）
+  int ms;                               // M4d：本帧时间戳（毫秒，平台层/样本注入；内核**不取时**，见上面 GuiInput 注释）
+  int wheel_step;                       // M4m：**滚轮每格走多少像素**（0 = 滚轮不动；默认 60 = 3 行/格）
+  //   > 只用在一处乘法：`gui_scroll_begin` 里 `off = off - c->wheel * c->wheel_step`（M4m 之前那一步写死 20）。
+  //   > 负值 = 反向滚（不夹取，调用方自负）；**它不进命令流**（只改偏移量的值，不改命令表形状）。
+  int drag_scale;                       // M4m：**拖动倍率（%）** —— 滑块与滚动条共用；100 = 1:1 跟手（= 老行为）
+  //   > 拖动时 `虚拟光标 = 按下点 + (真光标 − 按下点) × drag_scale / 100`（整数除法，截断朝零）；
+  //   > `100` ⇒ 虚拟光标恒等于真光标 ⇒ 与 M4l 及以前的**绝对映射逐像素相同**（硬判据，见 flgui13 样本）。
+  int hot; int active; int kbd;
+  int anim_pct;                         // M4d：动画时长缩放（0 = 立即完成（=关）／100 = 正常／200 = 慢动作）；唯一入口 gui_anim_set
+  int frame_fps;                        // M4e：目标帧率档位（0 = 不限速／30／60／90／144…）；唯一入口 gui_frame_set，周期由 gui_frame_ms 换算
+  int edit_slot;                        // M4b：正在编辑的文本槽（-1 = 没有焦点；见 flgui_edit.fl）
+  int lay_x; int lay_y; int lay_w; int lay_h;
+  int row_y; int row_h; int cur_x; int same_line;
+  int spacing; int pad;
+  int line_h; int btn_h; int box_w;
+  int cur_ix; int cur_iy; int cur_iw; int cur_ih;
+  int cur_clicked;
+  int clip_n;
+  int alpha_n;                          // M4h：不透明度栈深度（值在全局 gui_alpha_v[]；**struct 不许放数组字段**）
+  int theme_bg; int theme_panel; int theme_btn; int theme_btn_hot; int theme_btn_down;
+  int theme_border; int theme_text; int theme_box;
+  int theme_track; int theme_fill;      // M2：滑块轨道暗色 / 填充条亮色（COLORREF = 0x00BBGGRR）
+  int theme_text_dim;                   // M4j：二级文字（说明/单位这类次要信息）
+  int theme_accent_soft;                // M4j：淡强调底（悬停/选中行的淡蓝）
+  int theme_danger;                     // M4j：危险/警示（退出、删除这类项）
+  int theme_radius;                     // M4k：**现代档开关** —— 控件圆角半径(px)；**0 = 经典档**（直角、无控件描边）
+  //   > 0 = 现代档（盒类命令走圆角 ＋ 按钮/文本域盒补 1px `theme_border` 描边）。渲染端**逐像素**做（零新导入）。
+  // ⚠️ 到这里 `GuiCtx` 的标量**曾正好 64 / 上限 64**（满了）⇒ 面板再要新字段必须先抬上限（语言层改动）。
+  //   ✅ **2026-09-27 23:5x 这一刀已落地：上限 64 → 128**（真 flint `src\parse.c` ＋ boot `lib_parse.fl`
+  //   同轮同改；判据 = 边界探针 `struct_128fields`（正例，偏移 4/252/508 相加 = 42）／`fields_129`（负例）
+  //   ＋ boot 侧 `b6b2` / `nb35`）⇒ 面板要加的阴影强度 / 焦点圈 / 二级色**现在可以直接加**
+  //   （`GuiCtx` 现值 64 / 上限 128）。
+  //   历史（M4j 当时，保留口径）：本刀只加了 **3** 个主题字段、标量到 63/64（`待拍板-面板开工清单.md`
+  //   C1 里写的"43 个 / 64 有余量"是**过时的数**）⇒ 当时**焦点圈复用 `theme_box`、阴影强度没做**。
+  int theme_shadow;                     // M4l（2026-09-28）：**盒类投影强度**（0..255；**0 = 关** = 经典档默认）
+  //   > 0 时渲染端在**面板/弹层（kind 1）**命令**之前**画一圈"按距离递减 α"的黑色投影环（外扩 4px、向下偏 2px）；
+  //   环与环不重叠（M4k 圆角同一条纪律）⇒ α 不会被混合两次。**0 ⇒ 那段函数一次都不进**（老路径逐字节不变）。
+  // ⚠️ 字段现状（2026-09-28 M4n 实点）：`GuiCtx` = **69 / 上限 128**（M4m 后是 67；M4n 的
+  //   `theme_check` / `theme_focus` 加在**主题簇尾部** —— 见下面两行）。
+  int theme_check;                      // M4n（2026-09-28，UI 美术第 2 批）：**勾选框打勾的强度**（0..255；**0 = 不画 = 老行为**）
+  //   > 渲染端在勾选框的 `kind 9` 方块里逐像素画 ✓（两段 2px 线，色 = `theme_panel`）；
+  //   > `al = theme_check × 命令 alpha / 255` ⇒ 强度是一等旋钮、`0` 结构性不画。
+  //   > ⚠️ 拍板原文是"0 = 不画；>0 = 勾的**强度/粗细**" —— 本刀**定成强度（alpha）**：线宽 2px 是同一句
+  //   >   拍板里写死的（`待拍板-UI美术.md` 第 5 行），两者只能取一个 ⇒ 取强度（与 `theme_shadow` 同族）。
+  int theme_focus;                      // M4n：**焦点圈颜色**（COLORREF；**0 = 不画 = 老行为**）
+  //   > 非 0 时渲染端在"可编辑文本域那个盒（`kind 14`）的外沿"画 1px 圈 —— 触发信号是**光标条（kind 15）**：
+  //   >   本刀**没做键盘 Tab 导航**（用户拍板另立卡）⇒ 焦点只有一个来源 = 点进可编辑文本域。
+  //   > ⚠️ 它与 `theme_check` 都属"0 = 关"族；**不是**强度（是颜色）—— 蓝白预设给 `#2563EB`（= `theme_box`）。
+  int dpi;                              // M4：DPI 档（96 = 100%；theme 与缩放口径见下方 gui_theme_default / gui_dpi_scale）
+  int next_x; int next_y; int next_w; int next_h; int has_next;
+  int scratch_off; int scratch_len;
+  int scratch_col;                      // M3：下一条命令的显式颜色（0 = 主题色；push 一次后被消费掉）
+  int id_seed;
+  int err;
+  int popup_id; int popup_x; int popup_y; int popup_w;   // M2：弹层（右键菜单）状态
+}
+
+// ===== M4：主题默认值（单点定义）=====
+// 为什么单点：M1~M3 里这批颜色散在 `gui_init` 里、单个 app 再各改一两个（画廊改 theme_bg/theme_text 对齐 ui_lib、
+//   浮窗改 theme_bg/border/text 对齐 C_PANEL/C_RING/C_MAIN）⇒ **"默认长什么样"没有一处权威**。
+//   现在权威 = 本函数；`gui_init` 只调它一次，app 要定制就在自己那边覆盖**具体字段**（别抄整块）。
+// 颜色口径：**COLORREF = 0x00BBGGRR**（低字节才是 R —— 用 GetPixel/直读像素核对时别把 R/B 读反）。
+int gui_theme_default(struct GuiCtx *c) {
+  c->theme_bg       = 0x00101010;   // 窗口底
+  c->theme_panel    = 0x00202020;   // 面板/弹层底、默认填充色
+  c->theme_btn      = 0x00404040;   // 按钮常态（也当进度条底 / 文本域盒）
+  c->theme_btn_hot  = 0x00505050;   // 按钮悬停
+  c->theme_btn_down = 0x00303030;   // 按钮按下
+  c->theme_border   = 0x00808080;   // 描边 / 分隔线 / 勾选框未选
+  c->theme_text     = 0x00E0E0E0;   // 文字
+  c->theme_box      = 0x0060A0E0;   // 勾选框选中块（RGB 96,160,224 淡蓝）
+  c->theme_track    = 0x00303030;   // 滑块/滚动条轨道
+  c->theme_fill     = 0x00E0A060;   // 滑块已选段 / 进度条填充（RGB 224,160,96 琥珀）
+  // M4j 新增的 3 个字段：**深色默认值**（既有 app 一个都没读它们 ⇒ 不动老基线、不改观感）
+  c->theme_text_dim    = 0x00A0A0A0;   // 二级文字（#A0A0A0）
+  c->theme_accent_soft = 0x00303030;   // 淡强调底（深色下退化成轨道色）
+  c->theme_danger      = 0x004545D6;   // 危险色（#D64545，深浅两套通用）
+  c->theme_radius      = 0;            // M4k：**深色默认 = 经典档**（直角、无控件描边 ⇒ 既有 app 观感/基线一个字节不变）
+  c->theme_shadow      = 0;            // M4l：**深色默认 = 无投影**（同上：既有 app 观感/像素基线零变化）
+  c->theme_check       = 0;            // M4n：**深色默认 = 不画勾**（同上：老 app 逐像素零变化）
+  c->theme_focus       = 0;            // M4n：**深色默认 = 不画焦点圈**（同上）
+  return 0;
+}
+
+// ===== M4j（2026-09-27）：**蓝白主题预设**（用户拍板："现代 UI、好看点、主题蓝白"）=====
+// 为什么是"预设函数"而不是改 gui_theme_default 的默认值（用户 ① 拍板选这条）：
+//   改默认会**影响所有 app**（demo/ui_gallery/浮窗各自的覆盖都要重看）；预设函数 = **谁调谁变**，
+//   不调的 app 行为/基线**零扰动**。单点入口仍在 gui_theme_default 一处（本函数先调它、再覆盖）。
+// 色板（COLORREF = 0x00BBGGRR ⇒ 注释里给 #RRGGBB 以便核对；与 `待拍板-面板开工清单.md` C1 表逐行对应）：
+//   theme_bg #F3F6FB 浅灰蓝底 ｜ theme_panel #FFFFFF 卡片 ｜ theme_btn #FFFFFF 按钮（**浅色下必须配描边**，
+//   否则白底压白卡看不见 —— 见 FLGUI.md §5 第 5 条）｜ theme_btn_hot #EAF2FE ｜ theme_btn_down #D8E8FB
+//   ｜ theme_border #D6DEE8 ｜ theme_text #1B1F24 ｜ theme_box/theme_fill = 强调蓝 #2563EB
+//   ｜ theme_track #E3E9F1 ｜ theme_text_dim #5A6472 ｜ theme_accent_soft #EAF2FE ｜ theme_danger #D64545
+//   ｜ 焦点圈 = `theme_box`（复用，不另立字段）｜ 阴影：**M4j 当时没做**（当时字段 63/64；上限 2026-09-27 已抬到 128 ⇒ 现在可加）
+int gui_theme_light_blue(struct GuiCtx *c) {
+  gui_theme_default(c);                 // 先拿全套默认（将来新增字段也自动有值），再覆盖成蓝白
+  c->theme_bg          = 0x00FBF6F3;    // #F3F6FB
+  c->theme_panel       = 0x00FFFFFF;    // #FFFFFF
+  c->theme_btn         = 0x00FFFFFF;    // #FFFFFF
+  c->theme_btn_hot     = 0x00FEF2EA;    // #EAF2FE
+  c->theme_btn_down    = 0x00FBE8D8;    // #D8E8FB
+  c->theme_border      = 0x00E8DED6;    // #D6DEE8
+  c->theme_text        = 0x00241F1B;    // #1B1F24
+  c->theme_box         = 0x00EB6325;    // #2563EB（强调蓝；也是焦点圈）
+  c->theme_track       = 0x00F1E9E3;    // #E3E9F1
+  c->theme_fill        = 0x00EB6325;    // #2563EB（进度/滑块已选段）
+  c->theme_text_dim    = 0x0072645A;    // #5A6472
+  c->theme_accent_soft = 0x00FEF2EA;    // #EAF2FE
+  c->theme_danger      = 0x004545D6;    // #D64545
+  c->theme_radius      = 4;             // M4k：**现代档**（圆角 4px ＋ 按钮/文本域盒 1px 描边）—— 蓝白主题的门面感靠它
+  c->theme_shadow      = 48;            // M4l：**面板/弹层投影**开一半强度（0..255；峰值 α = 48 ≈ 19%）
+  // M4n（2026-09-28，UI 美术第 2 批）：两个新开关在**蓝白预设里都开**（"现代 UI"的门面）——
+  //   勾 = 满强度（色走 `theme_panel`：蓝白档 = #FFFFFF，画在 #2563EB 的块上）；
+  //   焦点圈 = `#2563EB`（**与 `theme_box` 同值**：M4j 当时的原话就是"焦点圈复用 theme_box"，
+  //   现在它有了自己的字段 ⇒ 想分开的 app 改这一个字段即可）。
+  c->theme_check       = 255;           // 勾的强度（0..255；0 = 不画）
+  c->theme_focus       = 0x00EB6325;    // #2563EB 焦点圈（0 = 不画）
+  return 0;
+}
+
+// ===== M4：DPI 缩放（**纯函数口径**，D6 拍板：不引 per-monitor v2）=====
+// 缩放一律走"96dpi = 100%"的整数运算：**先乘后除 ＋ 四舍五入**（`(v*dpi + 48)/96`），
+//   全程不出现浮点 ⇒ 双端产物逐字节可对账、不引浮点库；`dpi <= 0` 视为 96（防调用方没设就当 0 用）。
+// 本机实测 96dpi（`gui_win_dpi()`）⇒ 缩放**恒等**；判据见 `test\samples\flgui4.fl`（含 120/144 两个非等值档与负值）。
+int gui_dpi_scale(struct GuiCtx *c, int v) {
+  int d = c->dpi;
+  if (d <= 0) { d = 96; }
+  if (v < 0) { return 0 - ((0 - v) * d + 48) / 96; }
+  return (v * d + 48) / 96;
+}
+
+// ===== ID 系统：djb2 + 负数兜底（char 有符号，GBK 高位字节会取负）=====
+int gui_hash(char *s) {
+  int i = 0;
+  int h = 5381;
+  int ch = 0;
+  while (s[i] != 0) {
+    ch = s[i];
+    if (ch < 0) { ch = ch + 256; }
+    h = (h * 33 + ch) & 0x7FFFFFFF;
+    i = i + 1;
+  }
+  return h;
+}
+
+// 名字 → id（id 只由 label 决定；循环里同名的控件用 gui_id_in 混入下标）
+int gui_id(char *s) { return gui_hash(s) & 0x7FFFFFFF; }
+int gui_id_in(char *s, int idx) { return (gui_hash(s) + idx * 7919 + 1) & 0x7FFFFFFF; }
+
+// ===== 每 ID 状态池（512 组 × 4 字段；老入口 = 字段 0）=====
+int gui_pool_get(int id) { return gui_pool[(id % 512) * 4]; }
+int gui_pool_set(int id, int v) { gui_pool[(id % 512) * 4] = v; return v; }
+
+// M4f：字段读写（k = 0..3）。**老入口 `gui_pool_get/set` 恒等价 k = 0**（行为一字不差）。
+// 为什么按下标取而不给每个字段起名：字段语义是"按用途分配"的（0 状态 / 1 动画起始戳 / 2 起点值 / 3 标志），
+//   将来加字段不必再加函数名（同族：`gui_text_at` / `gui_text_put` 也是按下标）。
+// `k` 越界一律**夹取**（不报错、更不许越写）：池是"4 字段一组"的连续数组，越写会踩相邻 ID 的字段。
+int gui_pool_at(int id, int k) {
+  if (k < 0) { k = 0; }
+  if (k > 3) { k = 3; }
+  return gui_pool[(id % 512) * 4 + k];
+}
+int gui_pool_put(int id, int k, int v) {
+  if (k < 0) { k = 0; }
+  if (k > 3) { k = 3; }
+  gui_pool[(id % 512) * 4 + k] = v;
+  return v;
+}
+
+// 池的确定性摘要（dump 用：跨帧存活 / 不串位都能在这一行里看出来）
+// ⚠️ 只摘**字段 0** ⇒ 与 M4e 及以前的 dump 逐字节一致（动画字段不许动老基线；要判动画态就另发新 dump 行）
+int gui_pool_sum() {
+  int i = 0;
+  int s = 0;
+  while (i < 512) {
+    s = (s * 31 + gui_pool[i * 4]) & 0x7FFFFFFF;
+    i = i + 1;
+  }
+  return s;
+}
+
+// ===================== M4o（2026-09-28）：**键盘焦点链**（Tab / Shift+Tab 在可聚焦控件之间移动）=====================
+// 本刀要补的缺口（M4n 诚实边界②原话）：焦点圈 `theme_focus` 与渲染端画法**上一刀已经落好了**，
+//   但"焦点"只有一个来源 = 点进可编辑文本域 —— **键盘 Tab 导航没做**。本段补的就是"谁是焦点"这条链。
+//
+// ★ 三条载体纪律（本刀能落地、且不动老基线的前提；动之前先读这段）：
+//   ① **零新增全局槽**：焦点态住**状态池**（一个与 M4n 单选钮组同族的"伪 key"，见 `gui_focus_key`）
+//      ＋ `GuiCtx.` **闲置字段** `kbd`。为什么不加全局变量：编译器 T1 的既有缺陷 —— 全局槽号与
+//      局部帧槽偏移共用一张正整数表 ⇒ 加全局变量会挪动下标、撞号即误报「地址值（64 位）不能装进
+//      全局 int」把编译打断（M4n 实测加 19 个全局就炸；详见本文件上方 90~96 行那段注记）。
+//   ② **不动 `GuiCtx` 结构体**：加字段会让帧槽偏移整体位移 ⇒ `test\等价门-指纹.txt` 全批位移（很贵）。
+//      `hot/active/kbd` 里的 `kbd` **从 M1 起只被赋值、从没被读过**（本刀全仓 grep 实测：只有
+//      `gui_init` 那一行 `c->kbd = 0`）⇒ 它是现成的闲置位，本刀把它定成"**本帧**焦点登记游标"。
+//   ③ **不动 13 条老 dump 基线**：焦点序号/计数住池的 **k=1 / k=2 / k=3**（`gui_pool_sum` 只摘 k=0
+//      ⇒ POOLSUM 零扰动），且"没有焦点"时**一条命令都不发** ⇒ 老样本的命令流逐字节不变。
+//
+// ★ 口径（本刀定的契约；样本 `test\samples\flgui15.fl` 与 `lib\FLGUI.md` §2 按这个写）：
+//   · **焦点 = 一个"序号"**（本帧第几个被登记的**可聚焦控件**，0 基），**不是 id**：
+//     immediate-mode 下"下一个是谁"只有按**本帧绘制顺序**数才成立 —— 所以每个可聚焦控件每帧自己
+//     登记一次（`gui_focus_reg`），命中"焦点序号"的那个就是焦点。
+//   · **Tab 前进 / Shift+Tab 后退、末尾回绕**；**本来没有焦点**时：Tab ⇒ 第 0 个、Shift+Tab ⇒ 最后一个。
+//   · 导航在 `gui_begin` 里消费（用**上一帧**登记到的个数做回绕）⇒ 焦点圈**本帧就画在新焦点控件上**
+//     （不像"点击那一帧"那样迟一帧）。
+//   · 池里的三个字段：`k=1` = 焦点序号 + 1（**0 = 没有焦点**，因为 0 是合法序号 ⇒ 与 M4b 的
+//     `edit_slot` 同一条纪律：**别让零值承担"无"的语义**）｜`k=2` = 上一帧登记到的个数（回绕用）｜
+//     `k=3` = 焦点控件的 id（`gui_focus_get` 用，由命中的那个控件自己写）。
+//   · **可聚焦**（本刀定的清单，见各控件）：按钮 / 勾选框 / 单选钮 / 滑块 / **可编辑**文本域。
+//     **不可聚焦**：标签 / 分隔线 / 进度条 / 只读文本域 / 滚动视口本身（视口里的控件各自算）。
+//   · ⚠️ 诚实边界：序号是"**本帧**顺序"的，所以"控件数变化 / 焦点控件这一帧没被画"会让序号对不上 ——
+//     `gui_end` 里有一条"序号越界 ⇒ 收回焦点"的收尾（不许留着悬空焦点），见那里的注记。
+int gui_focus_key() { return (gui_hash("__flgui_focus") ^ 0x464F4355) & 0x7FFFFFFF; }
+//   ^ `0x464F4355` = "FOCU"：与 M4n 单选钮组的 `0x2C1B3D4F` 一样，是**把"焦点态"与"控件标签"
+//     两套 key 分开**的异或常量；不同伪 key 之间仍按既有 `id % 512` 口径接受碰撞（同族诚实边界）。
+//   ⚠️ 为什么是**函数**不是全局 int 常量：见上面纪律①（加全局变量会打断编译）。
+
+// 键盘码（**不另立函数/全局常量，就写两个字面量**，理由见下面的"函数预算"）：`9` = VK_TAB（前进）｜
+//   `0x0109` = 0x100（Shift 修饰位）| VK_TAB（后退）。**本刀要一条"方向"通道，而 `GuiInput` 只有一个
+//   `key` 槽** ⇒ 方向编码在键值里。平台层在 `WM_KEYDOWN` 里解出 Shift 后发这两个码之一（见 flgui_win32.fl）；
+//   两者都**不进 `gui_key_pending`**（Tab 不是"待打印字符"）。
+//
+// ★★ **函数预算**（本刀实测踩到的硬约束，改这段之前必须读）：
+//   boot 编译器**只有一张 512 项的函数表**，装的是 **api 声明 ＋ 函数定义**（`boot\lib_parse.fl` 的
+//   `if (p->nfuncs >= 512) return -85;`）。最重链 `apps\m2_float\main.fl` 把 ui_lib＋FLGUI 全 include 进来，
+//   实测**只剩 8 个新函数的余量**（`tmp\m4o\measure-headroom.ps1`：给老库追加 8 个空函数仍能编、9 个就
+//   `parse err=-85`）⇒ 本刀只新增 **7** 个顶层函数，其余一律**内联**（键码用字面量、计数直接读池、
+//   收尾写进 `gui_begin`/`gui_end`）。**判据 = 总门的 [11] loop（真应用双端编译）**。
+//
+// 本帧登记一个**可聚焦控件**（按绘制顺序调用）。返回 1 = 它**就是**当前焦点。
+//   ⚠️ **M4p（2026-09-28）：本帧看不见的控件【不登记】** —— 否则它会白占一个序号，Tab 就会落到
+//     **看不见的控件**上（那时 `gui_focus_mark` 因裁剪而一条标记都不发 ⇒ 屏幕上一个圈都没有、
+//     用户按 Tab 看着"没反应"；改前实测形态见 `test\samples\flgui16.fl` 与 `tmp\m4p\wheel-min2.fl`：
+//     内容滚到 off=80 后槽 0 的 y = -2 ⇒ Tab 停在它身上、`mark=0`）。
+//   ★ **判据（本刀定的口径）**：控件矩形与**最近一层裁剪**的**相交面积 ≥ 控件自身面积的一半**
+//     ⇒ 才算"本帧可见"。这比"相交一像素就算"严：只从视口边上露出 2px 的控件**不占序号**
+//     （"滚出去一半以上 = 看不见"就是这个意思；见 `lib\FLGUI.md` §2.6 的诚实边界）。
+//   · 视口外的"序号空洞"由此消失 ⇒ 回绕只在**可见集合**上算；可见集合为空 ⇒ `c->kbd = 0`
+//     ⇒ `gui_end` 那条"序号越界 ⇒ 收回焦点"兜住"**全都在视口外**"这个退化档，焦点不会悬空。
+//   · **零新增顶层函数、零新增全局槽、不动 `GuiCtx`**：裁剪栈是内核自己的（`gui_clip_x0..`），
+//     纯内联算式；本函数本就只被控件层在"定完矩形之后"调用（`gui_item_rect` 之后一行）⇒
+//     读到的就是本控件自己的矩形 ⇒ **老样本命令流/池一个字节不动**（无焦点时 `k==0` 恒不等于 `i+1`，
+//     这条早退只可能让"本来会返回 1"的场合**少返回**，而那种场合本来就没圈）。
+//   · ⚠️ **没有裁剪栈时恒可见**（`clip_n == 0` ⇒ 直接登记）—— 不打视口的界面行为与 M4o 一字不差。
+int gui_focus_reg(struct GuiCtx *c, int id) {
+  int i = 0;
+  int j = 0;
+  int x0 = 0;
+  int y0 = 0;
+  int x1 = 0;
+  int y1 = 0;
+  int ix = 0;
+  int iy = 0;
+  j = c->clip_n - 1;
+  if (j >= 0) {
+    // 相交矩形（宽/高为负 ⇒ 不相交 ⇒ 直接判不可见）
+    x0 = c->cur_ix; if (x0 < gui_clip_x0[j]) { x0 = gui_clip_x0[j]; }
+    y0 = c->cur_iy; if (y0 < gui_clip_y0[j]) { y0 = gui_clip_y0[j]; }
+    x1 = c->cur_ix + c->cur_iw; if (x1 > gui_clip_x1[j]) { x1 = gui_clip_x1[j]; }
+    y1 = c->cur_iy + c->cur_ih; if (y1 > gui_clip_y1[j]) { y1 = gui_clip_y1[j]; }
+    ix = x1 - x0;
+    iy = y1 - y0;
+    if (ix <= 0 || iy <= 0) { return 0; }
+    if (ix * iy * 2 < c->cur_iw * c->cur_ih) { return 0; }   // 露出不足一半 ⇒ 看不见 ⇒ 不占序号
+  }
+  i = c->kbd;                                      // 本帧第几个（0 基）—— 见纪律②（`kbd` 是闲置字段）
+  c->kbd = i + 1;
+  if (gui_pool_at(gui_focus_key(), 1) == i + 1) {
+    gui_pool_put(gui_focus_key(), 3, id);          // 记下"焦点控件的 id"（k=3 ≠ 0 ⇒ 不进 POOLSUM）
+    return 1;
+  }
+  return 0;
+}
+
+// 焦点控件的 id（0 = 没有；由命中的那个控件在本帧登记时写入）。
+// ⚠️ 序号（**-1 = 没有焦点**）与清单数（回绕边界）**不另立函数**：读池即可 ——
+//   序号 = `gui_pool_at(gui_focus_key(), 1) - 1`（存的是"序号 + 1"，因为 0 是合法序号 ⇒ 与 M4b 的
+//   `edit_slot` 同一条纪律：**别让零值承担"无"的语义**）；清单数 = `gui_pool_at(gui_focus_key(), 2)`。
+int gui_focus_get(struct GuiCtx *c) { return gui_pool_at(gui_focus_key(), 3); }
+
+// 焦点**前进**一格（末尾回绕）。返回"新序号 + 1"（0 = 界面上没有可聚焦控件 ⇒ 不动）。
+//   ⚠️ 本函数只挪序号、**不动编辑焦点**（`c->edit_slot` 由控件层自己跟，见 `gui_textfield_edit`）——
+//     内核层**不引用控件层的函数**（否则只 include 内核的用法会链接不上）。
+//   ⚠️ **"无焦点 + 前进"不需要清单数**（0 恒是第一个）⇒ 全新 ctx 的第一帧也能生效。
+int gui_focus_next(struct GuiCtx *c) {
+  int n = gui_pool_at(gui_focus_key(), 2);         // 上一帧登记的个数（回绕的边界）
+  int i = gui_pool_at(gui_focus_key(), 1) - 1;     // 当前序号（-1 = 无）
+  if (i < 0) {
+    i = 0;
+  } else {
+    if (n < 1) { return 0; }                       // 有焦点但上一帧一个控件都没登记（界面变了）⇒ 不动
+    i = i + 1;
+    if (i >= n) { i = 0; }                         // 末尾 ⇒ 回绕到开头
+  }
+  gui_pool_put(gui_focus_key(), 1, i + 1);
+  gui_pool_put(gui_focus_key(), 3, 0);             // id 由"命中的那个控件"这一帧重新写
+  return i + 1;
+}
+
+// 焦点**后退**一格（开头回绕）。语义与 `gui_focus_next` 对称；**分开写两份体**是有意的：
+//   合并成"带方向参数的 move"要多一个函数，而函数预算只剩 1 格（见上面的"函数预算"段）。
+int gui_focus_prev(struct GuiCtx *c) {
+  int n = gui_pool_at(gui_focus_key(), 2);
+  int i = gui_pool_at(gui_focus_key(), 1) - 1;
+  if (i < 0) {
+    if (n < 1) { return 0; }                       // 无焦点 + 后退要"最后一个" ⇒ 必须数得到清单
+    i = n - 1;
+  } else {
+    if (n < 1) { return 0; }
+    i = i - 1;
+    if (i < 0) { i = n - 1; }                      // 开头 ⇒ 回绕到末尾
+  }
+  gui_pool_put(gui_focus_key(), 1, i + 1);
+  gui_pool_put(gui_focus_key(), 3, 0);
+  return i + 1;
+}
+
+// ===== 文本 arena =====
+// —— 真实字宽（位置类计算的**唯一**尺子）——
+// 2026-09-23 M4c 收尾修：可编辑文本域的光标条原按 8px/字节**估算**定位，而字是 GDI 按真实字形宽度画的
+//   （Consolas 14px = 7px/字符）⇒ 每打一个字光标多偏 1px、逐字累加（用户："光标会往后移好几个位置"）。
+// 声明放在**内核层**（不是平台层）：样本只 include 控件层 ⇒ 放平台层会让六个样本全挂
+//   （M4b 踩过一模一样的坑：`gui_key_pending` 必须定义在控件层）。
+// 值由**平台层**在 `gui_win_font_init(px)` 里用 GDI 量一次写入（内核层没有 DC/字体，量不了）。
+// 默认 8 = 旧口径兜底：无头样本（不建字体）行为与从前**逐字节一致**。
+int gui_char_adv = 8;      // 每字符像素宽（建字体时实测；量不到保持 8）
+int gui_char_adv_ok = 0;   // 1 = 已实测（诊断/判据用；无头样本恒 0）
+
+int gui_text_w(char *s) {
+  int i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  return i * 8;            // M1 近似：8px/字节（GBK 汉字 2 字节 ≈ 16px）；字体度量接 M4
+}
+
+int gui_text_put(struct GuiCtx *c, char *s) {
+  int i = 0;
+  int off = gui_text_n;
+  while (s[i] != 0) {
+    if (gui_text_n < 4095) {
+      gui_text[gui_text_n] = s[i];
+      gui_text_n = gui_text_n + 1;
+    } else {
+      gui_text_over = gui_text_over + 1;
+    }
+    i = i + 1;
+  }
+  if (gui_text_n < 4096) { gui_text[gui_text_n] = 0; }
+  c->scratch_off = off;
+  c->scratch_len = gui_text_n - off;
+  return c->scratch_len;
+}
+
+// 取 arena 里第 off 字节起的位置（平台层画文字用：TextOutA 吃 char*）
+char *gui_text_at(int off) { return gui_text + off; }
+
+// M3：按**显式长度**入 arena。为什么必须有它：浮窗的段缓冲（rbuf / pads）**不保证有 NUL**
+//   —— 旧路 `ui_text` 吃的是 (指针, 长度)，而 `gui_text_put` 是"扫到 NUL 为止" ⇒ 会把**下一段或
+//   上一帧的陈旧字节**一起搬进 arena，画出来就是**几段字叠在一起**（2026-09-22 M3a 实测：文字层
+//   dump 全部对得上，只有渲染层像素判据抓到 —— 17.2% 像素差、差异区一眼是叠字）。
+int gui_text_put_n(struct GuiCtx *c, char *s, int len) {
+  int i = 0;
+  int off = gui_text_n;
+  while (i < len) {
+    if (gui_text_n < 4095) {
+      gui_text[gui_text_n] = s[i];
+      gui_text_n = gui_text_n + 1;
+    } else {
+      gui_text_over = gui_text_over + 1;
+    }
+    i = i + 1;
+  }
+  if (gui_text_n < 4096) { gui_text[gui_text_n] = 0; }
+  c->scratch_off = off;
+  c->scratch_len = gui_text_n - off;
+  return c->scratch_len;
+}
+
+// M3：按显式长度 + 显式颜色（0 = 主题色）。语义同 gui_text_put_col：一次 put 配一次 push。
+int gui_text_put_col_n(struct GuiCtx *c, char *s, int len, int color) {
+  c->scratch_col = color;
+  return gui_text_put_n(c, s, len);
+}
+
+// M3：文本带**显式颜色**（0 = 用主题色）。语义 = 一次 put 配一次 push（颜色被 push 消费掉）。
+//   为什么需要它：浮窗的行文本是**逐段不同颜色**（占用 90+ 红 / 70+ 橙 / 其余主色），
+//   若只吃主题色就会把分段配色抹平成一种色 —— 那是**真功能**，不是"有意配色变更"。
+int gui_text_put_col(struct GuiCtx *c, char *s, int color) {
+  c->scratch_col = color;
+  return gui_text_put(c, s);
+}
+
+// ===== 命令表：用 ctx 的"当前矩形 + 文本暂存"追加一条 =====
+int gui_push(struct GuiCtx *c, int kind) {
+  if (gui_cmd_n >= 256) {
+    gui_cmd_over = gui_cmd_over + 1;
+    return 0;
+  }
+  gui_cmd_kind[gui_cmd_n] = kind;
+  gui_cmd_x[gui_cmd_n] = c->cur_ix;
+  gui_cmd_y[gui_cmd_n] = c->cur_iy;
+  gui_cmd_w[gui_cmd_n] = c->cur_iw;
+  gui_cmd_h[gui_cmd_n] = c->cur_ih;
+  gui_cmd_toff[gui_cmd_n] = c->scratch_off;
+  gui_cmd_tlen[gui_cmd_n] = c->scratch_len;
+  gui_cmd_col[gui_cmd_n] = c->scratch_col;
+  // M4h：把"压栈那一刻的生效不透明度"**解析进本条命令**（与 gui_cmd_col 同一种"配对量"写法）⇒
+  //   渲染端读命令自带的值就够、**不需要维护状态栈** —— 读路径唯一，判据能在无头样本里逐条钉。
+  if (c->alpha_n > 0) { gui_cmd_a[gui_cmd_n] = gui_alpha_v[c->alpha_n - 1]; }
+  else { gui_cmd_a[gui_cmd_n] = 255; }
+  gui_cmd_n = gui_cmd_n + 1;
+  c->scratch_col = 0;          // 显式色是「一次 put 配一次 push」的配对量：进了命令就清，别漏给后面的命令
+  return gui_cmd_n;
+}
+
+// ===== 裁剪栈 =====
+int gui_clip_contains(struct GuiCtx *c, int x, int y) {
+  int i = c->clip_n - 1;
+  if (i < 0) { return 1; }
+  if (x < gui_clip_x0[i]) { return 0; }
+  if (y < gui_clip_y0[i]) { return 0; }
+  if (x >= gui_clip_x1[i]) { return 0; }
+  if (y >= gui_clip_y1[i]) { return 0; }
+  return 1;
+}
+
+// 当前控件矩形是否与最近一层裁剪相交（不相交就不必发绘制命令）
+int gui_clip_visible(struct GuiCtx *c) {
+  int i = c->clip_n - 1;
+  if (i < 0) { return 1; }
+  if (c->cur_ix + c->cur_iw <= gui_clip_x0[i]) { return 0; }
+  if (c->cur_iy + c->cur_ih <= gui_clip_y0[i]) { return 0; }
+  if (c->cur_ix >= gui_clip_x1[i]) { return 0; }
+  if (c->cur_iy >= gui_clip_y1[i]) { return 0; }
+  return 1;
+}
+
+// 压栈（求交后存），同时往命令流里发一条"裁剪压栈"（平台层不需要理解语义，只需照做）
+int gui_clip_push(struct GuiCtx *c, struct GuiRect *r) {
+  int i = c->clip_n;
+  int x0 = r->x;
+  int y0 = r->y;
+  int x1 = r->x + r->w;
+  int y1 = r->y + r->h;
+  if (i >= 8) { c->err = c->err | 1; return 0; }
+  if (i > 0) {
+    if (x0 < gui_clip_x0[i-1]) { x0 = gui_clip_x0[i-1]; }
+    if (y0 < gui_clip_y0[i-1]) { y0 = gui_clip_y0[i-1]; }
+    if (x1 > gui_clip_x1[i-1]) { x1 = gui_clip_x1[i-1]; }
+    if (y1 > gui_clip_y1[i-1]) { y1 = gui_clip_y1[i-1]; }
+  }
+  gui_clip_x0[i] = x0;
+  gui_clip_y0[i] = y0;
+  gui_clip_x1[i] = x1;
+  gui_clip_y1[i] = y1;
+  c->clip_n = i + 1;
+  c->cur_ix = x0; c->cur_iy = y0; c->cur_iw = x1 - x0; c->cur_ih = y1 - y0;
+  c->scratch_off = 0; c->scratch_len = 0;
+  gui_push(c, 6);
+  return c->clip_n;
+}
+
+int gui_clip_pop(struct GuiCtx *c) {
+  if (c->clip_n <= 0) { c->err = c->err | 2; return 0; }
+  c->clip_n = c->clip_n - 1;
+  c->cur_ix = 0; c->cur_iy = 0; c->cur_iw = 0; c->cur_ih = 0;
+  c->scratch_off = 0; c->scratch_len = 0;
+  gui_push(c, 7);
+  return c->clip_n;
+}
+
+// ===== M4h：不透明度栈（命令流形状第一刀）=====
+// 形状口径（**与裁剪栈刻意同形**，好记好判）：
+//   · 8 层上限，越界只计数**绝不越写**（`err |= 16`）；
+//   · 没压过不许弹（`err |= 32`）；
+//   · 每帧 `gui_begin` 归零（同 clip_n）；
+//   · 压栈/出栈各往命令流发一条 kind 20 / 21（**状态命令**，与 6/7 同形）。
+// 与裁剪栈的**唯一差别**：生效值在 `gui_push` 那一刻**解析进每条命令**（`gui_cmd_a`）⇒ 渲染端无状态。
+// ⚠️ 语义边界（本刀明确不做）：**文本不吃这条 alpha**（GDI 写的字没法逐命令混合）；
+//   要让"一整段（含文本）一起淡"得做**离屏层**（= 候选 C），那是下一刀的事。
+int gui_alpha_cur(struct GuiCtx *c) {
+  if (c->alpha_n > 0) { return gui_alpha_v[c->alpha_n - 1]; }
+  return 255;                                    // 空栈 = 不透明（老调用点的行为一字不变）
+}
+
+int gui_alpha_push(struct GuiCtx *c, int a) {
+  int i = c->alpha_n;
+  if (a < 0) { a = 0; }                          // 夹取：负数 → 0（全透明）
+  if (a > 255) { a = 255; }
+  if (i >= 8) { c->err = c->err | 16; return 0; }
+  gui_alpha_v[i] = a;
+  c->alpha_n = i + 1;
+  c->scratch_off = 0; c->scratch_len = 0;
+  gui_push(c, 20);                               // 载荷 = gui_cmd_a[那条 20] = 压进去的值
+  return a;
+}
+
+int gui_alpha_pop(struct GuiCtx *c) {
+  if (c->alpha_n <= 0) { c->err = c->err | 32; return 0; }
+  c->alpha_n = c->alpha_n - 1;
+  c->scratch_off = 0; c->scratch_len = 0;
+  gui_push(c, 21);
+  return gui_alpha_cur(c);                       // 返回"弹出之后的当前值"（空栈 = 255）
+}
+
+// ===================== M4q（2026-09-28）：**多字体档**（标题 / 正文 / 说明）=====================
+// 卡 `T-20260928-223422`；拍板（用户 2026-09-28 22:34，四句全选推荐）：
+//   ① 三档：标题 / 正文 / 说明 = 基准 **+4 / +0 / −2**（例 14 ⇒ 18 / 14 / 12），**全部过 `gui_dpi_scale`**；
+//      **正文 = app 现在传的 px（不动）**。
+//   ② 切档 = **栈式** `gui_font_push(档)` / `gui_font_pop()`（可嵌套、出错也能 pop 回来）。
+//   ③ 档 = **整数 0/1/2**（0 标题 / 1 正文 / 2 说明）；**不新增档名小函数**（省函数预算：boot 只剩 8 格）。
+//   ④ **窄口径**：档只影响"**渲染字号** ＋ **光标/位置类字宽（按档）**"；`gui_text_w` 与盒内 `fit` 的
+//      **布局口径一个字不动**（老基线零扰动）。
+//
+// ★ 载体纪律（本刀能落地、且不动老基线的前提；动之前先读这段）：
+//   ① **零新增全局槽**（编译器 T1 既有缺陷：全局槽号与局部帧槽偏移共用一张正整数表 ⇒ 加全局会撞号误报
+//      「地址值（64 位）不能装进全局 int」，见本文件上方 90~96 行）⇒ 按档的字宽表**绝对不能**用全局数组，
+//      一律住**状态池**（与 M4o 焦点态同一条路）。
+//   ② **不动 `GuiCtx` 结构体**（加字段会让帧槽偏移整体位移 ⇒ 等价门指纹全批位移，很贵）。
+//   ③ **不切档 ⇒ 一条命令都不发**（`gui_begin` 起的档恒 = 基准）⇒ 13~15 条老 dump 基线一字不动。
+//
+// ★ 载体：**伪 key** `gui_hash("__flgui_font") ^ 0x464F4E54`（"FONT"；与 M4o 的 "FOCU"、M4n 的组槽同族的
+//   "把库内部态与控件标签两套 key 分开"的异或常量），**4 个字段的用途定死**：
+//     · `k=0` **恒 0**（`gui_pool_sum` 只摘 k=0 ⇒ POOLSUM 零扰动）
+//     · `k=1` = **档栈**：`深度 × 65536 + 低位打包`（每级 2 bit、存 **档号 + 1** ⇒ 零值不承担"基准档"的语义；
+//       8 级上限 = 16 bit 正好一格）。**`gui_begin` 每帧清 0** ⇒ 跨帧不串档；忘了 pop 只影响本帧。
+//     · `k=2` = **标题档（0）的实测字宽**（0 = 还没量到 ⇒ 回落基准 `gui_char_adv`）
+//     · `k=3` = **说明档（2）的实测字宽**（同上）
+//   ⚠️ **正文档（1）的字宽仍走老的全局 `gui_char_adv`**（建字体时量一次写它）—— 那是 M4c 定下的老路，
+//     本刀一个字没改 ⇒ 不切档时的光标算式与今天**逐字节相同**。
+//   ⚠️ **被否的备选**（`待拍板-多字体档.md` §4 给的三个候选，实测后选的是上面这条）：
+//     · "按档字宽表放**全局数组**" ⇒ 直接撞 T1 缺陷（全局数组 = 全局槽），**先否**；
+//     · "**pop 时按档重量一次**" ⇒ 量宽要 DC ＋ 字体句柄，两者都只有平台层有，内核层的 pop 量不了
+//       ⇒ 代码上根本写不出来（除非把 DC 弄进内核，那又是新的全局槽），**否**；
+//     · "栈里存档号、渲染前由平台层量一次写池" = **本刀采用的第三条**（平台层量、池里取）。
+//
+// ★ 命令流形状（与不透明度 20/21 同形，**同族的第二对状态命令**）：
+//   `kind 22` = 档**压栈** ｜ `kind 23` = 档**出栈**；**载荷 = 该命令之后生效的档号**（写在 `gui_cmd_w` 上，
+//   与 20/21 把载荷写在 `gui_cmd_a` 上同一套"配对量"写法）。为什么载荷是**绝对值**而不是"压了谁/弹了谁"：
+//   渲染端因此**不需要维护档栈** —— 逐条命令读到的就是当时的档（读路径唯一、判据能在无头样本里逐条钉；
+//   ⚠️ 唯一的例外见 `gwb_render_range` 的 `tier_in`：离屏层那一段是**递归**画的，进入时继承外层当时的档）。
+// ★ 错误记账（err 位：1/2 = 裁剪、4/8 = 编辑、16/32 = 不透明度，本刀用剩下两位）：
+//   `64` = 档号越界（当基准档处理）｜ `128` = 档栈越界（压满 8 级 / 空栈弹）。
+int gui_font_push(struct GuiCtx *c, int tier) {
+  int fk = gui_hash("__flgui_font") ^ 0x464F4E54;
+  int st = 0;
+  int d = 0;
+  int pk = 0;
+  int i = 0;
+  if (tier < 0 || tier > 2) { c->err = c->err | 64; tier = 1; }    // 档号越界 ⇒ 当基准档（响亮记账）
+  st = gui_pool_at(fk, 1);
+  d = st / 65536;
+  if (d >= 8) { c->err = c->err | 128; return 1; }                 // 8 级上限：计数、绝不越写（同 clip/alpha）
+  pk = st % 65536;
+  pk = ((pk << 2) | (tier + 1)) & 0xFFFF;
+  gui_pool_put(fk, 1, (d + 1) * 65536 + pk);
+  c->scratch_off = 0; c->scratch_len = 0;                          // 状态命令不带文本区间（同 alpha_push）
+  i = gui_push(c, 22);
+  if (i > 0) { gui_cmd_w[i - 1] = tier; }                          // 载荷 = 压进去的档号
+  return tier;
+}
+
+// 档出栈：返回**弹出之后**的当前档（空栈 = 1 = 基准）。语义与 `gui_alpha_pop` 对称。
+int gui_font_pop(struct GuiCtx *c) {
+  int fk = gui_hash("__flgui_font") ^ 0x464F4E54;
+  int st = 0;
+  int d = 0;
+  int pk = 0;
+  int t = 1;
+  int i = 0;
+  st = gui_pool_at(fk, 1);
+  d = st / 65536;
+  if (d <= 0) { c->err = c->err | 128; return 1; }                 // 没压过不许弹（同 alpha_pop）
+  pk = (st % 65536) >> 2;
+  gui_pool_put(fk, 1, (d - 1) * 65536 + pk);
+  if (d - 1 > 0) { t = (pk & 3) - 1; }                             // 还有剩下的 ⇒ 栈顶就是恢复后的档
+  c->scratch_off = 0; c->scratch_len = 0;
+  i = gui_push(c, 23);
+  if (i > 0) { gui_cmd_w[i - 1] = t; }                             // 载荷 = 弹完之后的档号（渲染端照抄即可）
+  return t;
+}
+
+// ===== 布局游标（单列 + same_line + next_rect 覆盖）=====
+int gui_layout_init(struct GuiCtx *c, int x, int y) {   // 4 参上限：容量走 ctx 的 lay_w/lay_h 字段
+  c->lay_x = x;
+  c->lay_y = y;
+  c->row_y = y - c->spacing;   // 第一项落回 y
+  c->row_h = 0;
+  c->cur_x = x;
+  c->same_line = 0;
+  return 0;
+}
+
+int gui_same_line(struct GuiCtx *c) { c->same_line = 1; return 0; }
+int gui_spacing(struct GuiCtx *c, int px) { c->spacing = px; return 0; }
+
+// ===== M4n：**间距栅格 4/8**（拍板 ⑥ 的顺带项；⚠️ 硬边界：**只加入口、不改默认值**）=====
+// 为什么"只加入口"：默认 `pad 6 / spacing 4` 一旦改了，**13 条 dump 基线的命令矩形会全动**
+//   （老 app 零扰动优先）⇒ 栅格只由 app **显式调用**，默认值一个字节没改。
+// 归整口径（单点定义在这两个函数里，样本与 §6 判据表按这个写）：
+//   `snap(v, n) = ((v + n/2) / n) * n`（**四舍五入，.5 向上**），且 `v > 0` 时结果**至少是 n**
+//   —— 防"`spacing 4` 归到 8 的栅格变成 **0**"（间距 0 会让相邻控件贴在一起，那是观感事故不是栅格）。
+//   `v <= 0` 原样返回（"没设"不许被栅格凭空造出一个值）；`n <= 0` 一律**不动**（防手滑把间距清成 0）。
+int gui_space_snap(int v, int n) {
+  int r = 0;
+  if (n <= 0) { return v; }
+  if (v <= 0) { return v; }
+  r = ((v + n / 2) / n) * n;
+  if (r < n) { r = n; }
+  return r;
+}
+
+// 把一个 ctx 的 `pad` / `spacing` 归到 n 的倍数。返回 0（结果直接读 `c->pad` / `c->spacing`）。
+int gui_space_grid(struct GuiCtx *c, int n) {
+  if (n <= 0) { return 0; }
+  c->pad = gui_space_snap(c->pad, n);
+  c->spacing = gui_space_snap(c->spacing, n);
+  return 0;
+}
+
+// 给下一个控件指定矩形（外部精确排版用；自动布局下由 gui_item_rect 计算）
+int gui_next_rect(struct GuiCtx *c, struct GuiRect *r) {
+  c->next_x = r->x; c->next_y = r->y; c->next_w = r->w; c->next_h = r->h;
+  c->has_next = 1;
+  return 0;
+}
+
+// M3：直接钉死"当前项"的矩形（外来精确排版用：浮窗按 (x,y) 逐段推进，不参与自动布局）。
+//   与 gui_next_rect + gui_item_rect 的区别 = **完全不动布局游标**（不碰 cur_x / row_y / row_h / same_line），
+//   所以它不会把自动布局的节奏带歪（逐段 push 的场景每帧几十次，动游标是隐性副作用）。
+int gui_item_at(struct GuiCtx *c, struct GuiRect *r) {
+  c->cur_ix = r->x;
+  c->cur_iy = r->y;
+  c->cur_iw = r->w;
+  c->cur_ih = r->h;
+  return 0;
+}
+
+// 算出当前控件的矩形并推进游标（每个控件的第一件事）
+int gui_item_rect(struct GuiCtx *c, int w, int h) {
+  if (c->has_next) {
+    c->cur_ix = c->next_x;
+    c->cur_iy = c->next_y;
+    c->cur_iw = c->next_w;
+    c->cur_ih = c->next_h;
+    c->has_next = 0;
+    c->row_y = c->cur_iy;
+    c->row_h = c->cur_ih;
+    c->cur_x = c->cur_ix + c->cur_iw + c->spacing;
+    c->same_line = 1;
+    return 0;
+  }
+  if (c->same_line) {
+    c->cur_ix = c->cur_x;
+  } else {
+    c->row_y = c->row_y + c->row_h + c->spacing;
+    c->cur_ix = c->lay_x;
+    c->row_h = 0;
+  }
+  c->cur_iy = c->row_y;
+  c->cur_iw = w;
+  c->cur_ih = h;
+  c->cur_x = c->cur_ix + w + c->spacing;
+  if (h > c->row_h) { c->row_h = h; }
+  c->same_line = 0;
+  return 0;
+}
+
+// 鼠标是否落在当前控件矩形内（且没被裁剪掉）
+int gui_hit(struct GuiCtx *c) {
+  if (c->cur_iw <= 0) { return 0; }
+  if (c->cur_ih <= 0) { return 0; }
+  if (c->mx < c->cur_ix) { return 0; }
+  if (c->my < c->cur_iy) { return 0; }
+  if (c->mx >= c->cur_ix + c->cur_iw) { return 0; }
+  if (c->my >= c->cur_iy + c->cur_ih) { return 0; }
+  if (gui_clip_contains(c, c->mx, c->my) == 0) { return 0; }
+  return 1;
+}
+
+// hot → active 状态机（活跃 = "拥有鼠标直到抬起"的令牌）。返回 1 = 本控件本帧被点击。
+int gui_control(struct GuiCtx *c, int id) {
+  int over = gui_hit(c);
+  int clicked = 0;
+  if (over) {
+    c->hot = id;
+    if (c->pressed) { c->active = id; }
+  }
+  if (c->active == id) {
+    if (c->released) {
+      if (over) { clicked = 1; }
+      c->active = 0;
+    }
+  }
+  c->cur_clicked = clicked;
+  return clicked;
+}
+
+// ===== 帧协议 =====
+int gui_init(struct GuiCtx *c) {
+  int i = 0;
+  c->frame = 0;
+  c->mx = 0; c->my = 0; c->down = 0; c->pressed = 0; c->released = 0; c->wheel = 0;
+  c->key = 0;
+  c->ms = 0;                                     // M4d：没注入就是 0（真实时间由平台层每帧填，见 GuiInput 注释）
+  c->anim_pct = 100;                             // M4d：默认正常速度（0 = 立即完成 = 关动画，见 gui_anim_set）
+  c->frame_fps = 60;                             // M4e：默认 60fps（2026-09-27 用户拍板；0 = 不限速，见 gui_frame_set）
+  c->hot = 0; c->active = 0; c->kbd = 0;
+  c->edit_slot = 0 - 1;                          // M4b：初始没有焦点（0 是合法槽 ⇒ 必须用 -1 表示"无"）
+  c->lay_x = 0; c->lay_y = 0; c->lay_w = 200; c->lay_h = 100;
+  c->row_y = 0; c->row_h = 0; c->cur_x = 0; c->same_line = 0;
+  c->spacing = 4; c->pad = 6;
+  c->line_h = 14; c->btn_h = 20; c->box_w = 12;
+  // M4m（2026-09-28，卡 T-20260928-005959）：**输入灵敏度的两个默认值**（用户拍板：滚轮 3 行/格、倍率 1:1）。
+  //   ⚠️ `wheel_step = 60` = **3 行 × 20px**（控件行高口径），**不是** `line_h * 3` —— 本行的 `line_h` 是
+  //     **label 行高 14**（那是排版口径，与"一行滚多少"不是同一个数）。要让步长跟 label 行高走就显式写
+  //     `c.wheel_step = c.line_h * 3`（app 随时可覆盖；本字段就是那个旋钮）。
+  //   ⚠️ 改这个默认值会**动到** `flgui3` / `flgui5` 两个老样本的"20px/格 单位账" ⇒ 这两处已就地
+  //     显式锁 `wheel_step = 20`（见样本源码注释）；13 条 dump 基线因此逐字节未动。
+  c->wheel_step = 60;                            // 旧值 = 20（写死在 gui_scroll_begin 的乘法里）
+  c->drag_scale = 100;                           // 100 = 1:1（与老行为逐像素相同）；50 半速 / 200 双倍
+  c->dpi = 96;                                   // M4：默认 96dpi（100%）；平台层可从真窗口读回后覆盖
+  gui_theme_default(c);                          // M4：主题单点定义（原先这 10 行颜色散在这里，现挪进本函数）
+  c->cur_ix = 0; c->cur_iy = 0; c->cur_iw = 0; c->cur_ih = 0;
+  c->cur_clicked = 0;
+  c->clip_n = 0;
+  c->alpha_n = 0;
+  c->next_x = 0; c->next_y = 0; c->next_w = 0; c->next_h = 0; c->has_next = 0;
+  c->scratch_off = 0; c->scratch_len = 0;
+  c->scratch_col = 0;
+  c->id_seed = 0;
+  c->err = 0;
+  c->popup_id = 0;
+  c->popup_x = 0;
+  c->popup_y = 0;
+  c->popup_w = 120;
+  gui_cmd_n = 0;
+  gui_cmd_over = 0;
+  gui_text_n = 0;
+  gui_text_over = 0;
+  while (i < 2048) { gui_pool[i] = 0; i = i + 1; }
+  return 0;
+}
+
+int gui_begin(struct GuiCtx *c, struct GuiInput *in) {
+  c->frame = c->frame + 1;
+  c->mx = in->mx;
+  c->my = in->my;
+  c->down = in->down;
+  c->pressed = in->pressed;
+  c->released = in->released;
+  c->wheel = in->wheel;
+  c->key = in->key;                              // M4b：键盘读入（谁清零见平台层 gui_win_pump）
+  c->ms = in->ms;                                // M4d：本帧时间戳（**纯搬运** —— 内核不取时，见 GuiInput 注释）
+  c->hot = 0;
+  // M4o：**焦点登记游标归零 ＋ 消费 Tab / Shift+Tab**（顺序有讲究：先归零、再导航 —— 导航只读池里
+  //   上一帧的清单数）。⚠️ 键码是**字面量**、导航**内联**：函数预算只剩 1 格，见文件上方"函数预算"段。
+  //   `c->key` 必须**消费掉**（置 0）：否则它会被下游当"本帧键盘读入"漏给文本域。
+  c->kbd = 0;
+  if (c->key == 9) { c->key = 0; gui_focus_next(c); }
+  if (c->key == 0x0109) { c->key = 0; gui_focus_prev(c); }
+  c->cur_clicked = 0;
+  c->has_next = 0;
+  c->clip_n = 0;
+  c->alpha_n = 0;                                // M4h：**每帧归零**（跨帧不残留 —— 上一帧压过不代表这一帧还压着）
+  // M4q：**档栈每帧归零**（同 alpha_n 的理由：忘了 pop 只影响本帧，不许串到下一帧；
+  //   也保证"渲染端每帧从基准档起步"与内核同口径）。⚠️ 写的是 k=1（不是 k=0）⇒ POOLSUM 零扰动。
+  gui_pool_put(gui_hash("__flgui_font") ^ 0x464F4E54, 1, 0);
+  c->scratch_off = 0;
+  c->scratch_len = 0;
+  c->scratch_col = 0;
+  gui_cmd_n = 0;
+  gui_text_n = 0;
+  gui_layout_init(c, c->pad, c->pad);
+  return c->frame;
+}
+
+int gui_end(struct GuiCtx *c) {
+  if (c->released) { c->active = 0; }   // 抬起即收令牌（谁也没接住就作废）
+  // M4o：帧末收尾（内联 gui_focus_commit —— 函数预算见文件上方）：
+  //   ① 本帧登记到的个数写进池（下一帧回绕用）；② **序号越界 ⇒ 收回焦点**（控件变少 / 焦点那个
+  //   控件这一帧没被画 ⇒ 不许留"看不见的悬空焦点"）。
+  gui_pool_put(gui_focus_key(), 2, c->kbd);
+  if (gui_pool_at(gui_focus_key(), 1) > c->kbd) {
+    gui_pool_put(gui_focus_key(), 1, 0);
+    gui_pool_put(gui_focus_key(), 3, 0);
+  }
+  return gui_cmd_n;
+}
+
+// 动画时长缩放通道（M4d 动画地基①）—— **关闭动画的通道 = 可访问性 ＋ 判据地基 ＋ 兜底，三合一**。
+//   pct = 0   → 立即完成（等价"关动画"）
+//   pct = 100 → 正常（gui_init 的默认值）
+//   pct = 200 → 慢动作（做动画时最好的调试工具：半速/慢速肉眼看细节）
+// 为什么不做 bool：① 布尔只能"关/不关"，做动画时想要"慢放"还得另开一个键；② 整数系数天然带档位。
+// ⚠️ 两条纪律（照 SPEC 的"关闭动画通道"四刀）：
+//   ① **`0` 必须在"算进度"的那一处特判**（防除零：`进度 = (now − 起) * 256 / (时长 * pct / 100)` 一类的式子
+//      在 pct=0 时会把分母做成 0）—— 除法永远只出现在算进度的那一个函数里。
+//   ② **不许把这个系数散到各个控件调用点**写 `if (anim) {…} else {…}` —— 那样"关掉"那条分支**永远没人测**；
+//      正确姿势 = 两状态**走同一条代码路径**，只是进度取值不同（同族：`每帧量的清零与累加必须同函数`）。
+//   ③ 它住在**内核层** `GuiCtx`（属"应用配置"）；平台层只负责填真时间（同族：`内核层声明 / 平台层测量`）。
+//   ⇒ 运行时热切换是白送的（改字段下一帧生效）；将来"只关装饰性过渡 / 跟随系统偏好"也从这一处收。
+int gui_anim_set(struct GuiCtx *c, int pct) {
+  if (pct < 0) { pct = 0; }
+  if (pct > 1000) { pct = 1000; }                // 上限 10× 慢放：防手滑写进天文数字把帧算成天荒地老
+  c->anim_pct = pct;
+  return c->anim_pct;
+}
+
+// ===== M4f：真动画第一刀（缓动 ＋ 插值 ＋ 进度入口；2026-09-27 用户拍板命名）=====
+// 三条纪律（本刀的设计依据，写错就得返工）：
+//   ① **整数定点，禁 `double`**：boot 侧浮点未接通 ⇒ 进度用 0..256 的定点（**256 = 1.0**），
+//      缓动用"三次多项式 ＋ 一次除法"，全程整数 ⇒ 双端产物逐字节可对账、不引浮点库。
+//   ② **除法只出现在"算进度"这一处**（同 `anim_pct` 注释那条纪律）：`gui_anim` 是唯一会除的函数，
+//      且两个除零入口（`anim_pct <= 0` / `dur <= 0`）都在函数开头特判掉。
+//   ③ **时间只用注入的 `c->ms`**（内核不取时，见 GuiInput 注释）⇒ **掉帧不跑偏**：
+//      进度按绝对时间算、不拿帧数当计时器。
+//
+// 缓动曲线 = **ease-out（先快后慢）**：`e(t) = t(196608 − 768t + t²) / 65536`，t ∈ [0,256]。
+//   它就是 `1 − (1 − p)³`（p = t/256）的整数展开：t=0→0、t=64→148、t=128→224（=0.875×256）、t=256→256。
+//   为什么不用"先算 p 再三次方"：那要两三次除法，**中间截断会让曲线抖动**；单次除法留在末端 ⇒ 曲线单调
+//   （多项式在 [0,256] 上导数 `3(256−t)² ≥ 0`；2026-09-27 实测 0..256 全程单调不降、且恒 ≥ t）。
+int gui_ease_out(int t) {
+  if (t <= 0) { return 0; }
+  if (t >= 256) { return 256; }
+  return t * (196608 - 768 * t + t * t) / 65536;
+}
+
+// 整数插值：`a + (b − a) × t / 256`（t = 0..256 定点；越界**夹取**）。
+// 截断方向随被除数符号（C 语义）⇒ `a > b` 时略偏小（如 `lerp(20,10,128) = 15`）—— 够用且**双端一致**；
+//   本刀不追求"四舍五入"（那要按符号分支补半个单位，留给真有精度要求时再加）。
+int gui_lerp(int a, int b, int t) {
+  if (t <= 0) { return a; }
+  if (t >= 256) { return b; }
+  return a + (b - a) * t / 256;
+}
+
+// **动画进度入口**（本刀唯一"有状态"的动画函数）：按 ID 存起始戳、按注入时间算、按 `anim_pct` 缩放时长，
+//   返回 **0..256** 的**缓动后**进度（0 = 刚起步、256 = 到位）。
+// 调用点（滑块跟手 = 输入→数值的滤波）：
+//   `x = gui_lerp(x, x_target, gui_anim(c, gui_id("sld"), 160));`
+// 字段账（**一次定死**）：池字段 `1` = 起始戳(ms)、字段 `3` = 标志（1 = 已起过一次）。
+//   ⚠️ **不能用"起始戳 == 0"当"没起"**：无头样本第一帧注入的 `ms` 恰好就是 0（M4d 固定序列 0/16/32/48）
+//   ⇒ 拿 0 当"没起"会**每帧重盖一次起始戳**、进度永远是 0（本刀设计时差点踩进去的坑）。
+//   ⇒ "有没有起过"必须**另占一位**（字段 3）；顺带：要**重启动画**就把字段 3 写回 0
+//     （`gui_pool_put(id, 3, 0)`）—— 本刀只做"起一次"，重启语义（含事件触发重放）留给下一刀。
+int gui_anim(struct GuiCtx *c, int id, int dur_ms) {
+  int dur = 0;
+  int el = 0;
+  if (c->anim_pct <= 0) { return 256; }        // 关动画 ⇒ 立即到位（**除零特判 ①**）
+  if (dur_ms <= 0) { return 256; }             // 时长非正 ⇒ 立即到位（**除零特判 ②**）
+  if (gui_pool_at(id, 3) == 0) {               // 起始戳**只盖一次**（跨帧存活；见上面的字段账）
+    gui_pool_put(id, 1, c->ms);
+    gui_pool_put(id, 3, 1);
+  }
+  dur = dur_ms * c->anim_pct / 100;            // 慢动作 = 时长变长（pct=200 ⇒ 两倍时长 ⇒ 同刻进度更小）
+  if (dur <= 0) { return 256; }                // pct 小 + 时长小 ⇒ 缩到 0 也照样挡住除法
+  el = c->ms - gui_pool_at(id, 1);
+  if (el <= 0) { return 0; }                   // 起步那一帧（时间还没走）／时间回退 ⇒ 0，不出现负进度
+  if (el >= dur) { return 256; }               // 到点饱和（**不越界**）
+  return gui_ease_out(el * 256 / dur);
+}
+
+// ===== 帧率档位（M4e，2026-09-27 用户拍板：**默认 60**）=====
+// 为什么是"目标帧率"而不是"等待毫秒"：动画进度按**绝对时间**算（M4d），帧率只是一个**限速器**；
+//   而"到底等多久"必须由平台层按"目标周期 − 本帧已用时间"算 —— **固定 `wait(1)` 的写法是错的**：
+//   2026-09-27 实测，一旦别的进程把定时器粒度抬到 1ms，同一份 `wait(1)` 立刻从 15.34ms 掉到 **2.38ms/帧（420fps、26% 单核，空转）**。
+// 档位：0 = 不限速（尽快跑）｜30/60/90/144… = 目标帧率；负值夹 0、上限 1000（防手滑）。
+// 高帧率那一档（周期 < 15ms）在平台层走 **DwmFlush 跟屏**（见 flgui_win32.fl 的 gui_win_frame_wait）——
+//   内核只存"目标"，**不下"用哪种后端"的判断**（同族纪律：内核层声明 / 平台层测量）。
+int gui_frame_set(struct GuiCtx *c, int fps) {
+  if (fps < 0) { fps = 0; }
+  if (fps > 1000) { fps = 1000; }
+  c->frame_fps = fps;
+  return c->frame_fps;
+}
+
+// 目标帧周期（整数毫秒）；**0 = 不限速**（调用方据此决定"这一帧不用等"）。
+// ⚠️ `1000 / fps` 是整数除法：144 → 6（真值 6.94）、90 → 11 ⇒ 周期 <15ms 的档只能靠"跟屏"后端，别把 6 当精确值用。
+int gui_frame_ms(struct GuiCtx *c) {
+  if (c->frame_fps <= 0) { return 0; }
+  return 1000 / c->frame_fps;
+}
+
+// ===== 判据用 dump（纯文本走 print → stdout，双端逐字节可对账）=====
+int gui_dump(struct GuiCtx *c) {
+  int i = 0;
+  print(["FRAME ", c->frame, " mouse=", c->mx, ",", c->my, " in=", c->down, c->pressed, c->released,
+         " ms=", c->ms,
+         " hot=", c->hot, " active=", c->active, " cur=", c->cur_ix, ",", c->cur_iy, ",", c->cur_iw, ",", c->cur_ih,
+         " cmdn=", gui_cmd_n, " over=", gui_cmd_over, " clipn=", c->clip_n, " err=", c->err, "\n"]);
+  while (i < gui_cmd_n) {
+    print(["  CMD ", i, " kind=", gui_cmd_kind[i], " rect=", gui_cmd_x[i], ",", gui_cmd_y[i], ",",
+           gui_cmd_w[i], ",", gui_cmd_h[i], " text=", gui_cmd_toff[i], ",", gui_cmd_tlen[i], "\n"]);
+    i = i + 1;
+  }
+  print(["  POOLSUM ", gui_pool_sum(), " textn=", gui_text_n, " textover=", gui_text_over, "\n"]);
+  return 0;
+}

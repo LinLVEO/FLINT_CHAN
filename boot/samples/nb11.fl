@@ -1,0 +1,6 @@
+// nb11.fl — 负例：own 只能由 new 初始化（禁止拷贝/取址）
+int main() {
+  int x = 1;
+  int *own p = &x;
+  return 0;
+}

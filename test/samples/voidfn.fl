@@ -1,0 +1,14 @@
+void noop() {
+}
+void twice(int &x) {
+  x = x * 2;
+  return;
+}
+int main() {
+  int v;
+  v = 10;
+  noop();
+  twice(v);
+  noop();
+  return v;
+}

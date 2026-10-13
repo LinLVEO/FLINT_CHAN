@@ -1,0 +1,4 @@
+// bit5.fl — 右移 >> 算术右移保符号：-256(0xFFFFFF00) >> 4 = -16(0xFFFFFFF0)
+int main() {
+  return -256 >> 4;
+}

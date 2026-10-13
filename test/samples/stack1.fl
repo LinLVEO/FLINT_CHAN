@@ -1,0 +1,10 @@
+// stack1.fl — 大帧栈探测回归（决策 41，B2b 撞墙实证）
+// char[3200] 帧 = 25,600B（char 数组按 8B/槽排布 → 帧膨胀快），超过线程初始提交栈（本机实测 ~24KB）
+// 修前：prologue 一次 sub rsp 跳过大页，print 的 push rax 写帧底跳过守护页 → 0xC0000005
+// 修后：prologue 逐页 sub+触碰（emit_stack_alloc）→ OS 按序提交 → 正常退出 42
+int main() {
+  char big[3200];
+  big[0] = 41;
+  print(["big frame ok\n"]);
+  return big[0] + 1;
+}

@@ -1,0 +1,130 @@
+// sw1.fl —— v1.3.1 switch / case / default 的成绩单（8 项位掩码 = 255）
+// 每项钉一个只有实现对才可能过的观察点：命中/未命中两侧、贯穿 fallthrough、break 归属、
+// 循环里的 switch（break 只跳 switch，continue 穿透到外层循环）、嵌套 switch、case 常量形式。
+// 退出码 = 各项位之和。
+
+int classify(int n) {
+  int r = 0;
+  switch (n) {
+    case 1:
+      r = 10;
+      break;
+    case 2:
+    case 3:            // 空 case 贯穿：2 和 3 共用一段
+      r = 20;
+      break;
+    default:
+      r = 30;
+  }
+  return r;
+}
+
+int main() {
+  int r = 0;
+
+  // ①②③ classify 三分支：命中 case / 贯穿组 / default（未命中）
+  if (classify(1) == 10) r |= 1;
+  if (classify(2) == 20 && classify(3) == 20) r |= 2;
+  if (classify(9) == 30) r |= 4;
+
+  // ④ 贯穿 fallthrough：命中 case 2 且**没有 break** → 继续执行 case 3 的语句（2+4=6）
+  //    反面：若实现"命中即跳到末尾"，acc 会是 2；若实现"每个 case 只能有自己的语句"，编译都过不了。
+  int acc = 0;
+  switch (2) {
+    case 1:
+      acc = acc + 1;
+    case 2:
+      acc = acc + 2;
+    case 3:
+      acc = acc + 4;
+      break;
+    case 4:
+      acc = acc + 8;
+      break;
+  }
+  if (acc == 6) r |= 8;
+
+  // ⑤ 常量形式：负号 case 与字符字面量 case（两条都要能命中）
+  int sign = 0;
+  switch (-1) {
+    case -1:
+      sign = 7;
+      break;
+    case 0:
+      sign = 8;
+      break;
+    default:
+      sign = 9;
+  }
+  int ch = 0;
+  switch ('b') {
+    case 'a':
+      ch = 1;
+      break;
+    case 'b':
+      ch = 2;
+      break;
+    default:
+      ch = 3;
+  }
+  if (sign == 7 && ch == 2) r |= 16;
+
+  // ⑥ 循环里的 switch：
+  //    break 只跳 switch（循环继续）；switch 里的 continue 跳的是**外层 while**（C 语义）。
+  //    追踪（每一轮 i 值）：
+  //      i=1 default → total=1  → 之后 +100 → 101
+  //      i=2 case 2  → break    → 之后 +100 → 201
+  //      i=3 default → total=204 → 之后 +100 → 304
+  //      i=4 case 4  → continue → **跳过** total+=100（仍是 304），回到 while 条件
+  //      i=5 default → 309 → +100 → 409
+  //      i=6 default → 415 → +100 → 515
+  int i = 0;
+  int total = 0;
+  while (i < 6) {
+    i = i + 1;
+    switch (i) {
+      case 2:
+        break;
+      case 4:
+        continue;
+      default:
+        total = total + i;
+    }
+    total = total + 100;
+  }
+  if (total == 515) r |= 32;
+
+  // ⑦ switch 条件可以是任意整型表达式（含三元）+ 段里用块作用域声明
+  int k = 3;
+  switch (k > 2 ? 2 : 1) {
+    case 1:
+      k = 100;
+      break;
+    case 2: {
+      int t = 5;
+      k = k + t;
+      break;
+    }
+  }
+  if (k == 8) r |= 64;
+
+  // ⑧ 嵌套 switch：内层 break 只跳内层（跳完还要执行 `deep = deep + 1`）
+  int deep = 0;
+  switch (1) {
+    case 1:
+      switch (2) {
+        case 2:
+          deep = 5;
+          break;
+        default:
+          deep = 6;
+      }
+      deep = deep + 1;
+      break;
+    default:
+      deep = 9;
+  }
+  if (deep == 6) r |= 128;
+
+  return r;
+}

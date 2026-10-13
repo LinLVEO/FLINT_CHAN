@@ -1,0 +1,31 @@
+// rtptr5.fl — v1.0.6 函数返回指针：真实句柄工厂直返（目标动机场景）
+// make_window() 直返 CreateWindowExA 句柄（int*，全 64 位 rax）——旧写法只能把句柄塞进
+// struct 指针字段承接（决策 27 时代）；RegisterClassA 失败 → 返回 0 = NULL 判真
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int DefWindowProcA(int, int, int, int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) { return DefWindowProcA(hwnd, msg, wp, lp); }
+
+int *make_window() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "RT5CLS";
+  if (RegisterClassA(&wc) == 0) return 0;   // 失败 → NULL（句柄/指针返回可空）
+  return CreateWindowExA(0, "RT5CLS", "rt", 0x00CF0000, 60, 60, 200, 100, 0, 0, 0, 0);
+}
+
+int main() {
+  int *h = make_window();     // 句柄工厂直返
+  if (h == 0) return 91;      // NULL 判真（64 位）
+  ShowWindow(h, 1);
+  return 7;
+}

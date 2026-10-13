@@ -1,0 +1,8 @@
+// str2.fl — 多字符串连续排布：a="XYZW"(5B) b="P"(2B) c="Q"
+// (b-a)*10 + (c-b) = 5*10 + 2 = 52
+int main() {
+  int a = "XYZW";
+  int b = "P";
+  int c = "Q";
+  return (b - a) * 10 + (c - b);
+}

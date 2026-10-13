@@ -1,0 +1,77 @@
+// flgui7.fl — FLGUI M4d 动画地基①：**时间注入通道** ＋ **动画开关**的无头契约样本（不建窗，合成输入喂 gui_begin）
+// 为什么单开一个样本：这两条通道的错法都很隐蔽 ——
+//   · 内核层若"自己取时"（GetTickCount），dump 基线会**每次跑都不一样**（判据体系当场失效）；
+//   · 若"忘了搬运"，动画永远停在第一帧（而画面看起来只是"没动"）；
+//   · 关动画的开关若散到各控件调用点写 if/else，"关掉"那条分支**永远没人测**。
+// ⇒ 用**固定序列**（0/16/32/48）把"注入 → 搬运 → 可观测"钉死，开关只用**返回值 + 字段读回**两条硬判据量。
+// 判据（位掩码 12 位，全亮 = 4095 → return 42）：
+//   0 帧1 ms=0 ｜1 帧2 ms=16 ｜2 帧3 ms=32 ｜3 帧4 ms=48
+//   4 **纯搬运**：同输入下命令数不随 ms 变（时间不参与布局/命令表）
+//   5 gui_init 默认 anim_pct=100 ｜6 anim_set(0)=0（关）｜7 anim_set(200)=200（慢动作）
+//   8 anim_set(-5) 夹到 0 ｜9 anim_set(5000) 夹到 1000（上限）
+//   10 字段真被写入（读回 c.anim_pct，不是只信返回值）｜11 负时间戳原样搬运（内核不夹取、不改写）
+include "flgui_widgets.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int r = 0;
+  int n0 = 0;
+
+  gui_init(&c);
+  c.lay_w = 120;
+  c.lay_h = 80;
+
+  // ================= 一、动画开关（时长缩放通道）的契约 =================
+  if (c.anim_pct == 100) { r = r | 32; }                 // 默认 = 正常速度（gui_init 的默认值）
+  if (gui_anim_set(&c, 0) == 0) { r = r | 64; }          // 0 = 立即完成（等价"关动画"）
+  if (gui_anim_set(&c, 200) == 200) { r = r | 128; }     // 200 = 慢动作（做动画时的调试档）
+  if (gui_anim_set(&c, 0 - 5) == 0) { r = r | 256; }     // 负值夹到 0（不出现"负时长"这种怪状态）
+  if (gui_anim_set(&c, 5000) == 1000) { r = r | 512; }   // 上限夹到 1000（10× 慢放）
+  if (c.anim_pct == 1000) { r = r | 1024; }              // **读回字段**：真写进去了，不是只算了返回值
+  gui_anim_set(&c, 100);                                 // 复位成正常，免得影响后面几帧
+
+  // ================= 二、时间注入：固定序列 0 / 16 / 32 / 48 =================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.key = 0; in.ms = 0;
+  gui_begin(&c, &in);
+  gui_label(&c, "t0");
+  gui_end(&c);
+  gui_dump(&c);
+  n0 = gui_cmd_n;
+  if (c.ms == 0) { r = r | 1; }
+
+  in.ms = 16;
+  gui_begin(&c, &in);
+  gui_label(&c, "t1");
+  gui_end(&c);
+  gui_dump(&c);
+  if (c.ms == 16) { r = r | 2; }
+  if (gui_cmd_n == n0) { r = r | 16; }                   // 纯搬运：ms 变了，命令表一字不变
+
+  in.ms = 32;
+  gui_begin(&c, &in);
+  gui_label(&c, "t2");
+  gui_end(&c);
+  gui_dump(&c);
+  if (c.ms == 32) { r = r | 4; }
+
+  in.ms = 48;
+  gui_begin(&c, &in);
+  gui_label(&c, "t3");
+  gui_end(&c);
+  gui_dump(&c);
+  if (c.ms == 48) { r = r | 8; }
+
+  // ================= 三、时钟回退/负值：内核**不做任何夹取或改写** =================
+  //   为什么单列一条：真 GetTickCount 是 32 位无符号、49.7 天回绕；进度一律按"差值/绝对时间"算，
+  //   内核若要"帮忙夹成非负"就是**替上层做决定**，将来算差值时反而会错。⇒ 搬运就是搬运。
+  in.ms = 0 - 100;
+  gui_begin(&c, &in);
+  gui_label(&c, "t4");
+  gui_end(&c);
+  gui_dump(&c);
+  if (c.ms == 0 - 100) { r = r | 2048; }
+
+  if (r == 4095) { return 42; }
+  return r;
+}

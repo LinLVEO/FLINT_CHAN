@@ -1,0 +1,2 @@
+int sum3(int a[]) { return a[0] + a[1] + a[2]; }
+int main() { int b[3]; b[0] = 10; b[1] = 20; b[2] = 12; return sum3(b); }

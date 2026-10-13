@@ -1,0 +1,3 @@
+// inc_err_main.fl — include 一个语法错的库：错误应报在 inc_err_lib.fl
+include "inc_err_lib.fl"
+int main() { return 0; }

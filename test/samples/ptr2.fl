@@ -1,0 +1,9 @@
+void set(int *p, int v) {
+  *p = v;
+}
+int main() {
+  int a;
+  a = 1;
+  set(&a, 99);
+  return a;
+}

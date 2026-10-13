@@ -1,0 +1,35 @@
+// temp_probe.fl — L2 温度实证：FLINT 经 WinRing0 读 CPU 温度
+// MSR 0x19C (IA32_THERM_STATUS)：bits22:16 = DTS 读数（Digital Readout）
+// MSR 0x1A2 (IA32_TEMPERATURE_TARGET)：bits23:16 = TjMax（读失败/为 0 则 fallback 100）
+// 温度 = TjMax - readout（0x1A2 支持时用 CPU 自报 TjMax）
+// 退出码 = CPU 温度整数（空闲应 ~30-55）；1=设备 2=ioctl 失败
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int DeviceIoControl(int, int, int, int, int, int, int, int);
+api kernel32 void Sleep(int);
+
+struct IN4 { int idx; }
+struct OUT { int lo; int hi; }
+
+int main() {
+  int *h = CreateFileA("\\\\.\\WinRing0_1_2_0", 0xC0000000, 0, 0, 3, 0, 0);
+  if (h == 0) return 1;
+  struct OUT o;
+  struct IN4 in;
+  int ret = 0;
+  // TjMax
+  in.idx = 0x1A2;
+  int okA = DeviceIoControl(h, 0x9C402084, &in, 4, &o, 8, &ret, 0);
+  int tjmax = 100;
+  if (okA != 0) {
+    int t = (o.lo >> 16) & 0xFF;
+    if (t != 0) tjmax = t;
+  }
+  // DTS 读数
+  in.idx = 0x19C;
+  int okB = DeviceIoControl(h, 0x9C402084, &in, 4, &o, 8, &ret, 0);
+  if (okB == 0) return 2;
+  int valid = (o.lo >> 31) & 1;
+  int ro = (o.lo >> 16) & 0x7F;
+  if (valid == 0) return 3;
+  return tjmax - ro;
+}

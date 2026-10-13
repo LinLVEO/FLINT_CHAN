@@ -1,0 +1,35 @@
+# .gitattributes -- 只影响"导出/打包"（git archive、GitHub 的源码压缩包），不影响仓库内容与日常提交。
+#
+# 为什么有它：本仓库里同时住着两类东西 ——
+#   ① 对外的：README / docs / SPEC / 编译器与库源码 / 门与探针 / 真实项目 / 缺口台账
+#   ② 内部的：给"已经知道上下文的人"看的过程记录（工单、待拍板、调研、开工简报、进度归档、方向备忘）
+# ② 留在仓库里对我们有用（交接、追溯），但会让外人第一眼看到的全是噪声。
+# 所以：**仓库照旧保留，导出给外人的包里去掉**。需要看过程记录的人，clone 仓库即可。
+#
+# 想改口径：删掉对应行 = 那一类重新进导出包。
+
+# ---- 内部过程记录：不进导出包 ----
+工单-*.md                export-ignore
+待拍板-*.md              export-ignore
+调研*.md                 export-ignore
+开工简报-*.md            export-ignore
+帧节拍-*.md              export-ignore
+需求勘定-*.md            export-ignore
+SPEC修订提案-*.md        export-ignore
+任务-*.md                export-ignore
+IRIS-*.md                export-ignore
+IR重构-*.md              export-ignore
+概念池.md                export-ignore
+新路候选*.md             export-ignore
+FLGUI-计划.md            export-ignore
+副本说明.md              export-ignore
+学习笔记.md              export-ignore
+方向-*.md                export-ignore
+
+# ---- 工程进度：主档案留（"做到哪了"是诚实的一部分），历史归档不进 ----
+PROGRESS-归档.md         export-ignore
+
+# ---- 内部留底 / 试验场 ----
+*.bak-*                  export-ignore
+tmp/                     export-ignore
+test/tmp/                export-ignore

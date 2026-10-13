@@ -1,0 +1,49 @@
+// fmtlib1.fl — fmt_lib 验证：拼缓冲（字符串/十进制/十六进制/字符/结尾 + 位置游标）
+// 同时验证 fmt 与 str 两库可共存（include 无守卫下的组合）
+include "../../lib/fmt_lib.fl"
+include "../../lib/str_lib.fl"
+
+int main() {
+  int r = 0;
+  char buf[64];
+  int p = 0;
+
+  p = std::fmt_str(buf, p, "CPU ");
+  p = std::fmt_int(buf, p, 56);
+  p = std::fmt_char(buf, p, 'C');
+  std::fmt_end(buf, p);
+
+  if (std::streq(buf, "CPU 56C") == 1) r |= 1;
+  if (std::strlen(buf) == 7) r |= 2;
+
+  p = 0;
+  p = std::fmt_int(buf, p, -42);
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "-42") == 1) r |= 4;
+
+  p = 0;
+  p = std::fmt_int(buf, p, 0);
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "0") == 1) r |= 8;
+
+  p = 0;
+  p = std::fmt_hex(buf, p, 255);
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "ff") == 1) r |= 16;
+
+  p = 0;
+  p = std::fmt_hex(buf, p, 0xDEADBEEF);
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "deadbeef") == 1) r |= 32;
+
+  p = 0;
+  p = std::fmt_str(buf, p, "a");
+  p = std::fmt_str(buf, p, "b");
+  p = std::fmt_str(buf, p, "c");
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "abc") == 1) r |= 64;
+  if (p == 3) r |= 128;
+
+  if (r == 255) return 42;
+  return r;
+}

@@ -1,0 +1,133 @@
+﻿{
+    "n":  2097152,
+    "iters":  10,
+    "verdict":  true,
+    "backjump_ok":  true,
+    "ref":  {
+                "k1":  1048576,
+                "k3":  1048576,
+                "k2":  1572864
+            },
+    "runs":  [
+                 {
+                     "impl":  "O2",
+                     "exit":  0,
+                     "kv":  {
+                                "qpcraw":  24,
+                                "qpcns":  2400,
+                                "t2":  212255,
+                                "t1":  135735,
+                                "n":  2097152,
+                                "k3":  1048576,
+                                "qpf":  10000000,
+                                "i":  10,
+                                "k1":  1048576,
+                                "t3":  203780,
+                                "k2":  1572864
+                            },
+                     "backjumps":  75
+                 },
+                 {
+                     "impl":  "flint",
+                     "exit":  27262976,
+                     "kv":  {
+                                "qpcraw":  0,
+                                "i":  10,
+                                "t2":  1187795,
+                                "t1":  544082,
+                                "n":  2097152,
+                                "k3":  1048576,
+                                "qpf":  10000000,
+                                "value":  2097152,
+                                "k1":  1048576,
+                                "bytes":  4,
+                                "t3":  1529410,
+                                "k2":  1572864
+                            },
+                     "backjumps":  27
+                 },
+                 {
+                     "impl":  "O1",
+                     "exit":  0,
+                     "kv":  {
+                                "qpcraw":  26,
+                                "qpcns":  2600,
+                                "t2":  216483,
+                                "t1":  135900,
+                                "n":  2097152,
+                                "k3":  1048576,
+                                "qpf":  10000000,
+                                "i":  10,
+                                "k1":  1048576,
+                                "t3":  4,
+                                "k2":  1572864
+                            },
+                     "backjumps":  72
+                 }
+             ],
+    "rows":  [
+                 {
+                     "impl":  "O2",
+                     "kernel":  "k1",
+                     "ticks":  135735,
+                     "ns_per_iter":  6.4723,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "O2",
+                     "kernel":  "k2",
+                     "ticks":  212255,
+                     "ns_per_iter":  10.1211,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "O2",
+                     "kernel":  "k3",
+                     "ticks":  203780,
+                     "ns_per_iter":  9.717,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "flint",
+                     "kernel":  "k1",
+                     "ticks":  544082,
+                     "ns_per_iter":  25.9439,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "flint",
+                     "kernel":  "k2",
+                     "ticks":  1187795,
+                     "ns_per_iter":  56.6385,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "flint",
+                     "kernel":  "k3",
+                     "ticks":  1529410,
+                     "ns_per_iter":  72.928,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "O1",
+                     "kernel":  "k1",
+                     "ticks":  135900,
+                     "ns_per_iter":  6.4802,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "O1",
+                     "kernel":  "k2",
+                     "ticks":  216483,
+                     "ns_per_iter":  10.3227,
+                     "reliable":  true
+                 },
+                 {
+                     "impl":  "O1",
+                     "kernel":  "k3",
+                     "ticks":  4,
+                     "ns_per_iter":  null,
+                     "reliable":  false
+                 }
+             ]
+}

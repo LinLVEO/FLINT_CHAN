@@ -1,0 +1,12 @@
+struct C { int n; }
+void set5(struct C *c) {
+  int *p;
+  p = &c->n;
+  *p = 5;
+}
+int main() {
+  struct C c;
+  c.n = 1;
+  set5(&c);
+  return c.n;
+}

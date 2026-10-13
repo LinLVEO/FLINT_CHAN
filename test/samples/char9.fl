@@ -1,0 +1,11 @@
+int main() {
+  char c = 'A';
+  int i = 65;
+  int ok = 0;
+  if (c != i) return 1;
+  if (c < 200) c = 200;
+  for (char k = 0; k < 10; k++) ok = ok + 1;
+  if (ok != 10) return 2;
+  if (c == 200 && ok == 10) return 42;
+  return 3;
+}

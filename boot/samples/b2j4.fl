@@ -1,0 +1,19 @@
+// b2j4.fl — B2j 大字段偏移（>127 字节）自检：C 布局下 int v@248 → 必须走 disp32
+//   （旧 *_rcx 辅助只判 disp>=-128，正偏移 128..255 被错编成负 disp8 → 读写错地址）
+//   31 个指针字段 + 1 个 int 字段 = 32 字段上限；断言 f0 未被踩（仍 0）且 v=42：期望 42
+struct Big {
+  int *f0; int *f1; int *f2; int *f3; int *f4; int *f5; int *f6; int *f7;
+  int *f8; int *f9; int *f10; int *f11; int *f12; int *f13; int *f14; int *f15;
+  int *f16; int *f17; int *f18; int *f19; int *f20; int *f21; int *f22; int *f23;
+  int *f24; int *f25; int *f26; int *f27; int *f28; int *f29; int *f30; int v;
+}
+int main() {
+  struct Big b;
+  b.f0 = 0;
+  b.v = 0;
+  b.v = 42;
+  int *p = b.f0;
+  int r = 0;
+  if (p == 0) { r = 42; }
+  return r + b.v - 42;
+}

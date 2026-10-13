@@ -1,0 +1,4 @@
+// smoke1.fl — 冒烟：最简单的程序，返回 42
+int main() {
+  return 42;
+}

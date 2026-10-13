@@ -1,0 +1,8 @@
+// demo.fl —— 第 0 节实验样本（自己随手改，改坏了不影响任何测试）
+// 这份文件只在 test\learn\ 下玩；test\tmp\ 会被 run-tests.js 清空，别放那儿。
+int add(int a, int b) { return a + b; }
+
+int main() {
+  int x = 40;
+  return add(x, 2);
+}

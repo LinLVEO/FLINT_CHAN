@@ -1,0 +1,14 @@
+// apimod2.fl — 2026-09-21（卡 T-20260921-194703）：**带点模块名（字符串形式）与裸模块名混用**
+//   覆盖导入表 DLL 名的「布局预留 / 写出端判据」一致性 —— 两者不一致时，带点模块名之后
+//   每个 DLL 的 Name RVA 会整体后移 4 字节（`kernel32.dll` 变成 `el32.dll`），产物启动即
+//   **0xC0000135 STATUS_DLL_NOT_FOUND**、编译期零提示 ⇒ 期望退出码 42 只有在名字完整时才可能拿到。
+api "kernel32.dll" int GetCurrentProcessId();
+api kernel32 int GetCurrentThreadId();
+api kernel32 int GetTickCount();
+int main() {
+  int a = GetCurrentProcessId();
+  int b = GetCurrentThreadId();
+  int c = GetTickCount();
+  if (a > 0 && b > 0 && c > 0) return 42;
+  return 1;
+}

@@ -1,0 +1,5 @@
+// nb8.fl — 负例：new 暂只支持 new int（new char 必须报错）
+int main() {
+  int *p = new char;
+  return 0;
+}

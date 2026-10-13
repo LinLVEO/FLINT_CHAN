@@ -1,0 +1,12 @@
+// b2l3.fl — B2l 第二档：new int（判空 + 头部 refcount + 负载地址）
+int main() {
+  int *p = new int;
+  if (p == 0) { return 1; }
+  *p = 42;
+  int c = *(p - 8);              // 头部 refcount（裸指针 ± 是字节步进）
+  if (c != 1) { return 2; }
+  int *q = new int;
+  if (q == 0) { return 3; }
+  *q = 8;
+  return *p + *q - 8;            // 42 + 8 - 8 = 42
+}

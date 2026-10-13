@@ -1,0 +1,29 @@
+// msr_probe.fl — L2 第一锤：FLINT 经 WinRing0 驱动读 MSR（CPU 温度通道验证）
+// 链路：CreateFileA 打开 \\.\WinRing0_1_2_0 → DeviceIoControl(0x9C402084=READ_MSR)
+// 先读 MSR 0x10（TSC 时间戳）两次验证通道与 buffer 布局（TSC 每 ms 必增）
+// IOCTL：CTL_CODE(40000, 0x821, METHOD_BUFFERED=0, ANY_ACCESS=0) = 0x9C402084
+// 退出码：1=设备打不开 2=ioctl 失败 60=TSC 没增长（布局错） else = TSC 差/3000000（~100 表示 100ms 3GHz）
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int DeviceIoControl(int, int, int, int, int, int, int, int);
+api kernel32 int GetLastError();
+api kernel32 void Sleep(int);
+
+struct IN4 { int idx; }        // 输入：MSR 地址 4B（先试 4B 布局）
+struct OUT { int lo; int hi; } // 输出：eax / edx 各 4B
+
+int main() {
+  int *h = CreateFileA("\\\\.\\WinRing0_1_2_0", 0xC0000000, 0, 0, 3, 0, 0);
+  struct IN4 in;
+  struct OUT o1;
+  struct OUT o2;
+  int ret = 0;
+  in.idx = 0x10;                       // MSR TSC
+  int ok1 = DeviceIoControl(h, 0x9C402084, &in, 4, &o1, 8, &ret, 0);
+  Sleep(100);
+  int ok2 = DeviceIoControl(h, 0x9C402084, &in, 4, &o2, 8, &ret, 0);
+  if (h == 0) return 1;
+  if (ok1 == 0 || ok2 == 0) return 2;
+  int d = o2.lo - o1.lo;               // TSC 100ms 增量
+  if (d <= 0) return 60;
+  return d / 3000000;                  // ~100 = 100ms @ ~3GHz
+}

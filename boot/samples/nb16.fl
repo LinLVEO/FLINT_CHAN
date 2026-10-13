@@ -1,0 +1,6 @@
+// nb16.fl — B2m 负例：非指针字段不能下标（s.n 是 int）
+struct S { int n; int *p; }
+int main() {
+  struct S s;
+  return s.n[0];
+}

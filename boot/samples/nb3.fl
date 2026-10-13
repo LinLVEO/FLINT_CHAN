@@ -1,0 +1,2 @@
+api kernel32 int;
+int main() { return 0; }

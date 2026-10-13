@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- 缝合工程：把 LibreHardwareMonitor（C#）编成原生 DLL，供 FLINT 浮窗用 api 导入表直调。
+         配方来源 = tmp\cs-aot-probe（2026-09-16 收口，40/40 稳定 + FLINT 产物直调 60/60）：
+         NativeAOT Shared + 自造 CRT 垫片(crtshim.obj) + lld-link + /ENTRY:_DllMainCRTStartup。
+         ⚠️ 垫片的前置 TLS 块大小 0x1000 绝不能动（见 FLINT明细.md §4.7）。 -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>HwBridge</AssemblyName>
+    <RootNamespace>HwBridge</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <!-- LHM 里 WMI/性能计数器那几块不 AOT 友好；我们只开 CPU/GPU，用不到它们，噪声降级成单条警告 -->
+    <TrimmerSingleWarn>true</TrimmerSingleWarn>
+    <NoWarn>$(NoWarn);IL2026;IL3050;CS8500</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ⚠️ EnableDefaultCompileItems=false ⇒ 新增 .cs **必须显式登记**，否则编译器根本看不到它
+         （2026-09-17 踩：PresentMonFps.cs 没登记 → CS0103"当前上下文中不存在名称 PresentMonFps"，
+          现象像命名空间写错，实际是文件没进编译）。 -->
+    <Compile Include="HwBridge.cs" />
+    <Compile Include="PresentMonFps.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <LinkerArg Include="/LIBPATH:E:\FLINT-lab\tmp\cs-aot-probe\sdk\microsoft.windows.sdk.cpp.x64\c\ucrt\x64" />
+    <LinkerArg Include="/LIBPATH:E:\FLINT-lab\tmp\cs-aot-probe\sdk\microsoft.windows.sdk.cpp.x64\c\um\x64" />
+    <LinkerArg Include="E:\FLINT-lab\tmp\cs-aot-probe\shim\crtshim.obj" />
+    <LinkerArg Include="E:\mingw64\x86_64-w64-mingw32\lib\libmsvcrt.a" />
+    <LinkerArg Include="E:\mingw64\x86_64-w64-mingw32\lib\libmingwex.a" />
+    <LinkerArg Include="@E:\FLINT-lab\tmp\cs-aot-probe\shim\altnames.rsp" />
+    <LinkerArg Include="/ENTRY:_DllMainCRTStartup" />
+    <LinkerArg Include="/NODEFAULTLIB:LIBCMT" />
+    <LinkerArg Include="/NODEFAULTLIB:OLDNAMES" />
+    <LinkerArg Include="/NODEFAULTLIB:libcpmt" />
+  </ItemGroup>
+</Project>

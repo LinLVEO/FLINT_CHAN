@@ -1,0 +1,6 @@
+// nb30.fl — B4a 负例：for init 声明后缺 ';'（boot 必须报错 -192）
+int main() {
+  int s = 0;
+  for (int i = 0 i < 3; i++) { s = s + i; }
+  return s;
+}

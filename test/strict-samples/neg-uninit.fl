@@ -1,0 +1,5 @@
+// neg-uninit.fl -- -strict ②: 读一个从声明到现在从没赋过值的局部量
+int main() {
+  int x;
+  return x;
+}

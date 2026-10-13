@@ -1,0 +1,6 @@
+// learn-bug-a2.fl —— 对照：赋值路径（应该编译期报错「不能把 double 赋给 int」）
+int main() {
+  int n;
+  n = 7.5;
+  return 0;
+}

@@ -1,0 +1,96 @@
+﻿{
+    "exe":  "E:\\FLINT-lab\\bench\\bench_one_O2.exe",
+    "window_bytes":  10240,
+    "insns":  2686,
+    "code_bytes":  2686,
+    "bytes_per_insn":  1,
+    "mem":  1723,
+    "stack":  797,
+    "pushpop":  110,
+    "reg_only":  319,
+    "calls":  137,
+    "jumps":  334,
+    "bad_bytes":  0,
+    "hist":  [
+                 {
+                     "mn":  "mov",
+                     "n":  929
+                 },
+                 {
+                     "mn":  "add",
+                     "n":  304
+                 },
+                 {
+                     "mn":  "nop",
+                     "n":  153
+                 },
+                 {
+                     "mn":  "call",
+                     "n":  137
+                 },
+                 {
+                     "mn":  "jmp",
+                     "n":  113
+                 },
+                 {
+                     "mn":  "cmp",
+                     "n":  105
+                 },
+                 {
+                     "mn":  "je",
+                     "n":  84
+                 },
+                 {
+                     "mn":  "lea",
+                     "n":  77
+                 },
+                 {
+                     "mn":  "jne",
+                     "n":  71
+                 },
+                 {
+                     "mn":  "push",
+                     "n":  60
+                 },
+                 {
+                     "mn":  "test",
+                     "n":  54
+                 },
+                 {
+                     "mn":  "sub",
+                     "n":  53
+                 },
+                 {
+                     "mn":  "ret",
+                     "n":  51
+                 },
+                 {
+                     "mn":  "pop",
+                     "n":  50
+                 },
+                 {
+                     "mn":  "movl",
+                     "n":  49
+                 },
+                 {
+                     "mn":  "shl",
+                     "n":  37
+                 },
+                 {
+                     "mn":  "cmpq",
+                     "n":  29
+                 },
+                 {
+                     "mn":  "ja",
+                     "n":  26
+                 },
+                 {
+                     "mn":  "and",
+                     "n":  23
+                 },
+                 {
+                     "mn":  "movslq",
+                     "n":  23
+                 }
+             ]
+}

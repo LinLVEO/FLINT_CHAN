@@ -1,0 +1,9 @@
+// b4a4.fl — B4a for 语句（boot 侧差分）：空条件（for (;;) = 恒真）+ 空段组合
+int main() {
+  int i = 0;
+  for (;;) {
+    i = i + 1;
+    if (i > 41) return 42;                                 // 靠 return 退出
+  }
+  return 1;
+}

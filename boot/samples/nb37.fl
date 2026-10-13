@@ -1,0 +1,12 @@
+// nb37.fl — 2026-09-20（卡 T-20260920-144154）：**struct 指针声明符重复 `*`** = 编译期报错（双端一致）
+//   真 flint 实测：`struct P *a, *b;` 在第 2 个 `*` 处报「期望变量名」
+//   ⇒ 只有 int/char 基础类型放行「后续声明符自带 `*`」，struct 指针不放行（decl_cont_spec 按 base 分档）。
+struct P { int x; int y; }
+int main() {
+  struct P v;
+  struct P *a, *b;
+  a = &v;
+  b = &v;
+  a->x = 3;
+  return a->x;
+}

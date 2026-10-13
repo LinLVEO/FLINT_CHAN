@@ -1,0 +1,6 @@
+// nb13.fl — 负例：托管指针不能拷贝给裸指针
+int main() {
+  int *own p = new int;
+  int *q = p;
+  return 0;
+}

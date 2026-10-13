@@ -1,0 +1,16 @@
+// audit1.fl — v1.0.6.1 盲区审计 A1：指针 ++/-- 全 64 位（表达式值语义）
+// 修复前：++/-- 直接路径 32 位读/自增 → 数据段指针（>4GB）截断，值路径解引用 0xC0000005 崩
+int main() {
+  char *p = "abcd";       // 数据段地址 >4GB
+  char *q = p++;          // 后缀值 = 旧地址（'a'）；p → 'b'
+  if (*q != 'a') return 1;
+  if (*p != 'b') return 2;
+  char *r = ++p;          // 前缀值 = 新地址（'c'）
+  if (*r != 'c') return 3;
+  char *s = p--;          // 后缀值 = 旧地址（'c'）；p → 'b'
+  if (*s != 'c') return 4;
+  if (*p != 'b') return 5;
+  char *t = --p;          // 前缀值 = 新地址（'a'）
+  if (*t != 'a') return 6;
+  return 0;
+}

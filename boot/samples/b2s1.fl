@@ -1,0 +1,29 @@
+// b2s1.fl — B2s：boot 编译标准库第二批 fmt/math（差分样本：boot 与真 flint 必须同为 42）
+include "../../lib/fmt_lib.fl"
+include "../../lib/math_lib.fl"
+include "../../lib/str_lib.fl"
+
+int main() {
+  int r = 0;
+  char buf[64];
+  int p = 0;
+
+  p = std::fmt_str(buf, p, "v=");
+  p = std::fmt_int(buf, p, std::clamp(150, 0, 100));
+  p = std::fmt_char(buf, p, '%');
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "v=100%") == 1) r |= 1;
+
+  if (std::percent(3, 4) == 75) r |= 2;
+  if (std::abs(-9) == 9) r |= 4;
+  if (std::min(2, 5) == 2) r |= 8;
+  if (std::max(2, 5) == 5) r |= 16;
+
+  p = 0;
+  p = std::fmt_hex(buf, p, 255);
+  std::fmt_end(buf, p);
+  if (std::streq(buf, "ff") == 1) r |= 32;
+
+  if (r == 63) return 42;
+  return r;
+}

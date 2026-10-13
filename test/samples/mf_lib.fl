@@ -1,0 +1,3 @@
+// mf_lib.fl — 多文件库：纯函数（无 api）
+int lib_add(int a, int b) { return a + b; }
+int lib_mul3(int a, int b, int c) { return a * b * c; }

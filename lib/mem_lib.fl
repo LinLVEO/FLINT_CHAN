@@ -1,0 +1,29 @@
+// mem_lib.fl — FLINT 标准库（第一批）：字节块
+// 用法：include "../../lib/mem_lib.fl"（路径相对本文件目录解析）
+// 命名：2026-09-09 用户定（原则 7 便利性第一）——惯用短名，见 SPEC「标准库」节
+// 约定：n = 字节数（不是元素个数）
+
+// 复制 n 字节，返回 n
+int std::memcpy(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return n;
+}
+
+// 前 n 字节填 val 的低 8 位，返回 n
+int std::memset(char *dst, int val, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = val; i = i + 1; }
+  return n;
+}
+
+// 前 n 字节全部相等 → 1；否则 0（n = 0 → 1）
+int std::memcmp(char *a, char *b, int n) {
+  int i = 0;
+  int r = 1;
+  while (i < n && r == 1) {
+    if (a[i] != b[i]) { r = 0; }
+    else { i = i + 1; }
+  }
+  return r;
+}

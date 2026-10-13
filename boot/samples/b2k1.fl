@@ -1,0 +1,77 @@
+// b2k1：复合赋值全形态（B2k）——int 变量 / char 标量 / 本地数组 / 本地 char 数组 /
+//   char* 元素 / 指针元素 / 本地 struct 字段 / 指针 -> 字段（含 char 字段）/ *q 解引用
+//   注：FLINT 不能声明 struct 指针局部变量 → 指针字段访问走 struct* 形参函数
+struct S { int a; int *p; char c; }
+int bump(struct S *pv) {
+  pv->a = 40;
+  pv->a += 2;
+  pv->c = 40;
+  pv->c += 2;
+  return 0;
+}
+int main() {
+  int ok = 0;
+  int x = 40;
+  x += 2;
+  if (x == 42) { ok += 1; }
+
+  int y = 100;
+  y -= 58;
+  if (y == 42) { ok += 1; }
+  y *= 2;
+  if (y == 84) { ok += 1; }
+  y /= 2;
+  if (y == 42) { ok += 1; }
+  y &= 0x2A;
+  if (y == 42) { ok += 1; }
+  y ^= 1;
+  y ^= 1;
+  if (y == 42) { ok += 1; }
+  y |= 2;
+  y <<= 1;
+  y >>= 1;
+  if (y == 42) { ok += 1; }
+
+  char c = 40;
+  c += 2;
+  if (c == 42) { ok += 1; }
+
+  int arr[4];
+  arr[1] = 40;
+  arr[1] += 2;
+  if (arr[1] == 42) { ok += 1; }
+
+  char buf[4];
+  buf[0] = 40;
+  buf[0] += 2;
+  if (buf[0] == 42) { ok += 1; }
+
+  char *s = buf;
+  s[1] = 40;
+  s[1] += 2;
+  if (s[1] == 42) { ok += 1; }
+
+  int *q = arr;
+  q[2] = 40;
+  q[2] += 2;
+  if (q[2] == 42) { ok += 1; }
+
+  struct S v;
+  v.a = 40;
+  v.a += 2;
+  if (v.a == 42) { ok += 1; }
+  v.c = 40;
+  v.c += 2;
+  if (v.c == 42) { ok += 1; }
+
+  bump(&v);
+  if (v.a == 42 && v.c == 42) { ok += 1; }
+
+  int *d = arr;
+  *d = 40;
+  *d += 2;
+  if (*d == 42) { ok += 1; }
+
+  if (ok == 16) { return 42; }
+  return ok;
+}

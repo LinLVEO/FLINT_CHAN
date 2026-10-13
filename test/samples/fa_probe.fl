@@ -1,0 +1,15 @@
+// fa_probe.fl — v0.9.3 函数地址机制基础验证：&函数名 = 代码地址（lea rip-rel 布局后回填）
+// 判据：91 = 地址为 0；92 = 存进 ptr 变量后不等（64 位往返）；93 = 经 struct ptr 字段不一致
+struct Cell { int tag; int *fn; }
+int target() { return 7; }
+int other() { return 8; }
+int main() {
+  int *fp = &target;              // 函数地址 → ptr 变量（64 位）
+  if (fp == 0) return 91;         // 地址非 0
+  if (fp == &other) return 92;    // 不同函数地址不同（回填正确性：target/other 起点不同）
+  struct Cell c;
+  c.tag = 1;
+  c.fn = &target;                 // 地址进 struct ptr 字段（64 位间接写）
+  if (c.fn != fp) return 93;      // 字段读回一致
+  return 0;
+}

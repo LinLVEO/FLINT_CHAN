@@ -1,0 +1,2 @@
+// b2v_b.fl — B2v include 去重样本：被 b2v_a.fl 与 b2v1.fl 各 include 一次
+int b2v_b_val() { return 40; }

@@ -1,0 +1,39 @@
+// wndproc_probe.fl — v0.9.3 回调机制端到端实证：FLINT 函数地址进 WNDCLASS.lpfnWndProc，
+// Windows 真实调用 FLINT 写的 WNDPROC（CreateWindowExA 同步送达 WM_NCCREATE/WM_CREATE）
+// 链路：类型层 struct C 布局（WNDCLASS 10 字段）+ ptr 字段 64 位写 + &函数名 + 真实回调
+// 判据：90 = 注册失败（结构体布局/字段错）；91 = 创建失败（回调未正确处理）；
+//       92 = GetMessageA 出错（-1）；退出码 42 = PostQuitMessage(42) 全链成功
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int GetMessageA(int, int, int, int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 void PostQuitMessage(int);
+// WNDCLASSA（x64 C 布局：style@0 int4B → lpfn@8 指针 → cb×2@16/20 → 6 个指针 @24..64，size 72）
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+// MSG（x64：hwnd@0 ptr, message@8 int, wparam@16 ptr, lparam@24 ptr, time@32 int, pt@36 int×2）
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 1) { PostQuitMessage(42); return 0; }   // WM_CREATE → 排队退出 42
+  return DefWindowProcA(hwnd, msg, wp, lp);          // 其余交系统默认处理
+}
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;                 // 回调地址（函数地址 64 位进 ptr 字段）
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTWND";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0, "FLINTWND", "FLINT callback", 0x00CF0000, 80, 80, 300, 200, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  struct MSG m;
+  int r = GetMessageA(&m, 0, 0, 0);
+  // ⚠️ 队列里 WM_QUIT 前可能还有普通消息——实测取到 m.message=799=0x31F
+  // (WM_DWMNCRENDERINGCHANGED，DWM 合成在创建带边框窗口时排队)，
+  // 单次 GetMessageA 只返回 r>0 而非 0 → 必须消息循环取到 r==0（WM_QUIT）才算结束
+  while (r > 0) { r = GetMessageA(&m, 0, 0, 0); }
+  if (r < 0) return 92;             // GetMessage 出错
+  return m.wparam;                  // 42（wparam ptr 字段 64 位读 → 低 32 位作退出码）
+}

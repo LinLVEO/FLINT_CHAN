@@ -1,0 +1,8 @@
+// ctrl9.fl — 条件 return：函数内多分支返回（if 里 return 后仍有代码）
+int main() {
+  int x = 42;
+  if (x == 42) {
+    return 7;   // 提前 return，下面代码不该执行
+  }
+  return 99;
+}

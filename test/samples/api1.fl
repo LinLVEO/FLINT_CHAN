@@ -1,0 +1,9 @@
+// api1.fl — v0.8 API 声明墙实证：调 user32!MessageBoxA 弹窗
+// api 声明须在文件最顶部：api <模块短名> <返回> <函数名>(int 占位...)
+api user32 int MessageBoxA(int, int, int, int);
+
+int main() {
+  // MessageBoxA(NULL, 文本, 标题, MB_OK) —— 文本/标题是字符串地址(64 位)
+  MessageBoxA(0, "FLINT 撞开 API 声明墙！这是纯自产机器码调的 Win32 弹窗", "FLINT v0.8", 0);
+  return 0;
+}

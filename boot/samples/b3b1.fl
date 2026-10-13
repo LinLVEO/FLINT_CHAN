@@ -1,0 +1,40 @@
+// b3b1 — B3b 函数返回指针（对齐真 flint 决策 35）：int* / char* / struct* 返回
+//   用法覆盖：赋值给指针变量 / 作实参 / 指针比较 / 直接下标 f()[i] / struct* 结果传参
+struct Node { int val; int *next; }
+int *idp(int *p) {
+  return p;
+}
+char *tail(char *p) {
+  return p + 1;                       // 裸指针 ± 是字节步进（B2k 语义）→ 指向 b[1]
+}
+int first(int *p) {
+  return p[0];
+}
+struct Node *mk(struct Node *p) {
+  return p;
+}
+int vof(struct Node *p) {
+  return p->val;
+}
+int main() {
+  int r = 0;
+  int a[3];
+  a[0] = 7; a[1] = 9; a[2] = 11;
+  int *q = idp(a);
+  if (q[0] == 7) { r |= 1; }
+  if (q[1] == 9) { r |= 2; }
+  if (idp(a)[2] == 11) { r |= 4; }        // 调用结果直接下标
+  if (first(idp(a)) == 7) { r |= 8; }     // 作实参
+  if (idp(a) == a) { r |= 16; }           // 指针比较
+  char b[4];
+  b[0] = 'A'; b[1] = 'B'; b[2] = 0;
+  char *t = tail(b);
+  if (t[0] == 'B') { r |= 32; }
+  if (tail(b)[0] == 'B') { r |= 64; }     // char* 返回直接下标
+  struct Node n;
+  n.val = 42;
+  n.next = 0;
+  if (vof(mk(&n)) == 42) { r |= 128; }    // struct* 返回作实参
+  if (r != 255) return 1;
+  return 42;
+}

@@ -1,0 +1,285 @@
+// m2_float.fl — 浮窗 M2 黑底白字版：FLINT 直读系统 + 硬件（全真实数据）
+// CPU 占用：GetSystemTimes 每秒差值；内存：GlobalMemoryStatusEx dwMemoryLoad
+// CPU 温度：WinRing0 READ_MSR 0x19C DTS − TjMax(0x1A2)
+// CPU 频率：每帧 TSC(0x10) 差 ÷ QPC 差 × QPF（帧长抖动抵消，物理可靠）
+// 磁盘：GetDiskFreeSpaceA 簇计数（32 位安全，免 64 位除法）
+// 交互：左键拖、右键退出、常驻置顶半透明黑底白字
+api kernel32 ptr GetModuleHandleA(int);
+api kernel32 void Sleep(int);
+api kernel32 int GetSystemTimes(int, int, int);
+api kernel32 int GlobalMemoryStatusEx(int);
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int DeviceIoControl(int, int, int, int, int, int, int, int);
+api kernel32 int GetDiskFreeSpaceA(int, int, int, int, int);
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 int FillRect(int, int, int);
+api user32 int SetLayeredWindowAttributes(int, int, int, int);
+api user32 int GetCursorPos(int);
+api user32 int GetWindowRect(int, int);
+api user32 int MoveWindow(int, int, int, int, int, int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int SetBkMode(int, int);
+api gdi32 int SetTextColor(int, int);
+api gdi32 int TextOutA(int, int, int, int, int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct RECT { int l; int t; int r; int b; }
+struct C { int ch; }
+struct P { int x; int y; }
+struct FT { int lo; int hi; }
+struct MEM { int f0; int f1; int f2; int f3; int f4; int f5; int f6; int f7;
+             int f8; int f9; int f10; int f11; int f12; int f13; int f14; int f15; }
+struct IN4 { int idx; }
+struct OUT { int lo; int hi; }
+struct Q { int lo; int hi; }
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int putnum(int *dc, int x, int y, int n) {
+  struct C c;
+  int k = n / 1000;          // 千位（频率 4 位数需要）
+  int h = (n / 100) % 10;
+  int t = (n / 10) % 10;
+  int o = n % 10;
+  int px = x;
+  if (k != 0) { c.ch = '0' + k; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  if (k != 0 || h != 0) { c.ch = '0' + h; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  if (k != 0 || h != 0 || t != 0) { c.ch = '0' + t; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  c.ch = '0' + o; TextOutA(dc, px, y, &c, 1);
+  return 0;
+}
+
+int rdmsr(int *hd, int idx, struct OUT *o) {
+  struct IN4 in;
+  int ret = 0;
+  in.idx = idx;
+  return DeviceIoControl(hd, 0x9C402084, &in, 4, o, 8, &ret, 0);
+}
+
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTFLOAT4";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0x00080008, "FLINTFLOAT4", "", 0x80000000, 300, 180, 140, 158, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  SetLayeredWindowAttributes(h, 0, 215, 2);
+  ShowWindow(h, 1);
+  int *hd = CreateFileA("\\\\.\\WinRing0_1_2_0", 0xC0000000, 0, 0, 3, 0, 0);
+  struct MSG m;
+  int running = 1;
+  int dragging = 0;
+  int sx0 = 0; int sy0 = 0;
+  int wx0 = 0; int wy0 = 0;
+  struct P pt;
+  struct RECT wr;
+  struct RECT client; client.l = 0; client.t = 0; client.r = 140; client.b = 158;
+  struct C pc;
+  struct FT pi; struct FT pk; struct FT pu;
+  struct FT ci; struct FT ck; struct FT cu;
+  struct MEM mem;
+  struct OUT mo;
+  struct OUT mh;   // v1.0.3.1 频率：0xCE/0x198 读数（别覆盖 0x10 的 mo）
+  struct IN4 min;
+  struct Q qf; struct Q q1; struct Q q2;
+  int ret = 0;
+  int tick = 0;
+  int frame = 0;
+  int cpu = 0;
+  int mload = 0;
+  int tjmax = 100;
+  int temp = 0;
+  int tvalid = 0;
+  int dsk = 0;
+  int mhz = 0;
+  int have_prev = 0;
+  int ts_prev = 0;
+  int q_prev = 0;
+  int bclk100 = 0;   // v1.0.3.1 BCLK×100（TSC ÷ 0xCE 最大非睿频倍频，校准一次）
+  // RAPL 功耗状态
+  int esu_div = 0;      // 2^esu
+  int pwr = 0;
+  int ep_prev = 0;      // 周期起点能量计数（低 32）
+  int qe_prev = 0;      // 周期起点 QPC
+  int ep_have = 0;
+  QueryPerformanceFrequency(&qf);   // qf.lo 给 RAPL 换算用
+  // 磁盘（C:）簇数
+  int spc = 0; int bps = 0; int dfree = 0; int dtot = 0;
+  GetDiskFreeSpaceA("C:\\", &spc, &bps, &dfree, &dtot);
+  int dscale = dtot / 100;
+  if (dscale > 0) dsk = 100 - dfree / dscale;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;
+      if (m.message == 0x204) running = 0;
+      if (m.message == 0x201) {
+        dragging = 1;
+        GetCursorPos(&pt); sx0 = pt.x; sy0 = pt.y;
+        GetWindowRect(h, &wr); wx0 = wr.l; wy0 = wr.t;
+      }
+      // ⚠️ MOUSEMOVE 不在此 MoveWindow（拖动时消息洪水→每消息一次重贴=卡）：
+      // 拖动收敛到渲染帧统一执行（每 16ms 一次 MoveWindow）
+      if (m.message == 0x202) dragging = 0;
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      // 拖动：每帧（16ms）一次 MoveWindow，bRepaint=0（不自绘内容由本帧渲染接管）
+      if (dragging) {
+        GetCursorPos(&pt);
+        MoveWindow(h, wx0 + pt.x - sx0, wy0 + pt.y - sy0, 140, 158, 0);
+      }
+      // 频率：每 15 帧（~240ms）采样一次（每帧 DeviceIoControl 进内核太频）
+      // v1.0.3.1 修正：实时频率 = 0x198 当前倍频 × BCLK——TSC(0x10) 是 invariant 恒定值
+      // （本机 2.69G = 27×BCLK），核心睿频 3.1G 它不动，原「TSC÷QPC×QPF/1e6」永远偏低
+      if (hd != 0 && frame % 15 == 0) {
+        min.idx = 0x10;
+        if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+          QueryPerformanceCounter(&q1);
+          if (have_prev) {
+            int dts = mo.lo - ts_prev;
+            int dq = q1.lo - q_prev;
+            if (dts > 0 && dq > 0) {
+              if (bclk100 == 0) {
+                // BCLK×100 = TSC MHz(商+余数 1MHz 精度) ×100 / 最大非睿频倍频(0xCE)
+                int tscm = (dts / dq) * 10 + ((dts % dq) * 10) / dq;
+                int nt = 27;
+                min.idx = 0xCE;
+                if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mh, 8, &ret, 0) != 0) {
+                  int t = (mh.lo >> 8) & 0xFF;
+                  if (t >= 8 && t <= 60) nt = t;
+                }
+                bclk100 = tscm * 100 / nt;
+                if (bclk100 < 5000 || bclk100 > 20000) bclk100 = 0;
+              }
+              min.idx = 0x198;
+              if (bclk100 > 0 &&
+                  DeviceIoControl(hd, 0x9C402084, &min, 4, &mh, 8, &ret, 0) != 0) {
+                int ratio = (mh.lo >> 8) & 0xFF;   // 当前倍频（睿频档变化实时跟）
+                if (ratio >= 8 && ratio <= 60) mhz = ratio * bclk100 / 100;
+              }
+            }
+          }
+          ts_prev = mo.lo;
+          q_prev = q1.lo;
+          have_prev = 1;
+        }
+      }
+      if (tick == 0) {
+        GetSystemTimes(&pi, &pk, &pu);
+        mem.f0 = 64;
+        GlobalMemoryStatusEx(&mem);
+        mload = mem.f1;
+        // RAPL：周期起点记能量计数 + QPC
+        if (hd != 0 && esu_div == 0) {
+          min.idx = 0x606;
+          if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+            int esu = (mo.lo >> 8) & 0x1F;
+            if (esu > 0 && esu <= 20) esu_div = 1 << esu;
+          }
+        }
+        if (hd != 0 && esu_div > 0) {
+          min.idx = 0x611;
+          if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+            ep_prev = mo.lo;
+            QueryPerformanceCounter(&q1);
+            qe_prev = q1.lo;
+            ep_have = 1;
+          }
+        }
+      }
+      tick++;
+      if (tick >= 60) {
+        GetSystemTimes(&ci, &ck, &cu);
+        int dk = ck.lo - pk.lo;
+        int du = cu.lo - pu.lo;
+        int di = ci.lo - pi.lo;
+        if (dk >= 0 && du >= 0 && di >= 0) {
+          int total = dk + du;
+          int busy = total - di;
+          if (total > 0 && busy >= 0 && busy <= total) cpu = busy * 100 / total;  // busy 越界不更新（防负值→乱码字符）
+        }
+        if (hd != 0) {
+          min.idx = 0x1A2;
+          if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+            int t = (mo.lo >> 16) & 0xFF;
+            if (t != 0) tjmax = t;
+          }
+          min.idx = 0x19C;
+          if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+            if (((mo.lo >> 31) & 1) != 0) {
+              temp = tjmax - ((mo.lo >> 16) & 0x7F);
+              tvalid = 1;
+            }
+          }
+        }
+        // RAPL 功耗：周期末能量差 × QPC 校正 → W
+        if (hd != 0 && esu_div > 0 && ep_have) {
+          min.idx = 0x611;
+          if (DeviceIoControl(hd, 0x9C402084, &min, 4, &mo, 8, &ret, 0) != 0) {
+            QueryPerformanceCounter(&q1);
+            int dc = mo.lo - ep_prev;
+            int dq = q1.lo - qe_prev;
+            if (dc > 0 && dq > 0) pwr = (dc / esu_div) * qf.lo / dq;
+          }
+          ep_have = 0;
+        }
+        tick = 0;
+      }
+      int *dc = GetDC(h);
+      FillRect(dc, &client, GetStockObject(4));        // 黑底
+      SetBkMode(dc, 1);                                // TRANSPARENT：文字不填背景（防白框）
+      SetTextColor(dc, 0x00FFFFFF);                    // 白字
+      // CPU 占用
+      TextOutA(dc, 10, 8, "CPU", 3);
+      putnum(dc, 48, 8, cpu);
+      pc.ch = '%'; TextOutA(dc, 76, 8, &pc, 1);
+      // 内存
+      TextOutA(dc, 10, 34, "MEM", 3);
+      putnum(dc, 48, 34, mload);
+      pc.ch = '%'; TextOutA(dc, 76, 34, &pc, 1);
+      // CPU 温度
+      TextOutA(dc, 10, 60, "TMP", 3);
+      if (tvalid) {
+        putnum(dc, 48, 60, temp);
+        pc.ch = 'C'; TextOutA(dc, 76, 60, &pc, 1);
+      } else {
+        TextOutA(dc, 48, 60, "--", 2);
+      }
+      // CPU 频率
+      TextOutA(dc, 10, 86, "MHZ", 3);
+      if (mhz > 0) putnum(dc, 48, 86, mhz);
+      // 磁盘
+      TextOutA(dc, 10, 112, "DSK", 3);
+      putnum(dc, 48, 112, dsk);
+      pc.ch = '%'; TextOutA(dc, 76, 112, &pc, 1);
+      // 整机功耗（RAPL）
+      TextOutA(dc, 10, 138, "PWR", 3);
+      if (pwr > 0) {
+        putnum(dc, 48, 138, pwr);
+        pc.ch = 'W'; TextOutA(dc, 76, 138, &pc, 1);
+      }
+      ReleaseDC(h, dc);
+      frame++;
+      Sleep(16);
+    }
+  }
+  return 0;
+}

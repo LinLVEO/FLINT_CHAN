@@ -1,0 +1,40 @@
+// sfield1.fl — v1.0.9 结构体指针字段直接下标 s.arr[i] / p->arr[i]
+// 位掩码成绩单（每项 r |= 2^k，退出码即二进制结果；期望 63 = 六项全过）
+// ① . 形态读  ② -> 形态读（跨函数）  ③ 写穿透到真实数组  ④ 复合赋值（+=）
+// ⑤ &s.arr[i] 取址后经 *e 写  ⑥ 与旧局部化写法 `int *q = s.arr; q[i]` 等价
+struct S { int *arr; int n; }
+
+int get_i(struct S *p, int i) {
+  return p->arr[i];            // ② -> 形态直接下标读
+}
+
+int set_i(struct S *p, int i, int v) {
+  p->arr[i] = v;               // ③ -> 形态直接下标写
+  return 0;
+}
+
+int add_i(struct S *p, int i, int d) {
+  p->arr[i] += d;              // ④ 直接下标复合赋值
+  return p->arr[i];
+}
+
+int main() {
+  int a[4];
+  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+  struct S s;
+  s.arr = a;
+  s.n = 4;
+
+  int r = 0;
+  if (s.arr[0] == 1) r |= 1;               // ①
+  if (get_i(&s, 3) == 4) r |= 2;           // ②
+  set_i(&s, 1, 20);
+  if (a[1] == 20) r |= 4;                  // ③ 写穿透
+  if (add_i(&s, 2, 100) == 103) r |= 8;    // ④
+  int *e = &s.arr[3];                      // ⑤ 取址
+  *e = 7;
+  if (a[3] == 7) r |= 16;
+  int *q = s.arr;                          // ⑥ 旧局部化写法等价性
+  if (q[0] == s.arr[0] && q[1] == s.arr[1] && q[2] == s.arr[2]) r |= 32;
+  return r;
+}

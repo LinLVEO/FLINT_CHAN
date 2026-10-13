@@ -1,0 +1,9 @@
+// inc_main.fl — include 指令：拼接 inc_lib.fl（相对本文件目录解析）
+include "inc_lib.fl"
+
+int main() {
+  int a = inc_helper(20);          // 41
+  int u = inc_uptime(1000);        // 开机秒数（库的 api 前移后可用）
+  if (u >= 0 && u < 4000000) return a - 20;   // 21
+  return 1;
+}

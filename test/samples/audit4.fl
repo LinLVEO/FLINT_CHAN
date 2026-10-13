@@ -1,0 +1,75 @@
+// audit4.fl — v1.0.6.2 盲区审计 A4：char 数组 + struct char 字段 + int 共存于会 return 的普通函数
+// 帧布局回归：v0.9.2 教训「块变量布局方向与帧相反 + main 永不返回掩盖」→ 样本必须放会 return 的函数
+// 大 char 帧 N 扫描 64~400 全过（无 v1.0.4 非单调崩重现）；char 写 i>=256 截断低字节（A2 语义）
+struct M { char tag; char c2; int n; }
+
+int small(int seed) {                 // 小混合帧：char buf + struct char 字段 + int arr
+  char buf[16];
+  struct M m;
+  int arr[6];
+  m.tag = 65; m.c2 = 0x7E; m.n = 999;
+  for (int i = 0; i < 16; i++) buf[i] = i * 3;
+  for (int i = 0; i < 6; i++) arr[i] = seed + i;
+  if (m.tag != 65) return 1;
+  if (m.c2 != 0x7E) return 2;
+  if (m.n != 999) return 3;
+  if (buf[15] != 45) return 4;
+  if (arr[5] != seed + 5) return 5;
+  buf[3] = buf[3] + 1;
+  m.tag = m.tag + 1;
+  arr[1] = arr[1] + 1;
+  if (buf[3] != 10) return 6;         // 9+1
+  if (m.tag != 66) return 7;
+  if (arr[1] != seed + 2) return 8;
+  return 0;
+}
+
+int touch(struct M *mp, int seed) {   // 跨函数 struct 指针：callee 改 caller 对象 + 自带混合帧
+  char lbuf[64];
+  int li[8];
+  for (int i = 0; i < 64; i++) lbuf[i] = i;
+  for (int i = 0; i < 8; i++) li[i] = seed + i;
+  mp->tag = mp->tag + 1;
+  mp->c2 = mp->c2 + 2;
+  mp->n = mp->n + seed;
+  if (mp->tag != 66) return 1;
+  if (mp->c2 != 0x80) return 2;
+  if (mp->n != 999 + seed) return 3;
+  if (lbuf[63] != 63) return 4;
+  if (li[7] != seed + 7) return 5;
+  return 0;
+}
+
+int big(int seed) {                   // 大 char 帧（300 槽）+ struct + int 混合 + 调 touch
+  char buf[300];
+  struct M m;
+  int arr[24];
+  m.tag = 65; m.c2 = 0x7E; m.n = 999;
+  for (int i = 0; i < 300; i++) buf[i] = i & 255;
+  for (int i = 0; i < 24; i++) arr[i] = seed + i;
+  if (m.tag != 65) return 1;
+  if (m.n != 999) return 2;
+  if (buf[299] != 43) return 3;       // 299 & 255
+  if (buf[0] != 0) return 4;
+  if (buf[255] != 255) return 5;
+  if (buf[256] != 0) return 6;        // 256 & 255 = 0（char 写截断）
+  if (arr[23] != seed + 23) return 7;
+  int r = touch(&m, seed);
+  if (r != 0) return 100 + r;
+  if (m.tag != 66) return 8;
+  if (m.n != 999 + seed) return 9;
+  if (buf[5] != 5) return 10;
+  return 0;
+}
+
+int main() {
+  int r = small(100);
+  if (r != 0) return r;
+  r = small(7);
+  if (r != 0) return 100 + r;
+  r = big(3);
+  if (r != 0) return 200 + r;
+  r = big(77);
+  if (r != 0) return 300 + r;
+  return 0;
+}

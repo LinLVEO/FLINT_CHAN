@@ -1,0 +1,2 @@
+// nb25 — B3b 负例：main 必须返回 int（真 flint 同样拒绝：main 必须返回 int）
+int *main() { return 0; }

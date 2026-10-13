@@ -1,0 +1,11 @@
+// nb36.fl — 2026-09-20（卡 T-20260920-144154）：**struct 值多声明** = 编译期报错（双端口径一致）
+//   真 flint 实测：`struct P s;` 放行，但 `struct P s, t;` 在第 2 个名字处报「期望 ';'」
+//   ⇒ boot 必须同样拒绝（本条是**负例 + 双端口径断言**：多声明家族一度让 boot 静默放行这一形态，
+//      那会变成「boot 比真 flint 宽」的静默分岔 —— 差分门看不见这种形态，只能靠负例钉住）。
+struct P { int x; int y; }
+int main() {
+  struct P s, t;
+  s.x = 3;
+  t.y = 4;
+  return s.x + t.y;
+}

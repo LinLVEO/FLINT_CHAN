@@ -1,0 +1,152 @@
+// flgui6.fl — FLGUI M4b 无头行为成绩单④：**可编辑文本域**（聚焦 / 打字 / 退格 / 回车确认 / Esc 取消 / 点外面失焦 / 光标条 / 满上限）
+//   与 flgui1~flgui5 同一个范式：**不建窗**，合成输入喂 gui_begin，命令表与文本缓冲 dump 成文本 → 双端逐字节对账。
+// ⚠️ 键盘行为有**两层**判据，别混：
+//   · 本样本管**库内核的编辑账本**（谁被删、内容回滚、聚焦谁）—— 输入是**合成的**（直接写 `in.key`）。
+//   · 平台层那条路（`WM_CHAR` / `WM_KEYDOWN` 真消息）由**真窗口**判据管（demo 真窗版手打 + `gui_win_pump` 注释）。
+//   理由同滚轮那次翻车：脚本化输入**绕过平台层**，看不见平台层缺口。
+// ⚠️ 交互帧的坐标**由产物自己算出来**（`gui_cmd_x/y[1]` = 盒命令），不手写常量 —— 本项目踩过三次的坑。
+//
+// 帧序（每帧 = 一次 `ef()` = gui_begin→控件→gui_end→dump；共 16 帧）：
+//   1 空文本、未聚焦 ｜2 点进盒子 ⇒ 聚焦 ｜3~5 打字 a b c ｜6 退格 ｜7 回车确认
+//   8 读数自证（长度 + 命令表文本长度）｜9 Esc 回滚 ｜10 重新点进盒子 ｜11 点盒子外 ⇒ 失焦（内容保留）
+//   12 未聚焦时打字 ⇒ 忽略 ｜13 点回去聚焦（maxlen 3）｜14~16 满上限：收 x、拒 y、拒 z
+// 位图（全亮 = 1048575，共 20 位）：
+//   0 初始长度 0 ｜1 未聚焦 ⇒ 无光标条
+//   2 点进盒子 ⇒ 聚焦 ｜3 聚焦 ⇒ 命令表出现光标条 kind 15
+//   4 打字 ⇒ 长度 = 3 ｜5 命令表里文本长度 = 3 ｜6 打字时焦点还在（光标条仍在）｜7 退格 ⇒ 长度 2
+//   8 回车 ⇒ 返回 1 ｜9 回车 ⇒ 失焦 ｜10 回车 ⇒ 内容固化（"ab" 不是空）｜11 回车后不再有光标条
+//   12 Esc ⇒ 返回 2 ｜13 Esc ⇒ 失焦 ｜14 Esc ⇒ 回滚到 "ab"（长度 2，既不是 3 也不是 0）
+//   15 点盒子外 ⇒ 失焦 ｜16 失焦后内容保留（长度 2）｜17 未聚焦时打字被忽略（长度仍 2）
+//   18 满上限：收下第 3 个字符 ｜19 满上限：第 4/5 个字符被拒（长度停在 3）
+include "flgui_widgets.fl"
+
+// 画一帧：盒子里放一个可编辑文本域（slot 0），返回本帧控件返回值
+int ef(struct GuiCtx *c, struct GuiInput *in, int maxlen) {
+  int r = 0;
+  gui_begin(c, in);
+  gui_label(c, "edit");
+  r = gui_textfield_edit(c, 0, maxlen);
+  gui_end(c);
+  return r;
+}
+
+// 数命令表里某 kind 的条数
+int count_kind(int kind) {
+  int i = 0;
+  int n = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == kind) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int res = 0;
+  int bx = 0;
+  int by = 0;
+  int ox = 0;
+  int oy = 0;
+  int r = 0;
+  int r2 = 0;
+
+  gui_init(&c);
+  c.lay_w = 120;
+  c.lay_h = 120;
+  gui_edit_init(0, "", 16);                      // 空文本起步
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.key = 0; in.ms = 0;
+
+  // ---- 帧 1：空、未聚焦；顺带取出盒子坐标（命令 0 = label，命令 1 = 盒，命令 2 = 盒内文本，命令 3 = 光标条）----
+  ef(&c, &in, 16);
+  gui_dump(&c);
+  bx = gui_cmd_x[1] + gui_cmd_w[1] / 2;
+  by = gui_cmd_y[1] + gui_cmd_h[1] / 2;
+  if (gui_edit_size(0) == 0) { res = res | 1; }
+  if (count_kind(15) == 0) { res = res | 2; }
+
+  // ---- 帧 2：点进盒子 ⇒ 聚焦 + 出现光标条 ----
+  in.mx = bx; in.my = by; in.down = 1; in.pressed = 1; in.released = 0;
+  ef(&c, &in, 16);
+  gui_dump(&c);
+  if (gui_edit_focused(&c) == 0) { res = res | 4; }
+  if (count_kind(15) == 1) { res = res | 8; }
+
+  // ---- 帧 3~5：打字 a / b / c ----
+  in.down = 0; in.pressed = 0; in.released = 0;
+  in.key = 97; ef(&c, &in, 16);
+  in.key = 98; ef(&c, &in, 16);
+  in.key = 99; ef(&c, &in, 16);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 3) { res = res | 16; }
+  if (gui_cmd_tlen[2] == 3) { res = res | 32; }
+  if (gui_cmd_kind[3] == 15) { res = res | 64; }
+  in.key = 0;
+
+  // ---- 帧 6：退格 ⇒ 删掉 'c' ----
+  in.key = 8; ef(&c, &in, 16);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 2) { res = res | 128; }
+  in.key = 0;
+
+  // ---- 帧 7：回车确认 ⇒ 返回 1、失焦、内容固化成新基线、光标条消失 ----
+  in.key = 13; r = ef(&c, &in, 16);
+  gui_dump(&c);
+  if (r == 1) { res = res | 256; }
+  if (gui_edit_focused(&c) == 0 - 1) { res = res | 512; }
+  if (gui_edit_size(0) == 2) { res = res | 1024; }
+  if (count_kind(15) == 0) { res = res | 2048; }
+  in.key = 0;
+
+  // ---- 帧 8：重新点进盒子（回车已失焦）⇒ 又聚焦；打 'z' 后 Esc ⇒ 回滚到基线 "ab" ----
+  in.down = 1; in.pressed = 1;
+  ef(&c, &in, 16);
+  in.down = 0; in.pressed = 0;
+  in.key = 122; ef(&c, &in, 16);
+  in.key = 27; r2 = ef(&c, &in, 16);
+  gui_dump(&c);
+  if (r2 == 2) { res = res | 4096; }
+  if (gui_edit_focused(&c) == 0 - 1) { res = res | 8192; }
+  if (gui_edit_size(0) == 2) { res = res | 16384; }   // "ab"（不是 3 = "abz"，也不是 0）
+  in.key = 0;
+
+  // ---- 帧 9：点盒子**外面** ⇒ 失焦但内容保留 ----
+  // 坐标取"盒子下方再空一行"（同一个框高 + 间距），由盒命令自报的矩形算出来，不手写常量；
+  // ⚠️ 别用"同一行同一 y 猜坐标"：光标条是 1px，y 差一点就落到盒子外，判据会变成"点外面"的假绿。
+  ox = 6;
+  oy = gui_cmd_y[1] + gui_cmd_h[1] + c.spacing + 2;
+  in.mx = ox; in.my = oy; in.down = 1; in.pressed = 1;
+  ef(&c, &in, 16);
+  gui_dump(&c);
+  if (gui_edit_focused(&c) == 0 - 1) { res = res | 32768; }
+  in.down = 0; in.pressed = 0;
+
+  // ---- 帧 10：未聚焦时打字 ⇒ 被忽略 ----
+  in.key = 65; ef(&c, &in, 16);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 2) { res = res | 65536; }
+  in.key = 0;
+
+  // ---- 帧 11：点回去聚焦，换 maxlen = 3（当前 "ab" ⇒ 只剩 1 个字节额度）----
+  // ⚠️ 点之前必须先把 down 清 0：上一帧（第 10 帧）是"点外面"那帧，没收尾 ⇒ 直接再按会被判成"一直按着"（pressed 恒 0）
+  in.down = 0; in.pressed = 0;
+  in.mx = bx; in.my = by; in.down = 1; in.pressed = 1;
+  ef(&c, &in, 3);
+  in.down = 0; in.pressed = 0;
+
+  // ---- 帧 12~14：满上限：收 'x'（满）、拒 'y'、拒 'z' ----
+  in.key = 120; ef(&c, &in, 3);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 3) { res = res | 131072; }
+  in.key = 121; ef(&c, &in, 3);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 3) { res = res | 262144; }
+  in.key = 122; ef(&c, &in, 3);
+  gui_dump(&c);
+  if (gui_edit_size(0) == 3) { res = res | 524288; }
+  in.key = 0;
+
+  if (res == 1048575) { return 42; }
+  return res;
+}

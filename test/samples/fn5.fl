@@ -1,0 +1,8 @@
+int main() {
+  return double_it(21);
+}
+int double_it(int x) {
+  int y;
+  y = x * 2;
+  return y;
+}

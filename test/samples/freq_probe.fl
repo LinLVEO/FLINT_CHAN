@@ -1,0 +1,19 @@
+// freq_probe.fl — CPU 实时频率验证：MSR 0x198 (IA32_PERF_STATUS) 当前倍频 ratio
+// Ivy Bridge-EP：bits 47:40 = ratio（edx bits 8-15）→ MHz = ratio × 100
+// 退出码 = ratio（期望 27-35，E5-2680 v2 基准 27 睿频 ~35）
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int DeviceIoControl(int, int, int, int, int, int, int, int);
+struct IN4 { int idx; }
+struct OUT { int lo; int hi; }
+int main() {
+  int *h = CreateFileA("\\\\.\\WinRing0_1_2_0", 0xC0000000, 0, 0, 3, 0, 0);
+  if (h == 0) return 1;
+  struct IN4 in;
+  struct OUT o;
+  int ret = 0;
+  in.idx = 0x198;
+  if (DeviceIoControl(h, 0x9C402084, &in, 4, &o, 8, &ret, 0) == 0) return 2;
+  int ratio = (o.hi >> 8) & 0xFF;   // bits 47:40
+  if (ratio == 0) return 3;
+  return ratio;                     // ×100 = MHz
+}

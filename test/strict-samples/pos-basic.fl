@@ -1,0 +1,11 @@
+// pos-basic.fl -- -strict 正例：常规代码一条都不许报（for 内声明 / 数组下标 / 函数调用）
+int add(int a, int b) { return a + b; }
+int main() {
+  int sum = 0;
+  for (int i = 1; i <= 10; i++) {
+    sum = sum + i;
+  }
+  int a[4];
+  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+  return add(sum, a[3]);
+}

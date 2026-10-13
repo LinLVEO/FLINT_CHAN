@@ -1,0 +1,11 @@
+// ctrl2.fl — if/else 走 else 分支：a=3 不大于 5 → 2
+int main() {
+  int a = 3;
+  int r = 0;
+  if (a > 5) {
+    r = 1;
+  } else {
+    r = 2;
+  }
+  return r;
+}

@@ -1,0 +1,7 @@
+// mf_api_lib.fl — 库文件自带 api 声明（写在自己文件顶部）+ 封装函数
+api kernel32 int GetTickCount(int);
+
+int lib_secs(int div) {
+  int ms = GetTickCount(0);
+  return ms / div;
+}

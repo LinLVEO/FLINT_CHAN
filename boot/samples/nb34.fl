@@ -1,0 +1,9 @@
+// nb34.fl — v1.4.31（卡 T-20260918-014653）：**指针目标接纯 int 值** = 编译期报错
+//   口径对齐真 flint 的 T1 ④ 门槛（src\codegen.c check_ptr_target）：白名单 = 地址类值 / 显式常量 /
+//   API 或指针返回的调用 / new / 「装过地址的 int」变量；`int n = 5; int *p = n;` 不在白名单里。
+//   修复前：boot 静默编译通过并产出**截断指针**（真 flint 一直拒绝）—— 双端口径不一致。
+int main() {
+  int n = 5;
+  int *p = n;
+  return 42;
+}

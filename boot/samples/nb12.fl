@@ -1,0 +1,6 @@
+// nb12.fl — 负例：own 指针不能重新赋值
+int main() {
+  int *own p = new int;
+  p = 0;
+  return 0;
+}

@@ -1,0 +1,7 @@
+// pos-t1int.fl -- -strict 正例：T1 允许的「装地址的 int」中转，不许被 -strict 误伤
+int main() {
+  int x = 7;
+  int t = &x;
+  int *p = t;
+  return *p;
+}

@@ -1,0 +1,7 @@
+// t_bit.fl — B2h 位运算样本：期望 23
+int main() {
+  int a = 1;
+  int b = 3;
+  int c = (a << 4) + (b >> 1) + (a & b) + (a | b) + (a ^ b) + (~0 + 1);
+  return c;
+}

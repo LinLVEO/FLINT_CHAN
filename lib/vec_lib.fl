@@ -1,0 +1,103 @@
+// vec_lib.fl -- FLINT standard library: generic vector (8-byte slot container)
+//
+// Design = route V1 "8-byte slot + pass-by-address" (user decision 2026-09-17,
+// task T-20260917-201506). Why not the C-like "int slot + type erasure" route:
+// FLINT rejects addresses flowing through int (T1, compile-time, by design) --
+// probe tmp\vectest\probe_ptr.fl shows the exact diagnostic. So a slot is filled
+// by ADDRESS instead: the caller passes &value and the library copies 8 bytes.
+//
+// A slot holds ANY 8-byte quantity losslessly: int / double / pointer / fn pointer.
+// Verified before writing this file (tmp\vectest\, real flint, run_exit=42 both):
+//   probe_slotA.fl  int value round trip through an 8-byte slot copy
+//   probe_slotC.fl  POINTER round trip (MEM_TOP_DOWN address > 4GB) -> high 32 bits kept
+//
+// Block layout -- handle is a char* to the block start, header is two 8-byte slots:
+//   slot 0 = len   (element count)
+//   slot 1 = cap   (element capacity)
+//   slot 2+ = elements;  element i lives at byte offset 16 + 8*i
+//   (elements live INSIDE the same block, so growth is one memcpy + one free)
+//
+// Public API (names approved by user 2026-09-17):
+//   char *std::vec_new(int cap)                  cap < 1 -> 4; 0 on allocation failure
+//   char *std::vec_push(char *v, int *valptr)    MAY MOVE -> always write back: v = vec_push(v,&x)
+//   char *std::vec_get(char *v, int i)           element slot address; 0 = out of range
+//   int   std::vec_len(char *v)
+//   int   std::vec_free(char *v)                 releases the block, returns 0
+//
+// !! vec_push copies the 8 bytes AT CALL TIME. Never pass the address of a dead local,
+//    and never keep the address you passed in -- only the 8 bytes survive.
+// Internal helpers vec_iset / vec_iget are NOT public API (slot access by index).
+// Every slot write goes through a caller-side variable, never through a parameter slot:
+// a parameter slot's upper bytes are not guaranteed clean, and a dirty 8-byte copy
+// would poison the element.
+//
+// Memory comes from VirtualAlloc (the established way in this repo: boot\b1_emit.fl,
+// apps\m2_float\main.fl, and hw.fl already declare it). No external library is borrowed.
+
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+include "mem_lib.fl"
+
+// --- internal: write/read one 8-byte slot at index slot ---
+int vec_iset(char *v, int slot, int *valptr) {
+  std::memcpy(v + slot * 8, valptr, 8);
+  return 0;
+}
+
+int vec_iget(char *v, int slot) {
+  int x = 0;
+  std::memcpy(&x, v + slot * 8, 8);
+  return x;
+}
+
+char *std::vec_new(int cap) {
+  if (cap < 1) { cap = 4; }
+  char *v = VirtualAlloc(0, 16 + cap * 8, 0x3000, 4);
+  if (v == 0) { return 0; }
+  int zero = 0;
+  vec_iset(v, 0, &zero);
+  vec_iset(v, 1, &cap);
+  return v;
+}
+
+int std::vec_len(char *v) {
+  if (v == 0) { return 0; }
+  return vec_iget(v, 0);
+}
+
+// address of element i (caller copies 8 bytes out of it), 0 if out of range
+char *std::vec_get(char *v, int i) {
+  if (v == 0) { return 0; }
+  if (i < 0) { return 0; }
+  if (i >= vec_iget(v, 0)) { return 0; }
+  return v + 16 + i * 8;
+}
+
+// append the 8 bytes pointed to by valptr; returns the (possibly moved) handle
+char *std::vec_push(char *v, int *valptr) {
+  if (v == 0) { return 0; }
+  if (valptr == 0) { return v; }
+  int len = vec_iget(v, 0);
+  int cap = vec_iget(v, 1);
+  if (len >= cap) {
+    int ncap = 4;
+    if (cap >= 1) { ncap = cap * 2; }
+    char *nv = VirtualAlloc(0, 16 + ncap * 8, 0x3000, 4);
+    if (nv == 0) { return v; }
+    std::memcpy(nv, v, 16 + len * 8);
+    VirtualFree(v, 0, 0x8000);
+    v = nv;
+    vec_iset(v, 1, &ncap);
+  }
+  std::memcpy(v + 16 + len * 8, valptr, 8);
+  int nlen = len + 1;
+  vec_iset(v, 0, &nlen);
+  return v;
+}
+
+int std::vec_free(char *v) {
+  if (v == 0) { return 0; }
+  VirtualFree(v, 0, 0x8000);
+  return 0;
+}

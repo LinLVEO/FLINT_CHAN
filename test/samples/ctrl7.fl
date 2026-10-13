@@ -1,0 +1,12 @@
+// ctrl7.fl — 短路 || 触发右侧：返回 1
+int main() {
+  int a = 0;
+  int b = 7;
+  int r;
+  if (a != 0 || b > 5) {
+    r = 1;
+  } else {
+    r = 0;
+  }
+  return r;
+}

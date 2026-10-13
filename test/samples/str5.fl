@@ -1,0 +1,10 @@
+// str5.fl — 子函数字符串排布（跨 ctx：main ctx0 先行，foo ctx1 随后）
+// main 的 "M" 先排（2B），foo 的 "N" 后排 → foo() 返回地址 - a = 2
+int foo() {
+  return "N";
+}
+int main() {
+  int a = "M";
+  int d = foo();
+  return d - a;
+}

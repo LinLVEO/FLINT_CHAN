@@ -1,0 +1,1 @@
+int main() { char buf[4]; char *p = buf; buf[0] = 1; buf[1] = 2; buf[3] = 5; p[2] = 30; return buf[0] + buf[1] + buf[2] + buf[3] + 4; }

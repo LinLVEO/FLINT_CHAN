@@ -1,0 +1,53 @@
+// ptr64_1.fl — v1.4.4：**64 位地址往返**回归（本轮"返回指针 API"排查的固化）
+// 为什么要有这条测试：查 GetIfTable2 崩溃时发现的关键约束——
+//   **输出参数若要接 64 位地址，必须落在「结构体的指针字段」里**（int 槽只有 4 字节，装不下地址，
+//    而 FLINT 又禁止把 32 位 int 当指针用）→ 这条测试把该用法钉死，防止以后回退。
+// 手法：GlobalMemoryStatusEx 把 64 位物理内存字节数写进缓冲；把它的**低/高 32 位**分别读进两个 int；
+//   再用结构体的指针字段做一次「地址往返」（指向一个真实数组），验证解引用读到的值正确。
+// 退出码：位掩码成绩单（全对 = 31）
+//   bit0: 低 32 位 > 0（缓冲被真写入了）
+//   bit1: 总内存 GB 数落在合理区间 1..1024（用高/低两半算出，证明高低位都能读）
+//   bit2: 结构体指针字段指向数组后，p[0] 读到 4242
+//   bit3: p[1] 读到 7（相邻元素独立）
+//   bit4: 把该指针字段通过函数参数传出去后仍可解引用（-> 形态）
+struct MEM64 { int lo0; int lo1; int lo2; int lo3; int lo4; int lo5; int lo6; int lo7;
+               int lo8; int lo9; int lo10; int lo11; int lo12; int lo13; int lo14; int lo15; }
+struct Holder { int *ptr; int n; }
+
+api kernel32 int GlobalMemoryStatusEx(int);
+
+int readv(struct Holder *h) {
+  int *p = h->ptr;
+  return p[0] + p[1];
+}
+
+int main() {
+  struct MEM64 m;
+  struct Holder h;
+  int a[4];
+  int r = 0;
+  int total_lo = 0;
+  int total_hi = 0;
+  int gb = 0;
+
+  m.lo0 = 64;
+  GlobalMemoryStatusEx(&m);
+  total_lo = m.lo2;          // ullTotalPhys 低 32 位（偏移 8）
+  total_hi = m.lo3;          // ullTotalPhys 高 32 位（偏移 12）
+
+  if (total_lo != 0 || total_hi != 0) r = r | 1;
+
+  // GB = (hi*2^32 + lo) >> 30 ≈ hi*4 + lo>>30
+  gb = total_hi * 4 + ((total_lo >> 30) & 3);
+  if (gb >= 1 && gb <= 1024) r = r | 2;
+
+  a[0] = 4242;
+  a[1] = 7;
+  h.ptr = a;
+  h.n = 2;
+  if (h.ptr[0] == 4242) r = r | 4;
+  if (h.ptr[1] == 7) r = r | 8;
+  if (readv(&h) == 4249) r = r | 16;
+
+  return r;
+}

@@ -1,0 +1,7 @@
+// nb18.fl — B2n 负例：&f(1) 取「调用结果」的地址（非法；boot 与真 flint 都必须报错）
+int f(int x) { return x; }
+
+int main() {
+  int *p = &f(1);
+  return 0;
+}

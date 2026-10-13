@@ -1,0 +1,27 @@
+// char_itotest.fl — char 应用消化验证：include 共享库后跨函数字节写 + 逐字节断言
+include "../../lib/num_lib.fl"
+
+int main() {
+  char b[24];
+  int L;
+  L = std::itoa(12345, b);            // "12345"
+  if (L != 5) return 1;
+  if (b[0] != '1') return 2;
+  if (b[4] != '5') return 3;
+  L = std::itoa(0, b);                // "0"
+  if (L != 1) return 4;
+  if (b[0] != '0') return 5;
+  L = std::itoa(-42, b);              // "-42"
+  if (L != 3) return 6;
+  if (b[0] != '-') return 7;
+  if (b[1] != '4') return 8;
+  if (b[2] != '2') return 9;
+  L = std::itoa(7, b);                // "7"（短写后旧字节不读）
+  if (L != 1) return 10;
+  if (b[0] != '7') return 11;
+  L = std::itoa(-2147483647, b);      // "-2147483647"（最坏长度 11）
+  if (L != 11) return 12;
+  if (b[0] != '-') return 13;
+  if (b[10] != '7') return 14;
+  return 0;
+}

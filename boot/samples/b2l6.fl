@@ -1,0 +1,21 @@
+// b2l6.fl — B2l 第二档 2/2：own 出口清理 + share 引用计数（与真 flint 差分对照）
+int f() {
+  int *own p = new int;
+  *p = 7;
+  return *p;
+}
+int g() {
+  int *share p = new int;
+  *p = 5;
+  int *share q = p;
+  int c = *(p - 8);              // 引用计数应为 2
+  if (c != 2) { return 1; }
+  *q = 30;
+  return *p;                     // 30（出口：q-- → 1，p-- → 0 → 释放）
+}
+int main() {
+  int x = f();
+  int y = g();
+  if (y != 30) { return 1; }
+  return x * 6;                  // 7 * 6 = 42
+}

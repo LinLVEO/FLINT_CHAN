@@ -1,0 +1,13 @@
+// s1_probe.fl — 验证 pe.c 多 DLL IAT 槽序 bug（子代理 S1 指控，v2 确定性判据）
+// 声明交错：user32 在前、kernel32 在后 → api_slot 声明序 vs 布局组内序错位
+//   apis[0]=GetSystemMetrics(user32) slot1，布局却排 group1(槽2)；
+//   调用点按 api_slot[0]=1 → iat_slot_rva[1]=group0 的 GetTickCount → 错路由！
+// 判据：正确=SM_CXSCREEN≈1920（<20000）；错路由=GetTickCount 开机毫秒（>60000）
+api user32 int GetSystemMetrics(int);
+api kernel32 int GetTickCount();
+
+int main() {
+  int w = GetSystemMetrics(0);
+  if (w > 60000) return 99;   // 错路由证据：拿到的是开机毫秒数
+  return 0;
+}

@@ -1,0 +1,2 @@
+struct P { int x; int x; }
+int main() { return 0; }

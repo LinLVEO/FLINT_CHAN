@@ -1,0 +1,14 @@
+struct Point { int x; int y; }
+void swap_xy(struct Point *p) {
+  int t;
+  t = p->x;
+  p->x = p->y;
+  p->y = t;
+}
+int main() {
+  struct Point p;
+  p.x = 10;
+  p.y = 7;
+  swap_xy(&p);
+  return p.x * 10 + p.y;
+}

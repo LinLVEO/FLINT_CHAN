@@ -1,0 +1,7 @@
+// b4b2 — B4b：print 段按返回类型分派（char 值返回 → 字符段，不是十进制）
+char f() { return 'A'; }
+
+int main() {
+  print([f(), f()], 1);           // 期望 stdout = "AA\n"
+  return 42;
+}

@@ -1,0 +1,56 @@
+// align2_probe.fl — 回归：API 调用出现在「外层压栈未消费」位置仍须 rsp≡0（v1.0.4.1）
+// 修前：gen_apicall 预留恒 16 对齐——二元右操作数（左值已压栈）或 FLINT 调用后求值参数
+// （先求值参数已压栈）里的 API call 在 rsp≡8 处执行 → movaps 类 API（RegisterClassW）崩；
+// 现有测试只把 API 放左操作数/直接语句，从未覆盖。修后：进入 ≡8 时预留 +8 垫。
+// 本探针：CreateWindowExA 作二元 rhs（`0 + CreateWindowExA(...)`）建窗 + 消息泵自退。
+api kernel32 ptr GetModuleHandleA(int);
+api kernel32 void Sleep(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct W { int *cls; int *h; }
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+int make_window(struct W *w) {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = w->cls;
+  if (RegisterClassA(&wc) == 0) return 0;
+  // API 在二元运算右操作数（左值 0 已压栈 → 进入 ≡8）；修前 FF15 ≡8 → RegisterClassW 崩
+  w->h = 0 + CreateWindowExA(0x00080008, w->cls, "", 0x80000000, 100, 100, 120, 120, 0, 0, 0, 0);
+  if (w->h == 0) return 0;
+  ShowWindow(w->h, 1);
+  return 1;
+}
+int main() {
+  struct W w;
+  struct MSG m;
+  int running = 1;
+  int frames = 0;
+  w.cls = "ALIGN2";
+  w.h = 0;
+  if (!make_window(&w)) return 91;
+  if (w.h == 0) return 92;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;
+      if (running) DispatchMessageA(&m);
+    }
+    frames++;
+    if (frames > 60) running = 0;
+    Sleep(5);
+  }
+  return 0;
+}

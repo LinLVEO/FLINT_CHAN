@@ -1,0 +1,6 @@
+int main() {
+  char c = 0xFF;
+  c >>= 4;
+  if (c != 15) return 1;
+  return 15;
+}

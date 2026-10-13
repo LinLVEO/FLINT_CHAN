@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FLINT Studio v4 · 专用编辑器</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <h1>FLINT Studio</h1>
+    <span class="tag">v4 · 专用编辑器</span>
+  </div>
+  <div class="actions">
+    <button class="mini icon-btn" id="toggleLeft" title="收起 / 展开文件栏（Ctrl+B）">◧</button>
+    <button class="mini icon-btn" id="toggleRight" title="收起 / 展开结果栏（Ctrl+Alt+B）">◨</button>
+    <button id="newBtn" class="btn" title="清空到新文件">✚ 新建</button>
+    <input id="pathInput" placeholder="另存为：相对工作区的路径.fl" spellcheck="false" autocomplete="off">
+    <button id="saveBtn" class="btn" title="Ctrl+S">💾 保存</button>
+    <select id="sampleSel" title="加载示例"><option value="">— 示例 —</option></select>
+    <button id="compileBtn" class="btn primary" title="Ctrl+Enter">▶ 编译运行</button>
+  </div>
+</header>
+
+<main>
+  <!-- 左：工作区 + 文件树（可搜索） -->
+  <aside class="files-pane">
+    <div class="ws-bar" id="wsBar" title="当前工作区（文件树 / 打开 / 保存 / 编译都相对它）">
+      <span class="ws-label">工作区</span>
+      <span class="ws-path" id="wsPath">…</span>
+      <button class="mini" id="wsChangeBtn" title="换成任意文件夹">更换</button>
+    </div>
+    <div class="files-head">
+      <span id="filesHeadLabel">项目文件</span>
+      <span class="files-count" id="filesCount">…</span>
+    </div>
+    <input id="fileFilter" class="file-filter" placeholder="过滤文件名（支持路径片段）…" spellcheck="false" autocomplete="off">
+    <label class="file-all"><input type="checkbox" id="showAllFiles"> 全部文件（含非 .fl）</label>
+    <div class="file-tree" id="fileTree"><div class="file-empty">加载中…</div></div>
+  </aside>
+
+  <div class="splitter" id="splitL" title="拖动改宽 · 双击收起文件栏"></div>
+
+  <!-- 中：代码 + stdin -->
+  <section class="editor-pane">
+    <div class="pane-head">
+      <span class="dot" id="dirtyDot"></span>
+      <span class="pane-title" id="fileName">untitled.fl</span>
+      <span class="pane-hint">Ctrl+Enter 编译 · Ctrl+S 保存 · Ctrl+F 查找 · Ctrl+/ 注释 · Tab 缩进</span>
+      <span class="pane-stat" id="stat">行 1, 列 1</span>
+    </div>
+
+    <div class="findbar hidden" id="findbar">
+      <input id="findInput" placeholder="查找…" spellcheck="false" autocomplete="off">
+      <span class="find-count" id="findCount">0/0</span>
+      <button class="mini" id="findPrev" title="上一个 (Shift+Enter)">↑</button>
+      <button class="mini" id="findNext" title="下一个 (Enter)">↓</button>
+      <span class="find-sep"></span>
+      <input id="replaceInput" placeholder="替换为…" spellcheck="false" autocomplete="off">
+      <button class="mini" id="replaceOneBtn" title="替换当前并跳到下一个">替换</button>
+      <button class="mini" id="replaceAllBtn" title="全部替换（可 Ctrl+Z 撤销）">全部</button>
+      <button class="mini" id="findClose" title="关闭 (Esc)">✕</button>
+    </div>
+
+    <div class="code-area">
+      <div class="gutter" id="gutter"></div>
+      <div class="code-wrap">
+        <pre class="hl" id="hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off"
+          placeholder="// 写你的 FLINT 程序&#10;include &quot;num_lib.fl&quot;&#10;int main() {&#10;  print([&quot;hello &quot;, std::itoa(42), &quot;\n&quot;]);&#10;  return 0;&#10;}"></textarea>
+      </div>
+    </div>
+    <div class="io-pane">
+      <div class="io-head">程序输入（stdin）— 交互式程序用它喂输入，一行一条</div>
+      <textarea id="stdin" spellcheck="false" placeholder="例：&#10;1&#10;1001&#10;Alice&#10;90&#10;0"></textarea>
+    </div>
+  </section>
+
+  <div class="splitter" id="splitR" title="拖动改宽 · 双击收起结果栏"></div>
+
+  <!-- 右：结果 + 标准库速查 -->
+  <aside class="result-pane">
+    <div class="tabs">
+      <button class="tab active" data-tab="out">运行输出</button>
+      <button class="tab" data-tab="log">编译信息</button>
+      <button class="tab" data-tab="hex">机器码 .text</button>
+      <button class="tab" data-tab="dis">反汇编</button>
+      <button class="mini zoom-btn" id="zoomBtn" title="全屏看当前页签（Esc 关）">⤢ 放大</button>
+    </div>
+    <div class="tab-body" id="tabOut"><div class="placeholder">Ctrl+Enter 编译运行，程序 print 的内容显示在这里</div></div>
+    <div class="tab-body hidden" id="tabLog"><div class="placeholder">编译日志会显示在这里</div></div>
+    <div class="tab-body hidden" id="tabHex"><div class="placeholder">编译成功后显示自产 exe 的 .text 字节</div></div>
+    <div class="tab-body hidden" id="tabDis"><div class="placeholder">编译成功后显示 objdump -d -M intel 反汇编</div></div>
+    <div class="libs">
+      <div class="libs-head" id="libsHead" title="点击折叠 / 展开（看反汇编时腾地方）">标准库速查（点击插入 · 扫 lib\*.fl 自动生成）<span class="libs-toggle" id="libsToggle">▾</span></div>
+      <div class="libs-body" id="libsBody"></div>
+    </div>
+  </aside>
+</main>
+
+<!-- v4.2：页签全屏查看（右栏 380px 看反汇编太窄，放大到整屏） -->
+<div class="zoom-overlay hidden" id="zoomOverlay">
+  <div class="zoom-bar">
+    <span class="zoom-title" id="zoomTitle">放大查看</span>
+    <span class="zoom-hint">内容与右栏当前页签一致 · Esc 或点「关闭」退出</span>
+    <button class="mini" id="zoomClose">✕ 关闭</button>
+  </div>
+  <div class="zoom-body" id="zoomBody"></div>
+</div>
+
+<!-- v4：工作区选择器（任意文件夹；浏览器拿不到本地路径，所以用「服务端列目录」的方式浏览） -->
+<div class="modal hidden" id="wsModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span>选择工作区文件夹</span>
+      <button class="mini" id="wsClose" title="关闭 (Esc)">✕</button>
+    </div>
+    <div class="ws-nav">
+      <button class="mini" id="wsUp" title="上一级">↑ 上一级</button>
+      <input id="wsPathInput" placeholder="也可以直接粘绝对路径，如 E:\my-flint" spellcheck="false" autocomplete="off">
+      <button class="mini" id="wsGo">前往</button>
+    </div>
+    <div class="ws-roots" id="wsRoots"></div>
+    <div class="ws-dirs" id="wsDirs"><div class="file-empty">加载中…</div></div>
+    <div class="modal-foot">
+      <span class="ws-hint" id="wsHint"></span>
+      <button class="btn primary" id="wsUse">用这个文件夹</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

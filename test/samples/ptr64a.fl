@@ -1,0 +1,25 @@
+// ptr64a.fl — v0.9 64 位地址算术墙实证：VirtualAlloc(MEM_TOP_DOWN) 返回 >4GB 高地址
+// 指针 +8 解引用/链式加/复合加不再 32 位截断（截断 = 解引用到未映射地址 → 进程崩溃）
+// 期望退出码 0；分配失败返回 91（环境异常，非本测试目标）
+api kernel32 int VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+int main() {
+  int *p = VirtualAlloc(0, 4096, 0x103000, 4);  // NULL, 4096, RESERVE|COMMIT|TOP_DOWN, PAGE_READWRITE
+  if (p == 0) return 91;                        // 分配失败（64 位比较 p==0）
+  *(p) = 42;                                    // 首槽写（64 位地址直解引用）
+  *(p + 8) = 7;                                 // 第二槽写：p+8 必须 64 位算术（32 位截断 → 错址崩溃）
+  if (*(p) != 42) return 92;
+  if (*(p + 8) != 7) return 93;
+  int *q = p + 16;                              // 链式 64 位加
+  if (q == p) return 94;                        // 64 位比较
+  *(q) = 99;
+  if (*(p + 16) != 99) return 95;
+  int *r = p;
+  r += 24;                                      // 指针复合赋值（64 位路径）
+  if (r == p) return 96;
+  *(r) = 5;
+  if (*(p + 24) != 5) return 97;
+  VirtualFree(p, 0, 0x8000);                    // MEM_RELEASE 收尾
+  return 0;
+}

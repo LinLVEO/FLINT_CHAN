@@ -1,0 +1,8 @@
+// t_ptr2.fl — B2i 指针下标自检：期望 42
+int main() {
+  int a[4];
+  int *p = a;
+  int i = 0;
+  while (i < 4) { p[i] = i * 3; i = i + 1; }
+  return p[0] + p[1] + p[2] + p[3] + 24;
+}

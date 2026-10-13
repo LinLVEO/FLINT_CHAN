@@ -1,0 +1,5 @@
+// nb10.fl — 负例：own 必须初始化
+int main() {
+  int *own p;
+  return 0;
+}

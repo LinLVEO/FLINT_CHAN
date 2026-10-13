@@ -1,0 +1,6 @@
+// neg-width-arg.fl -- -strict ③a: 地址值(64 位)传给 int 形参（默认静默截断 = T1 遗留边界）
+int take(int v) { return v; }
+int main() {
+  int x = 7;
+  return take(&x);
+}

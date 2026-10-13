@@ -1,0 +1,127 @@
+// glyph.fl — 字形探针：文本自证（不截图、不建窗口）
+// 目的：确认 NET 行的两个箭头字节（GBK A1FD ↓ / A1FC ↑）在 Consolas 16px 下**有真实字形宽度**。
+//   若宽=0 或与 "?" 同宽 → 渲染成缺字框，NET 行会难看（C# 用 Unicode DrawString 没有这个问题）。
+// 方法：同一 DC 下量「箭头串」与「同长度纯 ASCII 串」的宽度并对比；另用 GetGlyphIndicesA 查字形索引
+//   （0xFFFF = 该代码页没有这个字形）。
+// 输出：E:\FLINT-lab\tmp\row-probe\glyph.txt
+api gdi32 ptr CreateCompatibleDC(int);
+api gdi32 ptr SelectObject(int, int);
+api gdi32 int GetTextExtentPoint32A(int, int, int, int);
+api gdi32 int GetTextFaceA(int, int, int);
+api gdi32 int GetGlyphIndicesA(int, int, int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+include "ui_lib.fl"
+
+char out[4096];
+int gpos = 0;
+
+int putc_(char b) { out[gpos] = b; gpos = gpos + 1; return gpos; }
+
+int puti(int v) {
+  char t[12];
+  int n = 0;
+  int i = 0;
+  if (v < 0) { putc_(45); v = 0 - v; }
+  if (v == 0) { putc_(48); return gpos; }
+  while (v > 0) { t[n] = 48 + (v - (v / 10) * 10); n = n + 1; v = v / 10; }
+  i = n - 1;
+  while (i >= 0) { putc_(t[i]); i = i - 1; }
+  return gpos;
+}
+
+int puts(char *s) {
+  int i = 0;
+  while (s[i] != 0) { putc_(s[i]); i = i + 1; }
+  return gpos;
+}
+
+int puthex(int v) {
+  char *hx = "0123456789ABCDEF";
+  putc_(hx[(v / 16) % 16]);
+  putc_(hx[v % 16]);
+  return gpos;
+}
+
+// 量一段字节串的宽度（返回 cx；cy 写进全局）
+int g_cy = 0;
+// 卡 T-20261012-210751（T1 第二刀）：DC 是地址类（CreateCompatibleDC 的返回值）⇒ 形参与持有者
+//   一律声明成 int *（SPEC 决策 17）。原先写成 int 形参 = 旧静默缺口，v1.4.27 起默认档硬错。
+int width(int *dc, char *s, int n) {
+  int sz[2];
+  sz[0] = 0; sz[1] = 0;
+  GetTextExtentPoint32A(dc, s, n, sz);
+  g_cy = sz[1];
+  return sz[0];
+}
+
+int main() {
+  int f = 0;
+  int w = 0;
+  int dc = 0;
+  int *memdc = 0;
+  int old = 0;
+  int hf = 0;
+  int i = 0;
+  int cw = 0;
+  char face[64];
+  char down[8];
+  char up[8];
+  char qq[8];
+  char aa[8];
+  int gi[2];
+  int cc[2];
+
+  face[0] = 0;
+  // 用屏幕 DC 建内存 DC（同 main.fl 的绘制路径）
+  dc = GetDC(0);
+  memdc = CreateCompatibleDC(dc);
+  hf = ui_font_make(16);
+  old = SelectObject(memdc, hf);
+  i = 0;
+  while (i < 64) { face[i] = 0; i = i + 1; }
+  GetTextFaceA(memdc, 64, face);
+  puts("font="); puts(face); putc_(10);
+
+  // 串：↓0K / ↑0K / ?0K / A0K
+  down[0] = 0xA1; down[1] = 0xFD; down[2] = '0'; down[3] = 'K'; down[4] = 0;
+  up[0] = 0xA1; up[1] = 0xFC; up[2] = '0'; up[3] = 'K'; up[4] = 0;
+  qq[0] = '?'; qq[1] = '0'; qq[2] = 'K'; qq[3] = 0;
+  aa[0] = 'A'; aa[1] = '0'; aa[2] = 'K'; aa[3] = 0;
+
+  cw = width(memdc, down, 2);
+  puts("width(A1FD 2B)="); puti(cw); puts(" cy="); puti(g_cy); putc_(10);
+  cw = width(memdc, up, 2);
+  puts("width(A1FC 2B)="); puti(cw); puts(" cy="); puti(g_cy); putc_(10);
+  cw = width(memdc, down, 4);
+  puts("width(A1FD 0K)=  "); puti(cw); putc_(10);
+  cw = width(memdc, up, 4);
+  puts("width(A1FC 0K)=  "); puti(cw); putc_(10);
+  cw = width(memdc, qq, 3);
+  puts("width(?0K)=      "); puti(cw); putc_(10);
+  cw = width(memdc, aa, 3);
+  puts("width(A0K)=      "); puti(cw); putc_(10);
+
+  // GetGlyphIndicesA(0xFFFF = 无此字形)；声明只给 4 参（FLINT 按声明个数传，少给就是少给）
+  gi[0] = 0; gi[1] = 0;
+  cc[0] = 0xA1; cc[1] = 0xFD;
+  cw = GetGlyphIndicesA(memdc, cc, 2, gi);
+  puts("glyphidx(A1FD) ret="); puti(cw); puts(" idx="); puthex(gi[0] / 256); puthex(gi[0] % 256); putc_(10);
+  cc[0] = 0xA1; cc[1] = 0xFC;
+  gi[0] = 0;
+  cw = GetGlyphIndicesA(memdc, cc, 2, gi);
+  puts("glyphidx(A1FC) ret="); puti(cw); puts(" idx="); puthex(gi[0] / 256); puthex(gi[0] % 256); putc_(10);
+  cc[0] = '0'; cc[1] = 'K';
+  gi[0] = 0;
+  cw = GetGlyphIndicesA(memdc, cc, 2, gi);
+  puts("glyphidx(0K)   ret="); puti(cw); puts(" idx="); puthex(gi[0] / 256); puthex(gi[0] % 256); putc_(10);
+
+  SelectObject(memdc, old);
+  ReleaseDC(0, dc);
+  f = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\glyph.txt", 0x40000000, 0, 0, 2, 0, 0);
+  if (f != 0 - 1) { WriteFile(f, out, gpos, &w, 0); CloseHandle(f); }
+  return 0;
+}

@@ -1,0 +1,36 @@
+// audit8.fl — v1.0.6.2 盲区审计 A8：嵌套作用域 char 遮蔽 + 块内 char 数组
+// 作用域隔离回归：char 遮蔽 char / int 遮蔽 char（跨类型）/ 块内 char 数组 / 循环头 char 变量
+// 退出作用域后恢复外层绑定；无新 bug（帧 offset 分配 + 作用域链在 char 下与 int 同构）
+int main() {
+  char c = 'A';
+  int x = 10;
+  {
+    char c = 'B';
+    char buf[6];
+    for (int i = 0; i < 6; i++) buf[i] = 'a' + i;
+    if (c != 'B') return 1;
+    if (buf[0] != 'a') return 2;
+    if (buf[5] != 'f') return 3;
+    {
+      int c = 7;               // int 遮蔽 char（跨类型）
+      if (c != 7) return 4;
+      char c2[3];
+      c2[0] = 1; c2[1] = 2; c2[2] = 3;
+      if (c2[2] != 3) return 5;
+    }
+    if (c != 'B') return 6;    // 内层退出后恢复
+    if (buf[3] != 'd') return 7;
+  }
+  if (c != 'A') return 8;      // 块退出后恢复外层
+  if (x != 10) return 9;
+  for (char k = 0; k < 3; k++) {   // 循环头 char + 块内 char 数组
+    char kb[2];
+    kb[0] = k;
+    kb[1] = k + 10;
+    if (kb[0] != k) return 10;
+    if (kb[1] != k + 10) return 11;
+  }
+  char k = 'Z';                // 循环后外层 char 遮蔽不受影响
+  if (k != 'Z') return 12;
+  return 0;
+}

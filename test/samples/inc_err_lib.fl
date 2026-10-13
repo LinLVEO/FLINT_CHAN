@@ -1,0 +1,2 @@
+// inc_err_lib.fl — 故意语法错（缺 ')'）：验证错误定位归到被 include 的文件
+int bad(int x { return x; }

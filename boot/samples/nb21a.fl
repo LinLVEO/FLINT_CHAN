@@ -1,0 +1,3 @@
+// nb21a.fl — B2v 负例辅助：回指 nb21.fl 构成循环
+include "nb21.fl"
+int nb21a() { return 1; }

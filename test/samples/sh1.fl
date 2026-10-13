@@ -1,0 +1,12 @@
+// sh1.fl — v0.9 share 引用计数：new 起点 1 → 拷贝 +1 → 共享读写；出口 -1 归零释放
+// refcount 可直接读：*(p - 8) = [块基址] 计数（对象头部布局可验证）
+int main() {
+  int *share a = new int;          // rc=1
+  if (*(a - 8) != 1) return 90;     // 读头部 refcount
+  int *share b = a;                // 拷贝 +1 → rc=2
+  if (*(a - 8) != 2) return 91;
+  if (*(b - 8) != 2) return 92;
+  *(a) = 30;                        // a 写
+  if (*(b) != 30) return 93;        // b 见同一对象（共享实证）
+  return 0;                         // 出口：b 2→1，a 1→0 free
+}

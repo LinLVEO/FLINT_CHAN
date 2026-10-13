@@ -1,0 +1,19 @@
+// api3.fl — v0.8.1 窗口创建链实证（诊断版：失败返回 GetLastError 错误码）
+api user32 int CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api kernel32 int Sleep(int);
+api kernel32 int GetLastError();
+
+int main() {
+  int *h = CreateWindowExA(0, "STATIC", "FLINT v0.8.1 Window!", 0x00CF0000, 120, 80, 420, 160, 0, 0, 0, 0);
+  if (h == 0) return GetLastError();
+  ShowWindow(h, 1);
+  int i = 0;
+  while (i < 150) {
+    PeekMessageA(0, 0, 0, 0, 0);
+    Sleep(10);
+    i++;
+  }
+  return 0;
+}

@@ -1,0 +1,7 @@
+// var4.fl — 赋值表达式作为值：a = (b = 5) + 2; return a; = 7（右结合链式赋值）
+int main() {
+  int a;
+  int b;
+  a = (b = 5) + 2;
+  return a;
+}

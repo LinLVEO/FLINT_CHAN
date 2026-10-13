@@ -1,0 +1,186 @@
+// menu.fl — 浮窗还原第 6 步（6c）：右键中文菜单
+// 对标权威：`浮窗规格-对C#逐细节.md` §5 交互；C# 源码 `E:\HardwareMonitor\MonitorForm.cs`
+//   BuildMenu :216-322（菜单结构）｜UpdateMenuChecks :375-412（勾选态）｜动作 :421-495、:1125-1140（最小化）
+// 分工：**文本与 id 在 `menu_gen.fl`（tools\gen-menu.ps1 从 menu_items.txt 自动生成，别手改）**，
+//   本文件只写逻辑（建菜单 / 弹菜单 / 按命令号执行）。
+// ⚠️ include 无守卫：menu_gen.fl 只声明 AppendMenuA / MessageBoxA（本文件要用它们），别重复声明。
+// ⚠️ FLINT 边界（本步继续沿用）：函数参数 ≤4（多参数走结构体 I/O）｜struct 不能全局变量｜
+//   非 ASCII 一律 GBK 字节字面量（生成物里是 \xNN）。
+include "menu_gen.fl"
+
+api user32 ptr CreatePopupMenu();
+api user32 int TrackPopupMenu(int, int, int, int, int, int, int);
+api user32 int DestroyMenu(int);
+api user32 int SetForegroundWindow(int);
+api user32 int SystemParametersInfoA(int, int, int, int);
+
+// 菜单常量（Win32）
+int MF_SEP() { return 0x800; }        // MF_SEPARATOR
+int MF_CHK() { return 0x8; }          // MF_CHECKED
+int TPM_FLAGS() { return 0x102; }     // TPM_LEFTALIGN(0) | TPM_RIGHTBUTTON(2) | TPM_RETURNCMD(0x100)
+
+// 勾选态 → 标志位（C# 用 Checked 属性；Win32 侧就是建菜单时带不带 MF_CHECKED）
+int mf_chk(int on) {
+  if (on == 1) return 0x8;
+  return 0;
+}
+
+struct MenuSt {
+  int *hwnd;          // 浮窗句柄（弹菜单要 SetForegroundWindow + 归属）
+  int *main;          // 主菜单
+  int *sub_pos; int *sub_font; int *sub_op; int *sub_cal; int *sub_show;
+  int cmd;            // TrackPopupMenu 的命令号（0 = 用户取消）
+  int rc;             // 给调用方的动作码：0=无变化 1=退出 2=字号变了 3=最小化模式变了
+}
+
+// —— 位置预设（对齐 C# MovePreset :475-488：**工作区** + 20px 边距；中央 = 居中）——
+// h 是窗口句柄，wa 指向 SPI_GETWORKAREA 取到的工作区
+int menu_preset(struct Cfg *c, int preset, struct RECT *wa, int *h) {
+  struct RECT wr;
+  int w = 0;
+  int ht = 0;
+  int x = 0;
+  int y = 0;
+  GetWindowRect(h, &wr);
+  w = wr.r - wr.l;
+  ht = wr.b - wr.t;
+  if (preset == 0) { x = wa->l + 20; y = wa->t + 20; }
+  if (preset == 1) { x = wa->r - w - 20; y = wa->t + 20; }
+  if (preset == 2) { x = wa->l + 20; y = wa->b - ht - 20; }
+  if (preset == 3) { x = wa->r - w - 20; y = wa->b - ht - 20; }
+  if (preset == 4) { x = wa->l + (wa->r - wa->l - w) / 2; y = wa->t + (wa->b - wa->t - ht) / 2; }
+  MoveWindow(h, x, y, w, ht, 0);
+  c->x = x;
+  c->y = y;
+  c->have_xy = 1;
+  cfg_save_default(c);
+  return 0;
+}
+
+// —— 建菜单（每次右键重建：勾选态 = 当刻配置，等价于 C# 的 Opening→UpdateMenuChecks）——
+int menu_build(struct MenuSt *m, struct Cfg *c) {
+  m->main = CreatePopupMenu();
+  // 锁定位置（勾选 = Locked）
+  mt_lock(m->main, mf_chk(c->locked));
+  // 位置 ▸
+  m->sub_pos = CreatePopupMenu();
+  mt_pos_lt(m->sub_pos, 0);
+  mt_pos_rt(m->sub_pos, 0);
+  mt_pos_lb(m->sub_pos, 0);
+  mt_pos_rb(m->sub_pos, 0);
+  mt_pos_c(m->sub_pos, 0);
+  mt_pop_pos(m->main, m->sub_pos);
+  // 字号 ▸（勾选 = 当前档）
+  m->sub_font = CreatePopupMenu();
+  mt_font_s(m->sub_font, mf_chk(c->fontsize == 11));
+  mt_font_m(m->sub_font, mf_chk(c->fontsize == 13));
+  mt_font_l(m->sub_font, mf_chk(c->fontsize == 16));
+  mt_pop_font(m->main, m->sub_font);
+  // 透明度 ▸
+  m->sub_op = CreatePopupMenu();
+  mt_op60(m->sub_op, mf_chk(c->opacity == 60));
+  mt_op80(m->sub_op, mf_chk(c->opacity == 80));
+  mt_op100(m->sub_op, mf_chk(c->opacity == 100));
+  mt_pop_op(m->main, m->sub_op);
+  // CPU温度校准 ▸（自动检测 ＋ 分隔线 ＋ 4 档；勾选 = Calibrated / 对应档位）
+  m->sub_cal = CreatePopupMenu();
+  mt_cal_auto(m->sub_cal, mf_chk(c->calibrated));
+  AppendMenuA(m->sub_cal, MF_SEP(), 0, 0);
+  mt_cal0(m->sub_cal, mf_chk(c->cpu_offset == 0));
+  mt_cal5(m->sub_cal, mf_chk(c->cpu_offset == 0 - 5));
+  mt_cal11(m->sub_cal, mf_chk(c->cpu_offset == 0 - 11));
+  mt_cal20(m->sub_cal, mf_chk(c->cpu_offset == 0 - 20));
+  mt_pop_cal(m->main, m->sub_cal);
+  // 显示项 ▸（勾选 = sw 对应位；位号见 float_rows.fl 的 SW_*）
+  m->sub_show = CreatePopupMenu();
+  mt_show_fps(m->sub_show, mf_chk(cfg_bit(c->sw, 0)));
+  mt_show_fpssrc(m->sub_show, mf_chk(cfg_bit(c->sw, 12)));
+  mt_show_cputemp(m->sub_show, mf_chk(cfg_bit(c->sw, 1)));
+  mt_show_cpuload(m->sub_show, mf_chk(cfg_bit(c->sw, 2)));
+  mt_show_gputemp(m->sub_show, mf_chk(cfg_bit(c->sw, 3)));
+  mt_show_gpuload(m->sub_show, mf_chk(cfg_bit(c->sw, 4)));
+  mt_show_gpumem(m->sub_show, mf_chk(cfg_bit(c->sw, 5)));
+  mt_show_ram(m->sub_show, mf_chk(cfg_bit(c->sw, 6)));
+  mt_show_disk(m->sub_show, mf_chk(cfg_bit(c->sw, 7)));
+  mt_show_net(m->sub_show, mf_chk(cfg_bit(c->sw, 8)));
+  mt_show_fan(m->sub_show, mf_chk(cfg_bit(c->sw, 9)));
+  mt_show_power(m->sub_show, mf_chk(cfg_bit(c->sw, 10)));
+  mt_show_powerdetail(m->sub_show, mf_chk(cfg_bit(c->sw, 11)));
+  mt_pop_show(m->main, m->sub_show);
+  AppendMenuA(m->main, MF_SEP(), 0, 0);
+  // 最小化模式（小方框）
+  mt_mini(m->main, mf_chk(c->minimode));
+  AppendMenuA(m->main, MF_SEP(), 0, 0);
+  // 使用说明 / 退出
+  mt_help(m->main, 0);
+  mt_exit(m->main, 0);
+  return 0;
+}
+
+// —— 按命令号执行（对齐 C# 各动作）——
+// 返回动作码：0=无变化 1=退出 2=字号变了（调用方要重建字体）3=最小化模式变了
+int menu_apply(struct MenuSt *m, struct Cfg *c, struct Surf *sf, struct FRead *rd) {
+  struct RECT wa;
+  int id = m->cmd;
+  m->rc = 0;
+  if (id == 0) return 0;                                   // 用户点了菜单外面 = 取消
+  if (id == mid_lock()) {                                  // 锁定/解锁（C# :220-224）
+    if (c->locked == 1) c->locked = 0; else c->locked = 1;
+    cfg_save_default(c);
+    return 0;
+  }
+  SystemParametersInfoA(0x30, 0, &wa, 0);                   // SPI_GETWORKAREA
+  if (id == mid_pos_lt()) { menu_preset(c, 0, &wa, m->hwnd); return 0; }
+  if (id == mid_pos_rt()) { menu_preset(c, 1, &wa, m->hwnd); return 0; }
+  if (id == mid_pos_lb()) { menu_preset(c, 2, &wa, m->hwnd); return 0; }
+  if (id == mid_pos_rb()) { menu_preset(c, 3, &wa, m->hwnd); return 0; }
+  if (id == mid_pos_c()) { menu_preset(c, 4, &wa, m->hwnd); return 0; }
+  if (id == mid_font_s()) { c->fontsize = 11; cfg_save_default(c); m->rc = 2; return 2; }
+  if (id == mid_font_m()) { c->fontsize = 13; cfg_save_default(c); m->rc = 2; return 2; }
+  if (id == mid_font_l()) { c->fontsize = 16; cfg_save_default(c); m->rc = 2; return 2; }
+  if (id == mid_op60()) { c->opacity = 60; sf->const_a = c->opacity * 255 / 100; cfg_save_default(c); return 0; }
+  if (id == mid_op80()) { c->opacity = 80; sf->const_a = c->opacity * 255 / 100; cfg_save_default(c); return 0; }
+  if (id == mid_op100()) { c->opacity = 100; sf->const_a = c->opacity * 255 / 100; cfg_save_default(c); return 0; }
+  // CPU 温度校准：自动检测 = 本机 Xeon E5（非 v2/v3/v4）→ -11（C# AutoCalibrate :447-461）
+  if (id == mid_cal_auto()) { c->cpu_offset = 0 - 11; c->calibrated = 1; cfg_save_default(c); return 0; }
+  if (id == mid_cal0()) { c->cpu_offset = 0; c->calibrated = 1; cfg_save_default(c); return 0; }
+  if (id == mid_cal5()) { c->cpu_offset = 0 - 5; c->calibrated = 1; cfg_save_default(c); return 0; }
+  if (id == mid_cal11()) { c->cpu_offset = 0 - 11; c->calibrated = 1; cfg_save_default(c); return 0; }
+  if (id == mid_cal20()) { c->cpu_offset = 0 - 20; c->calibrated = 1; cfg_save_default(c); return 0; }
+  // 显示项（翻转对应位；立刻回写到行构建器的开关，下一帧即生效）
+  if (id == mid_show_fps()) { cfg_flip(c, 0); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_fpssrc()) { cfg_flip(c, 12); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_cputemp()) { cfg_flip(c, 1); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_cpuload()) { cfg_flip(c, 2); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_gputemp()) { cfg_flip(c, 3); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_gpuload()) { cfg_flip(c, 4); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_gpumem()) { cfg_flip(c, 5); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_ram()) { cfg_flip(c, 6); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_disk()) { cfg_flip(c, 7); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_net()) { cfg_flip(c, 8); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_fan()) { cfg_flip(c, 9); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_power()) { cfg_flip(c, 10); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  if (id == mid_show_powerdetail()) { cfg_flip(c, 11); rd->sw = c->sw; cfg_save_default(c); return 0; }
+  // 最小化模式（6d 的绘制在 main 里按 cfg.minimode 分支）
+  if (id == mid_mini()) {
+    if (c->minimode == 1) c->minimode = 0; else c->minimode = 1;
+    cfg_save_default(c);
+    m->rc = 3;
+    return 3;
+  }
+  if (id == mid_help()) { menu_help_box(); return 0; }
+  if (id == mid_exit()) { m->rc = 1; return 1; }
+  return 0;
+}
+
+// —— 右键入口：建菜单 → 前台化 → 光标处弹出 → 取命令号（TPM_RETURNCMD）→ 销毁 → 执行 ——
+int menu_open(struct MenuSt *m, struct Cfg *c, struct Surf *sf, struct FRead *rd) {
+  struct P pt;
+  menu_build(m, c);
+  SetForegroundWindow(m->hwnd);                    // 不前台化的话点菜单外面收不掉
+  GetCursorPos(&pt);
+  m->cmd = TrackPopupMenu(m->main, TPM_FLAGS(), pt.x, pt.y, 0, m->hwnd, 0);
+  DestroyMenu(m->main);
+  menu_apply(m, c, sf, rd);
+  return m->rc;
+}

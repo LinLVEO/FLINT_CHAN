@@ -1,0 +1,6 @@
+// neg-width-ret.fl -- -strict ③b: 地址值(64 位)从 int 返回函数里返回（默认静默截断）
+int f(int *p) { return p; }
+int main() {
+  int x = 7;
+  return f(&x);
+}

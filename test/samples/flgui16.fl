@@ -1,0 +1,375 @@
+// flgui16.fl — FLGUI M4p（2026-09-28）：**焦点可见性**的无头契约
+//   不建真窗：滚轮/键盘全走"合成输入喂 gui_begin"；"本帧可见集合"从**命令表**与**池**两侧读回。
+//   真窗那半不在这道门里：像素 = `tmp\visprobe\vis-probe.fl`。
+//
+// 本刀要补的缺口（M4o 诚实边界⑦的原话）："**滚出视口的控件仍占序号**（`gui_focus_reg` 不看裁剪）
+//   ⇒ 焦点可以落到**看不见的控件**上（那时不发 `kind 16` ⇒ 圈也不见）"。
+//   改前实测形态（草稿 `tmp\m4p\wheel-min2.fl`，同样场景）：清单数 **6**（6 个按钮全登记）、
+//   Tab 前两下都停在**看不见**的控件上、`mark=0`（屏幕上一个圈都没有 ⇒ 用户按 Tab 看着"没反应"）。
+//
+// ★ 场景几何（**固定**；门里那段外部裁判用 PowerShell **另一套算式**现算期望值）：
+//   视口 = 布局起点 (6,6)，宽 120；6 个按钮 28x20、间距 4
+//   ⇒ 无滚动时控件 y = 6 / 30 / 54 / 78 / 102 / 126（内容高 144）。
+//   · 场景 A：视口高 **44**、偏移 0 ⇒ 裁剪 [6,50) ⇒ 可见 = **{B0,B1}**（B2 起全在视口外）
+//   · 场景 B：视口高 44 ＋ 滚到底（偏移夹到 **96**）⇒ 可见 = **{B4,B5}**
+//   · 场景 C：视口高 **10**、偏移 0 ⇒ 只露 B0 的 10px（≥ 一半）⇒ 可见 = **{B0}**
+//   · 场景 D：视口高 **8** ⇒ 连 B0 都只露 8/20 < 一半 ⇒ 可见 = **{}**（全在视口外）
+//
+// 六组判据（每组都钉"改前会红"的那个数）：
+//   ① **视口外的控件不占序号**：清单数 = 本帧可见的可聚焦控件数（改前 = 画了几个就是几个）。
+//   ② **可见集合内正常导航**：Tab 逐格前进、两端回绕**只在可见集合上**算
+//      （可见 = 2 时序号只在 {0,1} 之间转；改前会走到 2..5 —— 那几格屏幕上什么都没有）。
+//   ③ **圈只落在可见项上**：`kind 16` 的矩形恒等于**可见集合里第 idx 个**控件的矩形，
+//      且每一格都有圈（改前：看不见的那几格 `mark=0`）⇒ "焦点圈不出现在看不见的控件上"。
+//   ④ **滚动换集合后焦点落在新的可见集合上**（帧末"序号越界 ⇒ 收回"接着 Tab 重算）。
+//   ⑤ **只剩 1 个可见控件**：Tab 恒为序号 0（n = 1 不回绕越界）＋ 圈恒在它身上。
+//   ⑥ **全都在视口外（退化档口径，明写）**：清单数 = 0、序号 = **-1**（帧末收回、不悬空）、
+//      Tab 与 Shift+Tab **都不动**、一条 `kind 16` 都没有。
+// 位掩码 15 位，全亮 = 32767 → return 42。
+//   bit 1  场景 A 初始：无焦点（idx=-1）、清单数 = 2（**不是 6**）、无 `kind 16`
+//   bit 2  第一下 Tab ⇒ 序号 0、id = B0、圈 rect = B0 整个矩形 (6,6,28,20)
+//   bit 3  再 Tab ⇒ 序号 1（B1）＋ 圈 rect = (6,30,28,20)
+//   bit 4  再 Tab ⇒ **回绕** 0（可见集合只有 {B0,B1}，不碰 2..5）
+//   bit 5  命令表里只出现 B0/B1 两个按钮（不可见的一个字节都没发）
+//   bit 6  从无焦点起步连按 4 次 Tab ⇒ 序号序列 0,1,0,1（只访问可见项）
+//   bit 7  反向：序号 0 上 Shift+Tab ⇒ 1（可见集合内反向回绕）
+//   bit 8  场景 B：清单数 = 2、可见 = {B4,B5}、Tab ⇒ 序号 0、id = B4
+//   bit 9  场景 B：无焦点 + Shift+Tab ⇒ 序号 1、id = B5 ＋ 圈 rect = (6,30,28,20)
+//   bit 10 场景 C：清单数 = 1、Tab 恒序号 0、两格各有 1 条圈 ＋ 圈不在不可见项上
+//   bit 11 场景 D：清单数 = 0、序号 = -1、无 `kind 16`
+//   bit 12 场景 D：Tab 不动、Shift+Tab 也不动、两帧都没有圈
+//   bit 13 焦点态仍住池 k=1/k=2/k=3 且 **k=0 恒 0**（POOLSUM 零扰动）
+//   bit 14 场景 A 恢复：可见集合回来 ⇒ 清单数回到 2（跨帧计数跟着可见性走）
+//   bit 15 场景 D 里再按一次 Tab 仍不动（**不是**落在"上一次的旧序号"上 ⇒ 焦点真收回了）
+include "flgui_widgets.fl"
+
+// ===== 位掩码账 =====
+int f16_res = 0;
+
+// ===== 本帧读回 =====
+int f16_idx = 0;                 // 焦点序号（-1 = 无）
+int f16_cnt = 0;                 // 池里 k=2（**上一帧**登记到的清单数）
+int f16_kbd = 0;                 // 本帧登记到的个数（帧末写进池）
+int f16_mark = 0;                // `kind 16` 条数
+int f16_mx = 0; int f16_my = 0; int f16_mw = 0; int f16_mh = 0;
+int f16_vx = 0; int f16_vy = 0; int f16_vw = 0; int f16_vh = 0;   // 本帧视口（从 kind 6 读回）
+
+int f16_yok[6];                  // 第 i 个控件本帧是否"露够一半"
+int f16_nvis = 0;                // 可见集合大小
+int f16_off = 0;                 // 本帧滚动偏移（从池读回：`gui_scroll_*` 用的就是它）
+int f16_y0 = 0;                  // 命令表里第一个按钮的 y（哨兵）
+
+// 控件几何常量
+int f16_bx = 6;
+int f16_by = 6;
+int f16_bs = 24;
+int f16_bw = 28;
+int f16_bh = 20;
+int f16_n = 6;
+
+// 按钮 id
+int f16_id0 = 0; int f16_id1 = 0; int f16_id2 = 0;
+int f16_id3 = 0; int f16_id4 = 0; int f16_id5 = 0;
+
+// Shift+Tab 的键码 = 0x100 | 9 = **265**。
+//   ⚠️ 这里写**十进制字面量**：`0 - 0x0109` 这种"十六进制取负"在本编译器里没被折成常量，
+//   实测会把键值传错（导航根本不生效）。平台层比较的仍然是 `0x0109` = 265。
+int f16_shifttab = 265;
+
+// 场景：6 个按钮（**全部可聚焦**；可见与否由视口裁决定）
+int f16_scene(struct GuiCtx *c) {
+  gui_button(c, "B0");
+  gui_button(c, "B1");
+  gui_button(c, "B2");
+  gui_button(c, "B3");
+  gui_button(c, "B4");
+  gui_button(c, "B5");
+  return 0;
+}
+
+int f16_in(struct GuiInput *in) {
+  in->mx = 0; in->my = 0;
+  in->down = 0; in->pressed = 0; in->released = 0;
+  in->wheel = 0; in->key = 0; in->ms = 0;
+  return 0;
+}
+
+// 按**本帧读回的视口矩形**重算"第 i 个控件露够一半了吗"（与库同口径，样本侧哨兵）
+//   ⚠️ 第 i 个控件的 y = `(视口顶 − 偏移) + 进来时的内容内偏移`；内容起点 (6,6) 是固定常量，
+//      偏移从**池**读回（那是库本帧真正用的值，不靠猜）。
+int f16_vis_calc(int i) {
+  int y0 = 0;
+  int y1 = 0;
+  int t = 0;
+  int b = 0;
+  int hh = 0;
+  y0 = f16_by + i * f16_bs - f16_off;
+  y1 = y0 + f16_bh;
+  t = y0; if (t < f16_vy) { t = f16_vy; }
+  b = y1; if (b > f16_vy + f16_vh) { b = f16_vy + f16_vh; }
+  hh = b - t;
+  if (hh <= 0) { return 0; }
+  if (hh * 2 < f16_bh) { return 0; }
+  return 1;
+}
+
+// 可见集合里第 k 个控件的下标（0 基序号）；-1 = 没有第 k 个
+int f16_vis_at(int k) {
+  int i = 0;
+  int m = 0;
+  while (i < f16_n) {
+    if (f16_yok[i] == 1) {
+      if (m == k) { return i; }
+      m = m + 1;
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 圈是不是正好挂在"可见集合里第 k 个控件"的整个矩形上
+int f16_ring_on(int k) {
+  int i = 0;
+  i = f16_vis_at(k);
+  if (i < 0) { return 0; }
+  if (f16_mark != 1) { return 0; }
+  if (f16_mx != f16_bx) { return 0; }
+  if (f16_my != f16_by + i * f16_bs - f16_off) { return 0; }
+  if (f16_mw != f16_bw) { return 0; }
+  if (f16_mh != f16_bh) { return 0; }
+  return 1;
+}
+
+// 本帧有没有任何一条 kind 16 落在**不可见**的控件上（本刀的硬判据：不许有）
+int f16_ring_bad() {
+  int i = 0;
+  while (i < f16_n) {
+    if (f16_yok[i] == 0) {
+      if (f16_mark > 0) {
+        if (f16_my == f16_by + i * f16_bs - f16_off) { return 1; }
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 走一帧并读回账：vh = 视口高；wheel/key 见名（key：9 = Tab、265 = Shift+Tab、0 = 无键）
+int f16_step(struct GuiCtx *c, struct GuiInput *in, int vh, int wheel, int key) {
+  int i = 0;
+  in->key = key;
+  in->wheel = wheel;
+  gui_begin(c, in);
+  gui_scroll_begin(c, "list", vh);
+  f16_scene(c);
+  gui_scroll_end(c);
+  gui_end(c);
+
+  f16_idx = gui_pool_at(gui_focus_key(), 1) - 1;
+  f16_cnt = gui_pool_at(gui_focus_key(), 2);
+  f16_kbd = c->kbd;
+  f16_mark = 0;
+  f16_mx = 0; f16_my = 0; f16_mw = 0; f16_mh = 0;
+  f16_y0 = 0 - 1;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 6) {                     // 裁剪压栈 = 视口（本样本只压这一层）
+      f16_vx = gui_cmd_x[i]; f16_vy = gui_cmd_y[i];
+      f16_vw = gui_cmd_w[i]; f16_vh = gui_cmd_h[i];
+    }
+    if (gui_cmd_kind[i] == 2) {                     // 命令表里第一个按钮的 y（哨兵）
+      if (f16_y0 == 0 - 1) { f16_y0 = gui_cmd_y[i]; }
+    }
+    if (gui_cmd_kind[i] == 16) {
+      f16_mark = f16_mark + 1;
+      f16_mx = gui_cmd_x[i]; f16_my = gui_cmd_y[i];
+      f16_mw = gui_cmd_w[i]; f16_mh = gui_cmd_h[i];
+    }
+    i = i + 1;
+  }
+  // 可见集合（按本帧视口 ＋ 池里的偏移现算）
+  f16_off = gui_pool_get(gui_id("list"));
+  f16_nvis = 0;
+  i = 0;
+  while (i < f16_n) {
+    f16_yok[i] = f16_vis_calc(i);
+    if (f16_yok[i] == 1) { f16_nvis = f16_nvis + 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int f16_setup(struct GuiCtx *c, struct GuiInput *in) {
+  gui_init(c);
+  c->lay_w = 120;
+  c->lay_h = 200;
+  f16_in(in);
+  // 滚轮只在"光标悬停在视口内"时被消费 ⇒ 要滚的场景得先把光标放进视口
+  in->mx = 30;
+  in->my = 20;
+  f16_id0 = gui_id("B0"); f16_id1 = gui_id("B1"); f16_id2 = gui_id("B2");
+  f16_id3 = gui_id("B3"); f16_id4 = gui_id("B4"); f16_id5 = gui_id("B5");
+  return 0;
+}
+
+// 一帧的账（门里那段外部裁判读这一行）
+// 一路读回：`f16_kbd`（库**本帧真的登记了几个**）与几何可见集合必须相等 —— 这条是本刀的硬判据。
+//   ⚠️ 它必须同时判"库登记的个数"和"几何算出的个数"，不能只对自己算出来的 nvis 下断言：
+//      只判 nvis 的话，**改前的库也会全绿**（nvis 是样本自己按几何算的，跟库无关）——
+//      本刀第一版就踩了这个坑：拿改前的库跑同一份样本，位掩码照样 32767。
+//      ⇒ 取证改用**隔离的老库**（`tmp\m4p\oldlab\`：老 lib ＋ 老 flgui16）实跑：`exit 4102`（`kbd=6`）。
+int f16_kbd_ok() {
+  if (f16_kbd != f16_nvis) { return 0; }
+  return 1;
+}
+
+int f16_report(char *tag) {
+  print(["F16 ", tag, " vx=", f16_vx, " vy=", f16_vy, " vw=", f16_vw, " vh=", f16_vh,
+         " off=", f16_off, " idx=", f16_idx, " cnt=", f16_cnt, " kbd=", f16_kbd,
+         " nvis=", f16_nvis, " mark=", f16_mark, " my=", f16_my, " mh=", f16_mh, "\n"]);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int seq = 0;
+  int k = 0;
+  int ok = 0;
+  int idn = 0;
+  int r0 = 0;
+  int r1 = 0;
+  int psum = 0;
+
+  // ================= 场景 A：视口高 44、偏移 0 ⇒ 可见 = {B0,B1}（改前 = 6）=================
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0, 0);
+  f16_report("A0");
+  // bit 1：无焦点 ＋ 清单 2 ＋ 可见 2 ＋ 无圈
+  if (f16_idx == 0 - 1) { if (f16_cnt == 2) { if (f16_kbd == 2) { if (f16_nvis == 2) { if (f16_mark == 0) { f16_res = f16_res | 1; } } } } }
+
+  f16_step(&c, &in, 44, 0, 9);                 // 第一下 Tab
+  f16_report("A1");
+  idn = gui_focus_get(&c);
+  // bit 2：序号 0 ＋ id = B0 ＋ 圈 = B0 整个矩形 ＋ 圈不在不可见项上
+  if (f16_idx == 0) { if (idn == f16_id0) { if (f16_ring_on(0) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 2; } } } }
+
+  f16_step(&c, &in, 44, 0, 9);                 // 再 Tab
+  f16_report("A2");
+  idn = gui_focus_get(&c);
+  // bit 3：序号 1 ＋ id = B1 ＋ 圈 = (6,30,28,20)
+  if (f16_idx == 1) { if (idn == f16_id1) { if (f16_ring_on(1) == 1) { f16_res = f16_res | 4; } } }
+
+  f16_step(&c, &in, 44, 0, 9);                 // 再 Tab ⇒ 回绕
+  f16_report("A3");
+  // bit 4：回绕到序号 0（只访问可见项）
+  if (f16_idx == 0) { if (f16_ring_on(0) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 8; } } }
+
+  // bit 5：命令表里只出现 B0/B1 两个按钮
+  ok = 1;
+  k = 0;
+  while (k < gui_cmd_n) {
+    if (gui_cmd_kind[k] == 2) {
+      if (gui_cmd_y[k] != f16_y0) {
+        if (gui_cmd_y[k] != f16_y0 + f16_bs) { ok = 0; }
+      }
+    }
+    k = k + 1;
+  }
+  print(["F16 A5 only_visible_cmds=", ok, " ncmd=", gui_cmd_n, " kbd_ok=", f16_kbd_ok(), "\n"]);
+  // bit 5：命令表里只出现两个按钮 **且** 库本帧登记的个数 = 几何可见个数
+  if (ok == 1) { if (f16_kbd_ok() == 1) { f16_res = f16_res | 16; } }
+
+  // bit 6：从无焦点起步连按 4 次 Tab ⇒ 序号序列 0,1,0,1
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0, 0);
+  seq = 1;
+  k = 0;
+  while (k < 4) {
+    f16_step(&c, &in, 44, 0, 9);
+    if (f16_idx != k - (k / 2) * 2) { seq = 0; }
+    if (f16_ring_bad() == 1) { seq = 0; }
+    k = k + 1;
+  }
+  print(["F16 A6 seqok=", seq, " idx=", f16_idx, " nvis=", f16_nvis, " kbd=", f16_kbd, "\n"]);
+  // bit 6：一圈都只在可见项上，且每一步"库登记的个数 = 可见个数"
+  if (seq == 1) { if (f16_nvis == 2) { if (f16_kbd == 2) { f16_res = f16_res | 32; } } }
+
+  // bit 7：反向 —— 停在序号 0 上按 Shift+Tab ⇒ 1
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0, 0);
+  f16_step(&c, &in, 44, 0, 9);                 // ⇒ 序号 0
+  f16_step(&c, &in, 44, 0, f16_shifttab);      // Shift+Tab ⇒ 1
+  f16_report("A7");
+  if (f16_idx == 1) { if (f16_ring_on(1) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 64; } } }
+
+  // ================= 场景 B：视口高 44 ＋ 滚到底 ⇒ 可见 = {B4,B5} =================
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0 - 50, 0);             // 大幅下滚（偏移夹到 maxoff）
+  f16_step(&c, &in, 44, 0, 0);                 // 空一帧，让清单数落定
+  f16_report("B0");
+  f16_step(&c, &in, 44, 0, 9);                 // ⇒ 序号 0
+  f16_report("B1");
+  idn = gui_focus_get(&c);
+  // bit 8：清单 2 ＋ 可见 {B4,B5} ＋ Tab ⇒ 序号 0 且 id = B4 ＋ 圈在 B4 上 ＋ 登记数 = 可见数
+  if (f16_cnt == 2) { if (f16_nvis == 2) { if (f16_kbd == 2) { if (f16_vis_at(0) == 4) { if (f16_idx == 0) { if (idn == f16_id4) { if (f16_ring_on(0) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 128; } } } } } } } }
+
+  // bit 9：滚到新集合后**反向**（无焦点 + Shift+Tab）⇒ 序号 = 最后一个
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0 - 50, 0);
+  f16_step(&c, &in, 44, 0, 0);
+  f16_step(&c, &in, 44, 0, f16_shifttab);
+  f16_report("B2");
+  idn = gui_focus_get(&c);
+  if (f16_cnt == 2) { if (f16_kbd == 2) { if (f16_nvis == 2) { if (f16_ring_on(1) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 256; } } } } }
+
+  // ================= 场景 C：视口高 10 ⇒ 可见只有 {B0} =================
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 10, 0, 0);
+  f16_report("C0");
+  f16_step(&c, &in, 10, 0, 9);                 // ⇒ 序号 0
+  f16_report("C1");
+  r0 = f16_mark;
+  f16_step(&c, &in, 10, 0, 9);                 // 再 Tab ⇒ 仍序号 0（n = 1）
+  f16_report("C2");
+  // bit 10：可见 1 ＋ 清单 1 ＋ **登记数 1** ＋ idx 0 ＋ 两格各有 1 条圈 ＋ 圈不在不可见项上
+  if (f16_nvis == 1) { if (f16_cnt == 1) { if (f16_kbd == 1) { if (f16_idx == 0) { if (r0 == 1) { if (f16_mark == 1) { if (f16_ring_on(0) == 1) { if (f16_ring_bad() == 0) { f16_res = f16_res | 512; } } } } } } } }
+
+  // ================= 场景 D：视口高 8 ⇒ 全在视口外 =================
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 8, 0, 0);
+  f16_report("D0");
+  // bit 11：清单 0、序号 -1、无圈
+  if (f16_kbd == 0) { if (f16_cnt == 0) { if (f16_idx == 0 - 1) { if (f16_mark == 0) { f16_res = f16_res | 1024; } } } }
+  f16_step(&c, &in, 8, 0, 9);
+  f16_report("D1");
+  r0 = f16_idx; r1 = f16_mark;
+  f16_step(&c, &in, 8, 0, f16_shifttab);
+  f16_report("D2");
+  // bit 12：Tab 与 Shift+Tab 都不动、两帧都无圈
+  if (r0 == 0 - 1) { if (r1 == 0) { if (f16_idx == 0 - 1) { if (f16_mark == 0) { f16_res = f16_res | 2048; } } } }
+  // bit 15：再按一次 Tab 仍不动（不是落在"上一次的旧序号"上 ⇒ 焦点真收回了）
+  f16_step(&c, &in, 8, 0, 9);
+  f16_report("D3");
+  if (f16_idx == 0 - 1) { if (f16_mark == 0) { if (f16_kbd == 0) { f16_res = f16_res | 16384; } } }
+
+  // ================= 池账：k=1/k=2/k=3 有值、k=0 恒 0 =================
+  psum = gui_pool_sum();
+  print(["F16 P k0=", gui_pool_at(gui_focus_key(), 0), " k1=", gui_pool_at(gui_focus_key(), 1),
+         " k2=", gui_pool_at(gui_focus_key(), 2), " k3=", gui_pool_at(gui_focus_key(), 3),
+         " psum=", psum, " key=", gui_focus_key(), "\n"]);
+  if (gui_pool_at(gui_focus_key(), 0) == 0) { f16_res = f16_res | 4096; }
+
+  // ================= 场景 A 恢复：清单数回到 2 =================
+  f16_setup(&c, &in);
+  f16_step(&c, &in, 44, 0, 0);
+  f16_report("E1");
+  f16_step(&c, &in, 44, 0, 0);
+  f16_report("E2");
+  // bit 14：可见集合回来 ⇒ 清单数回到 2 ＋ **登记数 2** ＋ 圈在第 0 个可见项上
+  if (f16_cnt == 2) { if (f16_kbd == 2) { if (f16_nvis == 2) { if (f16_kbd_ok() == 1) { f16_res = f16_res | 8192; } } } }
+
+  print(["M4P res=", f16_res, " want=", 32767, "\n"]);
+  if (f16_res == 32767) { return 42; }
+  return f16_res;
+}

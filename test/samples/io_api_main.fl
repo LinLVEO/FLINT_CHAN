@@ -1,0 +1,10 @@
+// io_api_main.fl — 先定义函数，再 include 带 api 声明的库（测「api 声明位置冲突」不存在）
+int before_include() { return 1; }
+
+include "io_api_lib.fl"
+
+int main() {
+  if (before_include() != 1) return 1;
+  if (io_api_tick() < 0) return 2;
+  return 42;
+}

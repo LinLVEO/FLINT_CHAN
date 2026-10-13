@@ -1,0 +1,13 @@
+// t_addr.fl — B2h 字段取址样本：期望 42
+struct S { int a; int sp; }
+int f(struct S *p) {
+  p->sp = 42;
+  int *q = &p->sp;
+  return q[0];
+}
+int main() {
+  struct S s;
+  s.a = 1;
+  s.sp = 0;
+  return f(&s);
+}

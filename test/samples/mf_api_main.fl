@@ -1,0 +1,6 @@
+// mf_api_main.fl — 主文件：调库函数（库文件的 api 声明须被驱动前移到单元头部）
+int main() {
+  int s = lib_secs(1000);         // 开机秒数（函数在 mf_api_lib.fl）
+  if (s >= 0 && s < 4000000) return 7;   // 正常 uptime（< 46 天）
+  return 1;
+}

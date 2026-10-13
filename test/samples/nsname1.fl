@@ -1,0 +1,15 @@
+// nsname1.fl — 命名空间（轻量：名字含 :: 限定段）验证
+// 覆盖：定义 / 调用 / 前向调用 / 同名前缀不冲突
+int my::add(int a, int b) { return a + b; }
+int my::twice(int a) { return my::add(a, a); }
+int my::first(int a) { return my::second(a) + 1; }   // 前向调用（second 在后定义）
+int my::second(int a) { return a; }
+int add(int a, int b) { return a - b; }              // 全局同名函数，与 my::add 互不干扰
+
+int main() {
+  if (my::add(3, 4) != 7) return 1;
+  if (my::twice(21) != 42) return 2;
+  if (my::first(41) != 42) return 3;
+  if (add(10, 3) != 7) return 4;
+  return 42;
+}

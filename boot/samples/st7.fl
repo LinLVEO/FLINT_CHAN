@@ -1,0 +1,3 @@
+struct Inner { int v; }
+struct Outer { struct Inner *in; int k; }
+int main() { struct Inner i; struct Outer o; i.v = 40; o.in = &i; o.k = 2; struct Inner *ip = o.in; return ip->v + o.k; }

@@ -1,0 +1,244 @@
+// flgui3.fl — FLGUI M2 无头行为成绩单②：滚动视图（含滚轮）＋ 弹层菜单
+//   **不建窗**：合成输入喂 gui_begin；状态转移与 draw list 都 dump 成文本 → test\flgui-verify.ps1 双端逐字节对账
+// 位图（全亮 = 42）：
+//   0 帧号 ｜1 首帧命令数 ｜2 首条是裁剪压栈 ｜3 首项在视口顶 ｜4 第二项 = 顶+行距 ｜5 第三项 = 顶+2×行距
+//   6 滚动条轨道 kind/x ｜7 滚动条滑块 kind ｜8 末条是裁剪出栈 ｜9 初始偏移 0 ｜10 maxoff == 内容高-视口高
+//   11 滚轮向下 1 格 ⇒ 偏移 +20 ｜12 内容整体上移（首项被裁掉、第二项顶到 y=4）｜13 向上滚过头 ⇒ 夹回 0
+//   14 向下滚过头 ⇒ 收尾夹到 maxoff ｜15 夹住后最后一项可见 ｜16 偏移稳定不再变
+//   17 内容比视口短 ⇒ 不发滚动条 ｜18 短内容时偏移夹回 0
+//   19 弹层首帧命令数 ｜20 首条是面板底且矩形=弹层位 ｜21 gui_popup_begin 返回 1
+//   22 点中第二项 ⇒ 条目返回 1 ｜23 点中后弹层关闭 ｜24 点在弹层外 ⇒ 关闭 ｜25 点外面那帧不该命中任何条目
+include "flgui_widgets.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  int r = 0;
+  int i = 0;
+  int k = 0;
+  int maxoff = 0;
+  int off = 0;
+  int vy = 0;
+  int vx = 0;
+  int vw = 0;
+  int iw = 0;
+  int ih = 0;
+  int ix = 0;
+  int iy = 0;
+  int open = 0;
+  int hit = 0;
+  int outside_ok = 0;
+  int second_x = 0;
+  int second_y = 0;
+  int first_y = 0;
+  int kinds = 0;
+
+  gui_init(&c);
+  // M4m（2026-09-28）：**本样本锁的是"老 20px/格"的单位账**（M4 立的口径：帧 2 偏移 20、帧 4 夹到 maxoff）。
+  //   库的滚轮步长已改成 `wheel_step`、**默认 60（3 行/格）** ⇒ 若让默认值走到这里，本样本的
+  //   0/20/40/maxoff 那几个硬数字会当场变红（`dump` 基线也会跟着变）。这里**显式钉住老单位**：
+  //   被测的还是同一条累加/夹取账，"新默认值"的契约改由 `test\samples\flgui13.fl` 管。
+  c.wheel_step = 20;
+  c.lay_w = 120;
+  c.lay_h = 200;
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.ms = 0;
+
+  // ================= 帧 1：6 项内容 / 视口 40 高，无输入 =================
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  i = 0;
+  while (i < 6) {
+    if (i == 0) { gui_label(&c, "a"); }
+    if (i == 1) { gui_label(&c, "b"); }
+    if (i == 2) { gui_label(&c, "c"); }
+    if (i == 3) { gui_label(&c, "d"); }
+    if (i == 4) { gui_label(&c, "e"); }
+    if (i == 5) { gui_label(&c, "f"); }
+    i = i + 1;
+  }
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  vx = gui_cmd_x[0];
+  vy = gui_cmd_y[1];                      // 首项（内容顶）的 y
+  if (c.frame == 1) { r = r | 1; }
+  if (gui_cmd_n == 7) { r = r | 2; }       // 裁剪压栈 + 3 项（第 4~6 项被裁掉）+ 轨道 + 滑块 + 出栈
+  if (gui_cmd_kind[0] == 6) { r = r | 4; }
+  if (gui_cmd_y[1] == vy) { r = r | 8; }
+  if (gui_cmd_y[2] == vy + c.line_h + c.spacing) { r = r | 16; }
+  if (gui_cmd_y[3] == vy + (c.line_h + c.spacing) * 2) { r = r | 32; }
+  if (gui_cmd_kind[4] == 11) { r = r | 64; }
+  if (gui_cmd_x[4] == vx + c.lay_w - 4) { r = r | 64; }
+  if (gui_cmd_kind[5] == 12) { r = r | 128; }
+  if (gui_cmd_kind[6] == 7) { r = r | 256; }
+  if (gui_pool_get(gui_id("list")) == 0) { r = r | 512; }
+  if (maxoff == (c.line_h + c.spacing) * 5 + c.line_h - 40) { r = r | 1024; }
+
+  // ================= 帧 2：鼠标悬停在视口内 + 滚轮向下 1 格 =================
+  in.mx = vx + 10;
+  in.my = vy + 10;
+  in.wheel = -1;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  i = 0;
+  while (i < 6) {
+    gui_label(&c, "x");
+    i = i + 1;
+  }
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  off = gui_pool_get(gui_id("list"));
+  if (off == 20) { r = r | 2048; }
+  if (gui_cmd_kind[1] == 5) { r = r | 4096; }        // 首项被裁掉 ⇒ 第一条文本是第二项
+  if (gui_cmd_y[1] == vy + c.line_h + c.spacing - 20) { r = r | 4096; }
+
+  // ================= 帧 3：向上滚过头 → 夹回 0 =================
+  in.wheel = 5;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  i = 0;
+  while (i < 6) {
+    gui_label(&c, "x");
+    i = i + 1;
+  }
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == 0) { r = r | 8192; }
+
+  // ================= 帧 4：向下滚过头 → 收尾夹到 maxoff =================
+  in.wheel = -10;
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  i = 0;
+  while (i < 6) {
+    gui_label(&c, "x");
+    i = i + 1;
+  }
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_pool_get(gui_id("list")) == maxoff) { r = r | 16384; }
+  in.wheel = 0;
+
+  // ================= 帧 5：偏移夹住后，最后一项可见且偏移稳定 =================
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "list", 40);
+  i = 0;
+  while (i < 6) {
+    gui_label(&c, "x");
+    i = i + 1;
+  }
+  gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  kinds = 0;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 5) { kinds = kinds + 1; }
+    i = i + 1;
+  }
+  if (kinds > 0) { r = r | 32768; }                  // 夹到 maxoff 后仍能看到内容（最后一项）
+  if (gui_pool_get(gui_id("list")) == maxoff) { r = r | 65536; }
+
+  // ================= 帧 6：内容比视口短 ⇒ 不发滚动条、偏移夹回 0 =================
+  gui_begin(&c, &in);
+  gui_scroll_begin(&c, "short", 40);
+  gui_label(&c, "only");
+  maxoff = gui_scroll_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  kinds = 0;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 11) { kinds = kinds + 1; }
+    if (gui_cmd_kind[i] == 12) { kinds = kinds + 1; }
+    i = i + 1;
+  }
+  if (kinds == 0) { r = r | 131072; }
+  if (gui_pool_get(gui_id("short")) == 0) { r = r | 262144; }
+
+  // ================= 帧 7：打开弹层（2 项）=================
+  gui_popup_open(&c, "menu", 20, 30);
+  gui_begin(&c, &in);
+  open = gui_popup_begin(&c, "menu", 2);
+  if (open == 1) {
+    gui_popup_item(&c, "one");
+    gui_popup_item(&c, "two");
+  }
+  gui_popup_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (open == 1) { r = r | 524288; }
+  if (gui_cmd_kind[0] == 1) { r = r | 1048576; }
+  if (gui_cmd_x[0] == 20) { if (gui_cmd_y[0] == 30) { r = r | 2097152; } }
+  kinds = 0;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 2) { kinds = kinds + 1; }
+    i = i + 1;
+  }
+  if (kinds == 2) { r = r | 4194304; }              // 两个条目 = 两条按钮命令
+
+  // 取第二个条目的矩形（由产物自己算出来的坐标）
+  kinds = 0;
+  i = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 2) {
+      kinds = kinds + 1;
+      if (kinds == 2) {
+        second_x = gui_cmd_x[i] + gui_cmd_w[i] / 2;
+        second_y = gui_cmd_y[i] + gui_cmd_h[i] / 2;
+      }
+    }
+    i = i + 1;
+  }
+
+  // ================= 帧 8：点在第二个条目上（按下）=================
+  in.mx = second_x;
+  in.my = second_y;
+  in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  open = gui_popup_begin(&c, "menu", 2);
+  hit = 0;
+  if (open == 1) {
+    if (gui_popup_item(&c, "one") == 1) { hit = 1; }
+    if (gui_popup_item(&c, "two") == 1) { hit = 2; }
+  }
+  gui_popup_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+
+  // ================= 帧 9：原地抬起 ⇒ 点中成立、弹层关闭 =================
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  open = gui_popup_begin(&c, "menu", 2);
+  if (open == 1) {
+    if (gui_popup_item(&c, "one") == 1) { hit = 1; }
+    if (gui_popup_item(&c, "two") == 1) { hit = 2; }
+  }
+  gui_popup_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (hit == 2) { r = r | 8388608; }
+  if (gui_pool_get(gui_id("menu")) == 0) { r = r | 16777216; }
+
+  // ================= 帧 10~11：重开，再在弹层外按下 ⇒ 关闭、且条目没被点中 =================
+  gui_popup_open(&c, "menu", 20, 30);
+  in.mx = 100; in.my = 100; in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  open = gui_popup_begin(&c, "menu", 2);
+  outside_ok = 0;
+  if (open == 1) {
+    if (gui_popup_item(&c, "one") == 0) { if (gui_popup_item(&c, "two") == 0) { outside_ok = 1; } }
+  }
+  gui_popup_end(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (outside_ok == 1) { r = r | 33554432; }
+  if (gui_pool_get(gui_id("menu")) == 0) { r = r | 33554432; }
+
+  if (r == 67108863) { return 42; }
+  return r;
+}

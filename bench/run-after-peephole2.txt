@@ -1,0 +1,45 @@
+﻿===== 单核基准对账：N=2097152 iters=5 =====
+
+----- [0] 生成轮数常量 -----
+[gen-counts] N=2097152 -> bench_flint.dat / bench_counts.h / bench_counts.fl
+
+----- [1] 编译 -----
+flint bench_one.exe   exit=0
+gcc -O1 bench_one_O1.exe exit=0
+gcc -O2 bench_one_O2.exe exit=0
+
+----- [2] 独立第三实现（Node）裁定 -----
+node: k1=1048576 k2=1572864 k3=1048576
+
+----- [3] 实跑与判据 -----
+flint  k1: result=1048576 (OK)  回边=9  entry=0x1000  qpcraw=0 ticks=272192  ns/轮=2.5958  可用
+O1     k1: result=1048576 (OK)  回边=30  entry=0x105F  qpcraw=1 ticks=67912  ns/轮=0.6477  可用
+O2     k1: result=1048576 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=101921  ns/轮=0.972  可用
+flint  k2: result=1572864 (OK)  回边=9  entry=0x1000  qpcraw=0 ticks=586988  ns/轮=5.598  可用
+O1     k2: result=1572864 (OK)  回边=30  entry=0x105F  qpcraw=1 ticks=108400  ns/轮=1.0338  可用
+O2     k2: result=1572864 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=105888  ns/轮=1.0098  可用
+flint  k3: result=1048576 (OK)  回边=9  entry=0x1000  qpcraw=1 ticks=657345  ns/轮=6.2689  可用
+O1     k3: result=1048576 (OK)  回边=30  entry=0x105F  qpcraw=0 ticks=102161  ns/轮=0.9743  可用
+O2     k3: result=1048576 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=2  ns/轮=0  不可用
+
+----- [4] 出表（只列「三项判据全过」的项） -----
+
+impl  kernel  result ns_per_iter
+----  ------  ------ -----------
+flint k1     1048576      2.5958
+O1    k1     1048576      0.6477
+O2    k1     1048576       0.972
+flint k2     1572864       5.598
+O1    k2     1572864      1.0338
+O2    k2     1572864      1.0098
+flint k3     1048576      6.2689
+O1    k3     1048576      0.9743
+
+
+
+----- [5] 跨编译器倍数（flint ÷ gcc，同一把尺子） -----
+k1: flint=2.5958 ns/轮  O1=0.6477（4.01×）  O2=0.972（2.67×）
+k2: flint=5.598 ns/轮  O1=1.0338（5.41×）  O2=1.0098（5.54×）
+k3: flint=6.2689 ns/轮  O1=0.9743（6.43×）  O2=不可用
+
+已落盘：E:\FLINT-lab\bench\result-single.json

@@ -1,0 +1,2 @@
+// incdup_b.fl — B2v 传递去重样本（被 incdup_a.fl 与 incdup_main2.fl 各 include 一次）
+int incdup_b_val() { return 40; }

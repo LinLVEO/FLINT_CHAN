@@ -1,0 +1,60 @@
+﻿===== 单核基准对账：N=2097152 iters=5 =====
+
+----- [0] 生成轮数常量 -----
+[gen-counts] N=2097152 -> bench_flint.dat / bench_counts.h / bench_counts.fl
+
+----- [1] 编译 -----
+flint bench_one.exe   exit=0
+gcc -O1 bench_one_O1.exe exit=0
+gcc -O2 bench_one_O2.exe exit=0
+
+----- [2] 独立第三实现（Node）裁定 -----
+node: k1=1048576 k2=1572864 k3=1048576
+
+----- [3] 实跑与判据 -----
+flint  k1: result=1048576 (OK)  回边=9  entry=0x1000  qpcraw=0 ticks=67884  ns/轮=0.6474  可用
+O1     k1: result=1048576 (OK)  回边=30  entry=0x105F  qpcraw=1 ticks=67905  ns/轮=0.6476  可用
+O2     k1: result=1048576 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=102172  ns/轮=0.9744  可用
+flint  k2: result=1572864 (OK)  回边=9  entry=0x1000  qpcraw=0 ticks=209274  ns/轮=1.9958  可用
+O1     k2: result=1572864 (OK)  回边=30  entry=0x105F  qpcraw=0 ticks=107493  ns/轮=1.0251  可用
+O2     k2: result=1572864 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=105762  ns/轮=1.0086  可用
+flint  k3: result=1048576 (OK)  回边=9  entry=0x1000  qpcraw=1 ticks=136018  ns/轮=1.2972  可用
+O1     k3: result=1048576 (OK)  回边=30  entry=0x105F  qpcraw=0 ticks=101885  ns/轮=0.9717  可用
+O2     k3: result=1048576 (OK)  回边=23  entry=0x105F  qpcraw=0 ticks=1  ns/轮=0  不可用
+
+----- [3b] 第二轮（同形状自证：结果/回边必须一致，时间允许抖动） -----
+flint  k1: result=1048576 (OK)  回边=9  ticks=68027
+O1     k1: result=1048576 (OK)  回边=30  ticks=68005
+O2     k1: result=1048576 (OK)  回边=23  ticks=101854
+flint  k2: result=1572864 (OK)  回边=9  ticks=169748
+O1     k2: result=1572864 (OK)  回边=30  ticks=108449
+O2     k2: result=1572864 (OK)  回边=23  ticks=181054
+flint  k3: result=1048576 (OK)  回边=9  ticks=135817
+O1     k3: result=1048576 (OK)  回边=30  ticks=101869
+O2     k3: result=1048576 (OK)  回边=23  ticks=2
+
+----- [4] 出表（只列「三项判据全过」的项） -----
+
+impl  kernel  result ns_per_iter
+----  ------  ------ -----------
+flint k1     1048576      0.6474
+O1    k1     1048576      0.6476
+O2    k1     1048576      0.9744
+flint k2     1572864      1.9958
+O1    k2     1572864      1.0251
+O2    k2     1572864      1.0086
+flint k3     1048576      1.2972
+O1    k3     1048576      0.9717
+
+
+
+----- [5] 跨编译器倍数（flint ÷ gcc，同一把尺子） -----
+k1: flint=0.6474 ns/轮  O1=0.6476（1×）  O2=0.9744（0.66×）
+k2: flint=1.9958 ns/轮  O1=1.0251（1.95×）  O2=1.0086（1.98×）
+k3: flint=1.2972 ns/轮  O1=0.9717（1.33×）  O2=不可用
+
+已落盘：E:\FLINT-lab\bench\result-single.json
+
+----- [6] 门判据 -----
+  known-form k3/O2: excluded by the three criteria (edges=23 ticks=1)
+bench pass 9 / 9

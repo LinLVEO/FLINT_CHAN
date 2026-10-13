@@ -1,0 +1,9 @@
+// pos-mainptr.fl -- -strict 正例：main 把指针字段当退出码返回（探针常规写法；main 豁免）
+//   理由：main 的返回值按语言定义就是 int 退出码，也没法声明成 int * —— 拦它等于给无法执行的告警。
+struct M { int *p; }
+int main() {
+  struct M m;
+  int *a = new int;
+  m.p = a;
+  return m.p;
+}

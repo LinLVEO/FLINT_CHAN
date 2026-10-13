@@ -1,0 +1,9 @@
+// scopedecl1.fl — for 内 i 在外不可见：块内遮蔽外层变量
+int main() {
+  int a = 1;
+  {
+    int a = 2;      // 遮蔽外层 a
+    a = a * 10;     // a = 20
+  }
+  return a;         // 外层 a 仍是 1
+}

@@ -1,0 +1,14 @@
+// new4.fl — 非 main 函数内 own：出口清理 + 返回值 eax 保护（多次调用分配/释放闭环）
+int make() {
+  int *own p = new int;
+  *(p) = 11;
+  if (*(p) != 11) return 1;
+  return 5;                        // 清理跑完后返回值仍须 = 5（eax 保护）
+}
+int main() {
+  int a = make();
+  int b = make();
+  if (a != 5) return 91;
+  if (b != 5) return 92;
+  return 0;
+}

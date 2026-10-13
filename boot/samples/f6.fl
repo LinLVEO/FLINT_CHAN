@@ -1,0 +1,1 @@
+int main() { return g(42); } int g(int x) { return x; }

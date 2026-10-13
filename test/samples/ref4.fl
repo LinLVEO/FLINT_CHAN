@@ -1,0 +1,10 @@
+void bump(int &v) {
+  v = v + 1;
+}
+int main() {
+  int c;
+  c = 41;
+  int &r = c;
+  bump(r);
+  return c;
+}

@@ -1,0 +1,6 @@
+// comp5.fl — /= 负数：a=-10; a /= 3; = -3
+int main() {
+  int a = -10;
+  a /= 3;
+  return a;   // -3
+}

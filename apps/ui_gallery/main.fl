@@ -1,0 +1,263 @@
+// main.fl -- ui_gallery：**FLGUI 控件层**画廊（M3(b) dogfood）
+//   M3(b) 把控件从 ui_lib 的 ui_*(button/check/scroll) 换成 FLGUI 的 gui_button / gui_checkbox /
+//   gui_scroll_begin·end；**窗口 / 表面 / 字体 / ULW 上屏仍走 flgui_win32 → ui_lib**（并存，不一刀切）。
+//   （原 ui_lib 版留档：main.fl.bak-20260922-211636-FLGUI-M3开工前）
+// 用途两条：
+//   ① 人看：真窗口、鼠标可点（无边框置顶窗 420x260，创建在屏幕 (300,180)）
+//   ② 机器验：**真鼠标点击** + 文本成绩单，驱动脚本 apps\ui_gallery\mouse-test.ps1
+//      成绩单 = E:\FLINT-lab\tmp\row-probe\ui-gallery-dump.txt：
+//        btn=2 chk=1 scr=272 frames=95 wl=300 wt=180 mx=401 my=120 down=0 clicked=1
+//        btnr=14,40,156,32 chkr=14,92,136,16 viewr=188,40,215,194
+//      （点/切/滚任一变化都重写一次；另有每 60 帧的周期落盘 —— 脚本直接杀进程也能拿到现场）
+// M3(b) 三条口径：
+//   ① 控件矩形用 gui_next_rect **钉成与 ui_lib 版同一套坐标**（button (14,40,156,32) /
+//      checkbox (14,92,136,16) / 滚动视图 (188,40,215,194)）⇒ mouse-test.ps1 的硬编码点击坐标
+//      **一字不改**照旧有效（同一套真鼠标判据同时验两条实现）。
+//   ② 滚动条 x 有**有意变更**：ui_lib 版 = 独立 10px 滚动条 @396..406；FLGUI 版 = 视图右缘 4px 宽滑块
+//      @399..402（视图右缘 = 188+215 = 403 ⇒ 脚本拖拽用的 x=401 仍落在滑块上）。
+//      滚动交互 = **拖滑块**（M3(b) 给 FLGUI 补的；M2 只有滚轮）＋ 滚轮。
+//   ③ 渲染层有**有意变更**：ui_lib 版是"直接往窗口 DC 画"，本版是"FLGUI 命令表 → 表面 → ULW 上屏"，
+//      配色走主题层（下面把 theme_bg / theme_text 对齐 ui_lib 版的底色与文字色，控件色仍用 FLGUI 主题）。
+//   ④ dump 里带上三个控件的**实际矩形**（从 gc.cur_* 读回，不是复述常量）⇒ 判据能自证"点的是控件"。
+// 关窗：右键点窗口 = 退出（FLGUI 的泵只认 WM_QUIT ⇒ 这里走 GetAsyncKeyState(2) 轮询）
+include "flgui_win32.fl"
+
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+
+// 诊断全局（dump 里 wl/wt/mx/my/down/clicked 与三个控件矩形的来源）
+int g_wl = 0;
+int g_wt = 0;
+int g_mx = 0;
+int g_my = 0;
+int g_down = 0;
+int g_clicked = 0;
+int g_bx = 0; int g_by = 0; int g_bw = 0; int g_bh = 0;
+int g_cx = 0; int g_cy = 0; int g_cw = 0; int g_ch = 0;
+int g_vx = 0; int g_vy = 0; int g_vw = 0; int g_vh = 0;
+
+// 卡 T-20261012-210751（T1 第二刀）：f 是 CreateFileA 句柄（地址类）⇒ 形参与持有者一律 int *
+//   （SPEC 决策 17）。原先声明成 int = 旧静默缺口放行的写法，v1.4.27 起默认档硬错。
+int wbytes(int *f, char *s, int n) {
+  WriteFile(f, s, n, 0, 0);
+  return 0;
+}
+
+int wnum(int *f, int v) {
+  char b[16];
+  int n = 0;
+  int i = 0;
+  if (v < 0) { v = 0; }
+  if (v == 0) { b[0] = 48; n = 1; }
+  while (v > 0) { b[n] = 48 + v % 10; n = n + 1; v = v / 10; }
+  i = n - 1;
+  while (i >= 0) { wbytes(f, &b[i], 1); i = i - 1; }
+  return n;
+}
+
+// 数字 → 十进制文本（写进 b、以 NUL 收尾，可直接喂 gui_label）；返回位数
+int num_str(char *b, int v) {
+  char t[16];
+  int n = 0;
+  int i = 0;
+  int j = 0;
+  if (v < 0) { v = 0; }
+  if (v == 0) { t[0] = 48; n = 1; }
+  while (v > 0) { t[n] = 48 + v % 10; n = n + 1; v = v / 10; }
+  i = n - 1;
+  while (i >= 0) { b[j] = t[i]; i = i - 1; j = j + 1; }
+  b[j] = 0;
+  return n;
+}
+
+int dump_state(int clicks, int chk, int scr, int frames, int rad, int vol) {
+  int *f = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\ui-gallery-dump.txt", 0x40000000, 0, 0, 2, 0, 0);
+  if (f == 0 - 1) { return 0; }
+  wbytes(f, "btn=", 4); wnum(f, clicks);
+  wbytes(f, " chk=", 5); wnum(f, chk);
+  wbytes(f, " scr=", 5); wnum(f, scr);
+  wbytes(f, " frames=", 8); wnum(f, frames);
+  wbytes(f, " wl=", 4); wnum(f, g_wl);
+  wbytes(f, " wt=", 4); wnum(f, g_wt);
+  wbytes(f, " mx=", 4); wnum(f, g_mx);
+  wbytes(f, " my=", 4); wnum(f, g_my);
+  wbytes(f, " down=", 6); wnum(f, g_down);
+  wbytes(f, " clicked=", 9); wnum(f, g_clicked);
+  // M4n：单选钮（0 = 没选 / 1 = OPT-A / 2 = OPT-B）与滑块值（美术批的可见状态，供人看/脚本读）
+  wbytes(f, " rad=", 5); wnum(f, rad);
+  wbytes(f, " vol=", 5); wnum(f, vol);
+  wbytes(f, " btnr=", 6); wnum(f, g_bx); wbytes(f, ",", 1); wnum(f, g_by);
+  wbytes(f, ",", 1); wnum(f, g_bw); wbytes(f, ",", 1); wnum(f, g_bh);
+  wbytes(f, " chkr=", 6); wnum(f, g_cx); wbytes(f, ",", 1); wnum(f, g_cy);
+  wbytes(f, ",", 1); wnum(f, g_cw); wbytes(f, ",", 1); wnum(f, g_ch);
+  wbytes(f, " viewr=", 7); wnum(f, g_vx); wbytes(f, ",", 1); wnum(f, g_vy);
+  wbytes(f, ",", 1); wnum(f, g_vw); wbytes(f, ",", 1); wnum(f, g_vh);
+  wbytes(f, "\n", 1);
+  CloseHandle(f);
+  return 0;
+}
+
+int main() {
+  struct GuiWin win;
+  struct GuiCtx gc;
+  struct GuiInput gin;
+  struct Surf surf;
+  struct GuiRect r;
+  struct RECT wr;
+  struct DragSt dg;
+  char nb[24];
+  int *h = 0;
+  int *hf = 0;
+  int clicks = 0;
+  int chk_on = 0;
+  int scr_pos = 0;
+  int frames = 0;
+  int running = 1;
+  int i = 0;
+  int nrows = 40;
+  int was = 0;
+  int waspos = 0;
+  int rad = 0;                     // M4n：单选钮选中档（0 = 没选 / 1 = OPT-A / 2 = OPT-B）
+  int vol = 40;                    // M4n：滑块值（美术批的可见演示）
+  int wasrad = 0;
+  int wasvol = 0;
+
+  win.cls = "FLINTGAL";
+  win.x = 300; win.y = 180; win.w = 420; win.h = 260; win.alpha = 255;
+  if (!gui_win_make(&win)) return 90;
+  h = win.hwnd;
+  hf = gui_win_font_init(16);      // M4：字体建一次（原先是本地 ui_font_make(16)）
+  gui_win_dpi_apply(&gc);          // M4：读回 DPI 写进 ctx（本机 96 ⇒ gui_dpi_scale 恒等）
+  if (!gui_win_surf(&surf, &win, 0)) return 91;
+  gui_init(&gc);
+  dg.on = 0;                       // M4m：拖动状态**必须先清零**（局部 struct 不会被清零 —— 脏 on 会让每帧乱移窗口）
+  // M4j：**现代 UI · 蓝白主题**（用户拍板"要好看点、主题蓝白"）。走**预设函数**这条路 ⇒ 只有画廊变，
+  //   别的 app（demo / 浮窗）零扰动。⚠️ 原先这里手改 theme_bg / theme_text 去对齐 ui_lib 的老观感，
+  //   现在整层交给预设（**别再手抄具体字段** —— 那正是 M4 把主题收成单点的原因）。
+  gui_theme_light_blue(&gc);
+  // M4n（2026-09-28，UI 美术第 2 批）：**给眼睛看的门面**（三处都是 app 级设置，库的默认值一个字节没动）
+  //   ① 勾选框/单选钮的方块放大到 16px（12px 的 ✓ 在屏幕上太小，看不清"到底有没有打勾"；`box_w` 本来就是
+  //      ctx 字段、控件层一直按它算几何 ⇒ 放大不改任何判据的坐标，mouse-test 点的还是同一个控件矩形）。
+  //   ② 可编辑文本域给一行初始文本（不然点进去是个空框，"焦点圈套住的盒子"看着像空的）。
+  //   ③ 加一条**进度条**、一条**滑块**、一对**单选钮**：本批的圆角端点 / 圆形拇指 / 圆环+圆点只有画出来才看得见。
+  gc.box_w = 16;
+  gui_edit_init(0, "focus", 16);
+
+  dump_state(clicks, chk_on, scr_pos, frames, rad, vol);
+
+  while (running == 1) {
+    // FLGUI 泵：只认 WM_QUIT（滚轮在这里累加进 gin.wheel）；其它消息派发 → gui_win_proc（ValidateRect 等）
+    if (gui_win_pump(&win, &gin) == 0) { running = 0; }
+    if (running == 0) { break; }
+    gui_win_input(&win, &gin);
+    // M4m：**窗口拖动**（拖动区 = 顶栏 24px）＋ **双击顶栏 = 最大化/还原**。
+    //   顺序有讲究：按下先判"要不要开拖" → 抬手先收尾 → 每帧跟手（frame 内含"物理左键兜底"，
+    //   快拖出窗口再松手也不会自走）。拖动只动窗口位置/尺寸，**命令表一个字节都不动**。
+    if (gin.pressed == 1) { gui_win_drag_begin(&dg, &win, gin.my); }
+    if (gin.released == 1) { gui_win_drag_end(&dg); }
+    gui_win_drag_frame(&dg);
+    if ((GetAsyncKeyState(2) & 0x8000) != 0) { running = 0; break; }   // VK_RBUTTON → 退出
+
+    GetWindowRect(h, &wr);
+    g_wl = wr.l;
+    g_wt = wr.t;
+    g_mx = gin.mx;
+    g_my = gin.my;
+    g_down = gin.down;
+    g_clicked = gin.released;
+
+    gui_begin(&gc, &gin);
+
+    // 标题
+    r.x = 14; r.y = 14; r.w = 128; r.h = 16;
+    gui_next_rect(&gc, &r);
+    gui_label(&gc, "FLINT-UI gallery");
+
+    // 按钮（与 ui_lib 版同一矩形：中心即脚本点的 (92,56)）
+    r.x = 14; r.y = 40; r.w = 156; r.h = 32;
+    gui_next_rect(&gc, &r);
+    was = gui_button(&gc, "CLICK");
+    g_bx = gc.cur_ix; g_by = gc.cur_iy; g_bw = gc.cur_iw; g_bh = gc.cur_ih;
+    if (was == 1) {
+      clicks = clicks + 1;
+      dump_state(clicks, chk_on, scr_pos, frames, rad, vol);
+    }
+
+    // "clicks=N"（旧路是 ui_text + ui_num，这里两段文字同一行）
+    r.x = 14; r.y = 80; r.w = 56; r.h = 16;
+    gui_next_rect(&gc, &r);
+    gui_label(&gc, "clicks=");
+    num_str(&nb[0], clicks);
+    r.x = 70; r.y = 80; r.w = 64; r.h = 16;
+    gui_next_rect(&gc, &r);
+    gui_label(&gc, &nb[0]);
+
+    // 勾选框（M4n：`gc.box_w = 16` ⇒ 16px 方块 + 逐像素画的勾；矩形仍是脚本点过的那个）
+    r.x = 14; r.y = 92; r.w = 136; r.h = 16;
+    gui_next_rect(&gc, &r);
+    was = chk_on;
+    chk_on = gui_checkbox(&gc, "TICK");
+    g_cx = gc.cur_ix; g_cy = gc.cur_iy; g_cw = gc.cur_iw; g_ch = gc.cur_ih;
+    if (chk_on != was) { dump_state(clicks, chk_on, scr_pos, frames, rad, vol); }
+
+    // ===== M4n：本批美术的**可见演示**（左列空闲区 y ≥ 110；不动任何老坐标，鼠标/滚轮探针一字不改）=====
+    // 单选钮一对（默认组 ⇒ 互斥；圆环 = 1px `kind 8`、选中内点 = 实心 `kind 9`，都是渲染端逐像素画的圆）
+    r.x = 14; r.y = 112; r.w = 80; r.h = 16;
+    gui_next_rect(&gc, &r);
+    if (gui_radio(&gc, "OPT-A") == 1) { rad = 1; }
+    r.x = 100; r.y = 112; r.w = 80; r.h = 16;
+    gui_next_rect(&gc, &r);
+    if (gui_radio(&gc, "OPT-B") == 1) { rad = 2; }
+
+    // 进度条（M4n：填充条 `kind 12` 随 `theme_radius` 走圆角端点 —— 与圆角底嵌套）
+    r.x = 14; r.y = 134; r.w = 174; r.h = 14;
+    gui_next_rect(&gc, &r);
+    gui_progressbar(&gc, "LOAD 60%", 60, 100);
+
+    // 滑块（M4n：已选段右端一个**圆形拇指**、直径 = 轨道高；拖动仍走 M4m 的倍率/锚点那条路）
+    r.x = 14; r.y = 154; r.w = 174; r.h = 14;
+    gui_next_rect(&gc, &r);
+    wasvol = vol;
+    vol = gui_slider(&gc, "VOL", vol, 100);
+
+    // 可编辑文本域（M4n：点进去 ⇒ 焦点 ⇒ 渲染端在盒**外沿**画 1px `theme_focus` 圈；本 app 是"纯后台档"
+    //   ⇒ 不接真键盘，点进去只看得到焦点圈与光标条 —— 键盘那半在 `apps\flgui_demo`）
+    r.x = 14; r.y = 176; r.w = 174; r.h = 14;
+    gui_next_rect(&gc, &r);
+    gui_textfield_edit(&gc, 0, 16);
+
+    if (vol != wasvol) { dump_state(clicks, chk_on, scr_pos, frames, rad, vol); }
+    if (rad != wasrad) { wasrad = rad; dump_state(clicks, chk_on, scr_pos, frames, rad, vol); }
+
+    // 滚动视图（40 行；右缘 403 ⇒ 滑块 @399..402，脚本拖拽的 x=401 落在滑块上）
+    r.x = 188; r.y = 40; r.w = 215; r.h = 194;
+    gui_next_rect(&gc, &r);
+    gui_scroll_begin(&gc, "list", 194);
+    i = 0;
+    while (i < nrows) {
+      gui_label(&gc, "row ");
+      // ⚠️ `gui_same_line` = 「**下一个**项接在本行」的开关 ⇒ 必须写在第二段之前。
+      //    写在第一段之前会让第一段自己落到上一行、第二段另起一行（实测：两段错行 + 与上一行叠字）。
+      gui_same_line(&gc);
+      num_str(&nb[0], i + 1);
+      gui_label(&gc, &nb[0]);
+      i = i + 1;
+    }
+    gui_scroll_end(&gc);                    // 拖滑块 / 滚轮都在这里面生效
+    g_vx = gc.cur_ix; g_vy = gc.cur_iy; g_vw = gc.cur_iw; g_vh = gc.cur_ih;
+    waspos = scr_pos;
+    scr_pos = gui_pool_get(gui_id("list"));
+    if (scr_pos != waspos) { dump_state(clicks, chk_on, scr_pos, frames, rad, vol); }
+
+    gui_end(&gc);
+    gui_win_render(&surf, &gc, hf);         // 命令表 → 表面内存 DC
+    gui_win_show(&surf);                    // 写 alpha（预乘）→ ULW 上屏
+
+    if (frames % 60 == 0) { dump_state(clicks, chk_on, scr_pos, frames, rad, vol); }
+    frames = frames + 1;
+    gui_win_frame_wait(&gc);                // M4e：唯一"等完这一帧"入口（按 gc.frame_fps 档位限速；默认 60fps）
+  }
+  dump_state(clicks, chk_on, scr_pos, frames, rad, vol);
+  return 0;
+}

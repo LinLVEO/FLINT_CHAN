@@ -1,0 +1,1 @@
+int main() { int s = 0; s = s + 1; s = s + 2; s = s + 3; return s; }

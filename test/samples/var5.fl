@@ -1,0 +1,10 @@
+// var5.fl — 交换：a=10,b=20 交换后 return a*2+b = 50
+int main() {
+  int a = 10;
+  int b = 20;
+  int t;
+  t = a;
+  a = b;
+  b = t;
+  return a * 2 + b;
+}

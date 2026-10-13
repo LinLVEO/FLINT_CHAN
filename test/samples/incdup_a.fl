@@ -1,0 +1,3 @@
+// incdup_a.fl — B2v：a 依赖 b（菱形 include 的上游）
+include "incdup_b.fl"
+int incdup_a_val() { return incdup_b_val() + 2; }

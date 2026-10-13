@@ -1,0 +1,8 @@
+// b2j6.fl — B2j 标量取址 + 解引用写：期望 42
+int main() {
+  int x;
+  x = 0;
+  int *q = &x;
+  *q = 42;
+  return x;
+}

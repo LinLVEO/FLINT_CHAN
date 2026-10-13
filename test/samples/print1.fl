@@ -1,0 +1,21 @@
+// print1.fl — print 内建深度验证：类型自适应分派 + cout 式不换行 + 表达式/指针段
+// stdout 期望（run-tests.js 捕获断言）：
+//   i=3 c=A done
+//   123|-7|0
+//   no-nl42|end
+//   sum=15
+//   hello world
+// 覆盖：char* 文本段 / int 段 / char 变量段（字符）/ 不换行拼接 / 表达式段 / char* 变量段
+int main() {
+  int i = 3;
+  char c = 'A';
+  print(["i=", i, " c=", c, " done\n"]);
+  print([123, "|", -7, "|", 0, "\n"]);
+  print(["no-nl", 42]);          // cout 式：默认不换行
+  print(["|end", "\n"]);
+  int sum = 10;
+  print(["sum=", sum + 5, "\n"]);   // 表达式段 → int
+  char *s = "hello";
+  print([s, " world\n"]);           // char* 变量段
+  return 0;
+}

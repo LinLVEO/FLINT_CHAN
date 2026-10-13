@@ -1,0 +1,13 @@
+void mul2(int &x) {
+  x = x * 2;
+}
+void mul4(int &x) {
+  mul2(x);
+  mul2(x);
+}
+int main() {
+  int v;
+  v = 6;
+  mul4(v);
+  return v;
+}

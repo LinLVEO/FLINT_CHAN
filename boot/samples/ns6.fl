@@ -1,0 +1,4 @@
+// ns6（负例，B2k 改判）：struct 值字段仍不支持（char 标量字段已支持 → 改测 struct 值字段）
+struct P { int x; }
+struct Q { struct P p; }
+int main() { return 0; }

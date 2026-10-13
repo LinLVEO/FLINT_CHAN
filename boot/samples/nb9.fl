@@ -1,0 +1,5 @@
+// nb9.fl — 负例：数组 new 暂不支持（new int[4] 必须报错）
+int main() {
+  int *p = new int[4];
+  return 0;
+}

@@ -1,0 +1,6 @@
+// var1.fl — 声明+初始化+运算：int a=3; int b=4; return a*b; = 12
+int main() {
+  int a = 3;
+  int b = 4;
+  return a * b;
+}

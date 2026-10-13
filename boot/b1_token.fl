@@ -1,0 +1,58 @@
+// b1_token.fl — FLINT 自举 B1a：tokenizer 自测驱动（B1 任务卡 T-20260908-020937）
+// 2026-09-08 重构：tokenize 库抽到 lib_token.fl（本文件 include 复用，供 parser 共享）
+// 自测：tokenize 字符串字面量 → 逐 token 断言，退出码 0 = 通过
+include "lib_token.fl"
+
+int main() {
+  char *src = "int main() { return 42; }";
+  int kinds[64];
+  int poss[64];
+  int lens[64];
+  int vals[64];
+  struct TokOut o;
+  o.kinds = kinds;
+  o.pos = poss;
+  o.lens = lens;
+  o.vals = vals;
+  o.cap = 64;
+  int n = 0;
+  while (src[n] != 0) n = n + 1;   // strlen（ASCII）
+  int cnt = tokenize(src, n, &o);
+
+  // 期望：int main ( ) { return 42 ; } + EOF = 10 tokens
+  if (cnt != 10) return 1;
+  // kind 序列
+  if (kinds[0] != 1) return 2;     // int
+  if (kinds[1] != 1) return 3;     // main
+  if (kinds[2] != 3) return 4;     // (
+  if (kinds[3] != 3) return 5;     // )
+  if (kinds[4] != 3) return 6;     // {
+  if (kinds[5] != 1) return 7;     // return
+  if (kinds[6] != 2) return 8;     // 42
+  if (kinds[7] != 3) return 9;     // ;
+  if (kinds[8] != 3) return 10;    // }
+  if (kinds[9] != 0) return 11;    // EOF
+  // 值/位置
+  if (vals[6] != 42) return 12;
+  if (poss[6] != 20) return 13;    // 42 在 "int main() { return 42; }" 中 '4' 偏移 20
+  if (lens[1] != 4) return 14;     // main 长度 4
+  if (vals[2] != '(') return 15;   // 符号值 = 字符码
+  if (poss[0] != 0) return 16;
+
+  // —— 第二样本：四则 + 函数（验证数字值/符号序列）——
+  char *src2 = "int f() { return 1+2*3; }";
+  int n2 = 0;
+  while (src2[n2] != 0) n2 = n2 + 1;
+  int cnt2 = tokenize(src2, n2, &o);
+  if (cnt2 != 14) return 17;       // int f ( ) { return 1 + 2 * 3 ; } EOF
+  if (kinds[5] != 1) return 18;    // return
+  if (vals[6] != 1) return 19;     // 1
+  if (kinds[6] != 2) return 20;    // 1 是数字
+  if (vals[7] != '+') return 21;   // +
+  if (vals[8] != 2) return 22;     // 2
+  if (vals[9] != '*') return 23;   // *
+  if (vals[10] != 3) return 24;    // 3
+  if (vals[11] != ';') return 25;  // ;
+  if (vals[12] != '}') return 26;  // }
+  return 0;
+}

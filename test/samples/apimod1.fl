@@ -1,0 +1,15 @@
+// apimod1.fl — v1.4.8：api 的模块名支持**字符串字面量**（带点全名 / 带路径）
+//
+// 动机（多语言交火·编译期缝合）：标识符词法**不吃 '.'**（is_ident2 只认字母/数字/下划线），
+//   所以 `api cabridge.dll` 写不出来 —— 想指名全名只能走字面量形态。
+// 口径：模块名含 '.' 或 '\' 或 '/' → **原样写进导入表**；否则补 ".dll"（裸短名行为一字不变）。
+//
+// 本样本用系统自带的 msvcrt.dll 做**离线可复现**的闭环（不引入任何自制二进制依赖）：
+//   写 `api "msvcrt.dll"` 走"含点 → 原样用"这条新分支，若被错误地再补一次 .dll
+//   就会去找 msvcrt.dll.dll → **进程启动直接失败**（STATUS_DLL_NOT_FOUND），退出码即红。
+api "msvcrt.dll" int prf(int, int, int, int) as "printf";
+
+int main() {
+  prf("apimod ok %d\n", 7, 0);
+  return 42;
+}

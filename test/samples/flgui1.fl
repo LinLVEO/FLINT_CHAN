@@ -1,0 +1,168 @@
+// flgui1.fl — FLGUI M1 无头内核回归（**不建窗**：合成输入当数据喂 gui_begin，状态 dump 成文本）
+// 判据（卡 T-20260922-042229 的 M1 五条里的 ①②③ + 守卫，位掩码全亮 = 42）：
+//   ① 模拟点击 → 计数正确（按下当帧不算、抬起且仍悬停才算；未悬停不触发）
+//   ② 布局自证 → 每帧把 rect/游标/命令表 dump 成文本（stdout），由 test\flgui-verify.ps1 双端逐字节对账
+//   ③ 状态池自证 → 勾选态跨帧存活（dump 里 POOLSUM 一行可见）＋ 不同 label 的槽不串位
+//   ④ 守卫 → 命令表 256 条溢出、文本 arena 4096 溢出、裁剪栈配平，都只计数上报、不越界不崩
+// 位：0 帧号 ｜1 命令数 ｜2 label.x=pad ｜3 label.y=pad ｜4 按钮另起行回列首 ｜5 列推进=上行高+间距
+//     6 文本长度 ｜7 hot ｜8 active ｜9 按下当帧不算点击 ｜10 抬起计数=1 ｜11 令牌收回
+//     12 未悬停不触发 ｜13 勾选=1 ｜14 池写入 ｜15 池跨帧仍 1 ｜16 别的槽没被串 ｜17 裁剪掉的不发命令
+//     18 裁剪栈配平 ｜19 命令表截到 256 ｜20 命令表溢出计数 44 ｜21 文本 arena 溢出计数 >0
+include "flgui_widgets.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiRect box;
+  struct GuiRect far;
+  int r = 0;
+  int clicks = 0;
+  int cb = 0;
+  int i = 0;
+  int lx = 0;
+  int ly = 0;
+  int lh = 0;
+  int bw = 0;
+  int bx = 0;
+  int by = 0;
+  int btn_id = 0;
+  int box_id = 0;
+
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 120;
+  btn_id = gui_id("ok");
+  box_id = gui_id("opt");
+
+  // ================= 帧 1：无输入，label + button（布局游标自证）=================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0; in.wheel = 0; in.ms = 0;
+  gui_begin(&c, &in);
+  gui_label(&c, "cpu");
+  gui_button(&c, "ok");
+  gui_end(&c);
+  gui_dump(&c);
+
+  if (c.frame == 1) { r = r | 1; }
+  if (gui_cmd_n == 2) { r = r | 2; }
+  lx = gui_cmd_x[0];
+  ly = gui_cmd_y[0];
+  lh = gui_cmd_h[0];
+  bw = gui_cmd_w[1];
+  bx = gui_cmd_x[1];
+  by = gui_cmd_y[1];
+  if (lx == c.pad) { r = r | 4; }
+  if (ly == c.pad) { r = r | 8; }
+  if (bx == lx) { r = r | 16; }
+  if (by == ly + lh + c.spacing) { r = r | 32; }
+  if (gui_cmd_tlen[0] == 3) { r = r | 64; }
+
+  // ================= 帧 2：移到按钮上按下 =================
+  in.mx = bx + bw / 2;
+  in.my = by + 10;
+  in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  gui_label(&c, "cpu");
+  clicks = clicks + gui_button(&c, "ok");
+  gui_end(&c);
+  gui_dump(&c);
+  if (c.hot == btn_id) { r = r | 128; }
+  if (c.active == btn_id) { r = r | 256; }
+  if (clicks == 0) { r = r | 512; }
+
+  // ================= 帧 3：原地抬起 → 点击成立 =================
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  gui_label(&c, "cpu");
+  clicks = clicks + gui_button(&c, "ok");
+  gui_end(&c);
+  gui_dump(&c);
+  if (clicks == 1) { r = r | 1024; }
+  if (c.active == 0) { r = r | 2048; }
+
+  // ================= 帧 4~5：负对照 —— 在别处按下再抬起，不该算点击 =================
+  in.mx = 150; in.my = 110; in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  gui_label(&c, "cpu");
+  clicks = clicks + gui_button(&c, "ok");
+  gui_end(&c);
+  gui_dump(&c);
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  gui_label(&c, "cpu");
+  clicks = clicks + gui_button(&c, "ok");
+  gui_end(&c);
+  gui_dump(&c);
+  if (clicks == 1) { r = r | 4096; }
+
+  // ================= 帧 6：先跑一帧勾选框拿到它的矩形 =================
+  in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0;
+  gui_begin(&c, &in);
+  gui_checkbox(&c, "opt");
+  gui_end(&c);
+  gui_dump(&c);
+
+  // ================= 帧 7~8：点上勾选框（按下 ＋ 原地抬起）=================
+  in.mx = gui_cmd_x[0] + 6;
+  in.my = gui_cmd_y[0] + 6;
+  in.down = 1; in.pressed = 1; in.released = 0;
+  gui_begin(&c, &in);
+  cb = gui_checkbox(&c, "opt");
+  gui_end(&c);
+  gui_dump(&c);
+  in.down = 0; in.pressed = 0; in.released = 1;
+  gui_begin(&c, &in);
+  cb = gui_checkbox(&c, "opt");
+  gui_end(&c);
+  gui_dump(&c);
+  if (cb == 1) { r = r | 8192; }
+  if (gui_pool_get(box_id) == 1) { r = r | 16384; }
+
+  // ================= 帧 9：无输入 → 勾选态跨帧存活 =================
+  in.released = 0;
+  gui_begin(&c, &in);
+  cb = gui_checkbox(&c, "opt");
+  gui_end(&c);
+  gui_dump(&c);
+  if (cb == 1) { r = r | 32768; }
+  if (gui_pool_get(gui_id("cpu")) == 0) { r = r | 65536; }
+
+  // ================= 帧 10：裁剪 —— 被裁掉的控件不发命令 =================
+  gui_begin(&c, &in);
+  gui_label(&c, "a");
+  box.x = 0; box.y = 0; box.w = 50; box.h = 50;
+  gui_clip_push(&c, &box);
+  far.x = 100; far.y = 100; far.w = 10; far.h = 10;
+  gui_next_rect(&c, &far);
+  gui_label(&c, "b");
+  gui_clip_pop(&c);
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_cmd_n == 3) { r = r | 131072; }
+  if (c.clip_n == 0) { r = r | 262144; }
+
+  // ================= 帧 11：命令表溢出守卫（300 条 → 截到 256、丢 44）=================
+  gui_begin(&c, &in);
+  i = 0;
+  while (i < 300) {
+    gui_label(&c, "x");
+    i = i + 1;
+  }
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_cmd_n == 256) { r = r | 524288; }
+  if (gui_cmd_over == 44) { r = r | 1048576; }
+
+  // ================= 帧 12：文本 arena 溢出守卫（420 × 10 = 4200 > 4096）=================
+  gui_begin(&c, &in);
+  i = 0;
+  while (i < 420) {
+    gui_text_put(&c, "0123456789");
+    i = i + 1;
+  }
+  gui_end(&c);
+  gui_dump(&c);
+  if (gui_text_over > 0) { r = r | 2097152; }
+
+  if (r == 4194303) { return 42; }
+  return r;
+}

@@ -1,0 +1,61 @@
+// probe_qpc.fl —— 诊断：QueryPerformanceFrequency / Counter 在 FLINT 侧到底读到什么
+// 立卡：T-20260919-010437（周期0）—— 对账时发现的疑点：
+//   同一台机器，FLINT 侧报 qpf≈3.2~4.3 GHz（每次跑都不一样），而 QueryPerformanceCounter
+//   低 32 位差算出来的频率是 ~3.1 GHz 且稳定。QPF 应当是**常数**，读出来却在变 ⇒ 有两种可能：
+//   ① 返回值被当 32 位截断/高半槽残留 ② 调用点/声明有问题。
+//   判据（本文件）：同一个进程里连读 5 次 QPF，**必须每次相同**；再看它与 Counter 低 32 位差
+//   推出的频率是否一致（同源则一致）。
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+
+struct QPC { int lo; int hi; }
+
+int main() {
+  struct QPC q;
+  int i = 0;
+
+  // 段 A：连读 5 次 QPF（进同一个结构体；若返回值截断/残留，这里应该看到不一致）
+  print(["A: QPF x5 = "]);
+  while (i < 5) {
+    q.lo = 0; q.hi = 0;
+    QueryPerformanceFrequency(&q);
+    print([q.lo, " "]);
+    i = i + 1;
+  }
+  print(["\n"]);
+
+  // 段 B：连读 5 次 QPC（看低 32 位是否在变、量级是否合理）
+  print(["B: QPC x5 low32 = "]);
+  i = 0;
+  while (i < 5) {
+    q.lo = 0; q.hi = 0;
+    QueryPerformanceCounter(&q);
+    print([q.lo, " "]);
+    i = i + 1;
+  }
+  print(["\n"]);
+
+  // 段 C：拿 QPC 低 32 位差推频率（忙循环约几十 ms）
+  struct QPC s;
+  struct QPC e;
+  s.lo = 0; s.hi = 0; e.lo = 0; e.hi = 0;
+  QueryPerformanceCounter(&s);
+  int k = 0;
+  while (k < 20 * 1000 * 1000) { k = k + 1; }
+  QueryPerformanceCounter(&e);
+  int d = e.lo - s.lo;
+  print(["C: busy 20M, dlow32=", d, " -> QPC差/20M = ", d / (20 * 1000 * 1000), "\n"]);
+
+  // 段 D：把 64 位当两半读（hi 是否非 0 —— QPC 的 64 位值高半在 Windows 上很小但通常非 0）
+  struct QPC h;
+  h.lo = 0; h.hi = 0;
+  QueryPerformanceCounter(&h);
+  print(["D: QPC hi=", h.hi, " lo=", h.lo, "\n"]);
+
+  // 段 E：QPF 的 hi 半（若频率被当 64 位写，hi 应为 0）
+  struct QPC f;
+  f.lo = 0; f.hi = 0;
+  QueryPerformanceFrequency(&f);
+  print(["E: QPF hi=", f.hi, " lo=", f.lo, "\n"]);
+  return 0;
+}

@@ -1,0 +1,17 @@
+// b6b1.fl — v1.4.31 正例：**33 字段 struct 可以编**（字段上限 32 → 64，对齐真 flint 现状）
+//   来历：原负例 nb33（B4b 时真 flint 的上限还是 32）——2026-09-19 边界探针 fields_65 实测
+//   真 flint 已是 **64**，boot 还写死 32 ⇒ 「真 flint 收的 boot 编不了」的真断点。
+//   本样本从负例转正例（同 B4b 的 nb26 转正先例），新上限由负例 nb35（65 字段）钉住。
+struct Big {
+  int f0; int f1; int f2; int f3; int f4; int f5; int f6; int f7;
+  int f8; int f9; int f10; int f11; int f12; int f13; int f14; int f15;
+  int f16; int f17; int f18; int f19; int f20; int f21; int f22; int f23;
+  int f24; int f25; int f26; int f27; int f28; int f29; int f30; int f31;
+  int f32;
+}
+int main() {
+  struct Big b;
+  b.f0 = 40;
+  b.f32 = 2;
+  return b.f0 + b.f32;
+}

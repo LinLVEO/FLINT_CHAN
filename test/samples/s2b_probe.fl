@@ -1,0 +1,15 @@
+// s2b_probe.fl — v0.9.2：ptr 返回类型 API（64 位句柄）直入 struct 指针字段
+// 声明为 ptr → API 调用表达式按地址类参与 64 位间接写/比较；
+// 若按旧 int 声明，间接写恒 32 位 → r.mod 截断高 32 位 → 与 h 不等 → 91
+api kernel32 ptr GetModuleHandleA(int);
+struct Rec { int a; int *mod; }
+int main() {
+  struct Rec r;
+  r.a = 1;
+  r.mod = GetModuleHandleA(0);      // ptr 返回 → 64 位间接写（句柄直入字段，int* 变量绕道退役）
+  int *h = GetModuleHandleA(0);     // 对照：ptr 返回 → 直接 64 位存变量
+  if (r.mod != h) return 91;        // 字段 64 位读 vs 变量 64 位读（两调用同进程同基址）
+  if (r.mod == 0) return 92;        // 模块基址 = 0x140000000（无重定位，>4GB，非 0）
+  if (r.a != 1) return 93;
+  return 0;
+}

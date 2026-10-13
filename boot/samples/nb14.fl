@@ -1,0 +1,8 @@
+// nb14.fl — 负例：托管指针不能作实参
+int f(int *p) {
+  return *p;
+}
+int main() {
+  int *own p = new int;
+  return f(p);
+}

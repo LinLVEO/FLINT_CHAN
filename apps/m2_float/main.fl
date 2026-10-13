@@ -1,0 +1,796 @@
+// main.fl — FLINT 版硬件监测浮窗（目标 A：对 C# 版逐细节还原）
+// 对标权威：`浮窗规格-对C#逐细节.md`（§1 窗口 / §2 绘制 / §3 格式化 / §4 行构建 / §2.1 三档色）
+// 进度：第 1 步字形层 ✅（v1.4.0）｜第 3 步图层表面 ✅（v1.4.1）｜**第 4 步行构建器（v1.4.2）**
+//   行构建/配色/格式化全部在 `float_rows.fl`；main 只做「取数 → 建行 → 画 → 自适应尺寸」。
+// 数据源（第 5 步，2026-09-16）：**主源 = 8080 /api/data（HTTP+JSON，`lib\http_lib.fl`）**——
+//   与 C# 版同源读数（CPU 温度/占用/频率/功耗、GPU 温度/占用/显存/功耗、RAM、磁盘、网速、FPS、风扇）。
+//   直读通道（WinRing0 RAPL / ADL / IOCTL）保留作**回退**：8080 不通时按开关退回本地直读。
+// 编译：flint.exe main.fl -o m2_float.exe
+// 开关分布（正常使用不会碰到）：
+//   【自检类】tmp\row-probe\**selfcheck**\ —— dump.on / demo.on
+//     （2026-09-16 挪进子目录：自检开关与运行开关**物理分开**，交付/演示时不会误留；
+//      目录不存在 = 开关不生效，属预期）
+//     dump.on  建完第一帧的行就把「每行每段文字」写进 rows-dump.txt 并退出（不建窗口、不占屏）
+//     demo.on  用样例数据跑全 8 行（验证行构建/绘制/尺寸链路；可用于无视觉环境下的整链自证）
+//   【运行类】tmp\row-probe\ —— http.on（第 5 步 8080 取数）/ stitch.on（第 8 步缝合桥）
+//     优先级 demo > stitch > http > 本地直读（都放同一层，因为它们是"真数据源"而不是自检）
+// —— 第 8 步：缝合进来的 C# LHM 桥（HwBridge.dll，导入表直调；数据源自给自足）——
+// ⚠️ 这两条必须放在**本文件绝对顶部、任何 include 之前**：FLINT 的 collect_apis 只认
+//    「合并后 token 流最开头连续的那批 api」——写在被 include 的文件里会报「api 声明必须放在文件最顶部」。
+//    实现/用法见 stitch.fl；产物目录必须有 HwBridge.dll（启动时导入表解析要用）。
+// ⚠️⚠️ 2026-09-22（M3a 实测，踩了一轮）：模块名**必须写裸名 `HwBridge`，不能写字符串 `"HwBridge.dll"`** ——
+//    `hoist_apis` 只把「`api` 后跟**标识符**」的声明前移（`is_api_decl_start` 判 `t->next->kind == TK_IDENT`），
+//    字符串模块名的声明**留在原地**；一旦源码里出现任何 `print`（本次来自 flgui.fl 的 `gui_dump`），
+//    编译器会注入 print 库（其 api 被前移、**函数体留在注入位置**）⇒ 注入的函数定义挡在这批字符串 api 之前
+//    ⇒ 报「api 声明必须放在文件最顶部」，而报错位置指的正是这批**本来就在最顶部**的行（方向完全错）。
+//    裸名等价：pe.c 写出端会补 `.dll`（预留也是「名字 + 4 + 1」同源）⇒ 产物导入表仍是 HwBridge.dll。
+api HwBridge int hw_init();
+api HwBridge int hw_snap(int);
+api HwBridge int hw_snap64(int);
+api HwBridge int hw_rtss_mode();
+api HwBridge int hw_rtss_flags();
+// v1.4.7（2026-09-17）：桥内置 PresentMon 通道 —— 要不要跑由**本侧**告诉桥（hw_pm_want），
+// 来源进程名用 hw_pm_src 拷进我们的缓冲；另两条是诊断读数（数据行数/状态位）。
+api HwBridge int hw_pm_want(int);
+api HwBridge int hw_pm_src(int, int);
+api HwBridge int hw_pm_status();
+api HwBridge int hw_pm_lines();
+api HwBridge int hw_pm_stop();
+
+// M3(a)：行绘制换到 FLGUI 的绘制/容器层 —— 这一条 include 一并带进 ui_lib.fl（窗口/表面/拖动仍用它）、
+//   flgui.fl（内核：命令表 / 裁剪栈 / 布局）、flgui_widgets.fl、flgui_win32.fl（平台层渲染器）。
+//   两端 include 都有去重（真 flint 的 B2v / boot 的同名表）⇒ 下面各文件自己的 include 不会重复定义。
+include "flgui_win32.fl"
+include "hw.fl"
+include "math_lib.fl"
+include "float_rows.fl"
+include "http_lib.fl"
+include "stitch.fl"
+// 第 6 步（6a）：config.json 读写（路径 = 本产物目录；键名与 C# 侧逐个对齐）
+include "config.fl"
+// 第 6 步（6c）：右键中文菜单（文本/id 是 menu_gen.fl 自动生成的 GBK 字节表）
+include "menu.fl"
+
+// —— 自检钩子（写文件；正常运行不触发）——
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+// v1.4.7：dump 里打"落盘时刻"用（GetTickCount，无参数）。
+// M4d（2026-09-26 实测）：同名 api 声明多次**会合并成一格导入**（探针 `tmp\dup_api3.fl`）⇒ 本处与 FLGUI
+//   平台层那条**同签名**声明不冲突、只占一槽；**签名不同才会编译报错**。预算详见 FLGUI.md §3.1。
+api kernel32 int GetTickCount();
+// 第 6 步（6b）：置顶钉回（C# :1114-1118 每 ≥2s 一次 SetWindowPos(HWND_TOPMOST, SWP_NOMOVE|NOSIZE|NOACTIVATE)）
+api user32 int SetWindowPos(int, int, int, int, int, int, int);
+// 卡 T-20261012-210751（T1 第二刀）：f 是 CreateFileA 句柄（地址类）⇒ 本文件的写盘链
+//   wout/putu/puti/putx8/dump_rows 第一个形参一律 int *（SPEC 决策 17）。原先写成 int =
+//   旧静默缺口放行的写法，v1.4.27 起默认档硬错。
+//   第二形参 buf 同理必须 int *：调用点既有 `&t[i]`/`&m`/`&sep`（显式取址），也有 `hd`/`cb`/`lb`/
+//   `line`（char 数组名作地址）—— 两种都是地址，声明成 int 就落在"地址值不能装进 int 形参"上。
+int wout(int *f, int *buf, int len) {
+  WriteFile(f, buf, len, 0, 0);
+  return 0;
+}
+int g_dpok = 0;                            // v1.4.3 诊断（dump 用）：磁盘占用率通道状态
+int g_dph = 0;
+int g_dppct = 0;
+// —— 第 5 步：8080 /api/data 数据源（HTTP + JSON）——
+// ⚠️ FLINT v1.4.4 边界：**不支持 struct 全局变量**（只开 int/char/double 标量与数组）
+//    → HttpBuf / ApiSnap 都在 main 里当局部量，靠指针传进下面两个函数。
+int g_http_rc = 9;                         // 最近一次 HTTP 结果（dump 出来看：0=成功）
+int g_http_ok = 0;                         // 最近一次 JSON 解析成功？1=本次读数来自 8080
+int g_pull_n = 0;                          // 第 7 步：取数次数（dump 出来验 500ms 节奏）
+// —— 第 6 步（6a）：config 诊断（dump 里逐项打出来对账，省掉"看不见就猜"）——
+int g_cfg_x = 0;
+int g_cfg_y = 0;
+int g_cfg_hxy = 0;
+int g_cfg_font = 0;
+int g_cfg_op = 0;
+int g_cfg_ca = 0;                          // OpacityPercent → surf.const_a（= 255×op/100）
+int g_cfg_lock = 0;
+int g_cfg_mini = 0;
+int g_cfg_off = 0;
+int g_cfg_sw = 0;
+int g_cfg_file = 0;
+int g_cfg_save = 9;                        // 最近一次 cfg_save 的返回（1 = 写成功）
+// —— v1.4.5：网速**自主通道**（GetIfTable，免提权；不依赖 C# 的 8080）——
+int g_net_rc = 0;                          // 通道是否建立（net_open 返回）
+int g_net_rows = 0;                        // 选中的真网卡行数（0 = 没有可用网卡 → NET 行不显示）
+int g_net_down = 0;                        // 下行 KB/s
+int g_net_up = 0;                          // 上行 KB/s
+// 定宽十进制打印（dump 诊断用；v<0 当 0）
+int putu(int *f, int v, int w) {
+  char t[12];
+  int n = 0;
+  int i = 0;
+  if (v < 0) v = 0;
+  if (v == 0) { t[0] = 48; n = 1; }
+  while (v > 0) { t[n] = 48 + (v - (v / 10) * 10); n = n + 1; v = v / 10; }
+  while (n < w) { t[n] = 48; n = n + 1; }
+  i = n - 1;
+  while (i >= 0) { wout(f, &t[i], 1); i = i - 1; }
+  return n;
+}
+// 带符号十进制打印（dump 诊断用；config 的 CpuTempOffset 是负数，putu 会把负数夹成 0）
+int puti(int *f, int v) {
+  char m;
+  if (v < 0) { m = 45; wout(f, &m, 1); v = 0 - v; }
+  return putu(f, v, 1);
+}
+// 8 位十六进制打印（v1.4.7 诊断：dump 里打快照原始槽值。⚠️ 名字不能叫 puthex ——
+//   glyph.fl / netfmt.fl 各有自己的 puthex（签名不同），重名会撞定义）
+int putx8(int *f, int v) {
+  char hx[16];
+  char t[8];
+  int i = 0;
+  int d = 0;
+  hx[0] = 48; hx[1] = 49; hx[2] = 50; hx[3] = 51; hx[4] = 52; hx[5] = 53; hx[6] = 54; hx[7] = 55;
+  hx[8] = 56; hx[9] = 57; hx[10] = 65; hx[11] = 66; hx[12] = 67; hx[13] = 68; hx[14] = 69; hx[15] = 70;
+  while (i < 8) { t[i] = 48; i = i + 1; }
+  i = 7;
+  while (i >= 0) {
+    d = v - (v / 16) * 16;
+    if (d < 0) d = 0 - d;
+    t[i] = hx[d];
+    v = v / 16;
+    i = i - 1;
+  }
+  i = 0;
+  while (i < 8) { wout(f, &t[i], 1); i = i + 1; }
+  return 8;
+}
+// 把 ApiSnap（JSON 值，全部 ×1000 定点）折算成行构建器单位（v1.4.2 约定：温度/占用=整数、内存=GB×10、显存=MB、网速=KB/s、功耗=W）
+int api_to_rows(struct ApiSnap *s, struct FRead *d) {
+  if (s->v_cpu_temp == 1) { d->cpu_temp_v = 1; d->cpu_temp = jdiv1000(s->cpu_temp); }
+  if (s->v_cpu_load == 1) { d->cpu_load_v = 1; d->cpu_load = jdiv1000(s->cpu_load); }
+  if (s->v_cpu_clock == 1 && s->cpu_clock > 0) d->cpu_clock = jdiv1000(s->cpu_clock);
+  if (s->v_cpu_pwr == 1) d->cpu_pwr = jdiv1000(s->cpu_pwr);
+  if (s->v_gpu_temp == 1) { d->gpu_temp_v = 1; d->gpu_temp = jdiv1000(s->gpu_temp); }
+  if (s->v_gpu_load == 1) { d->gpu_load_v = 1; d->gpu_load = jdiv1000(s->gpu_load); }
+  // 显存：JSON 是 GB → 行构建器要 MB（×1024，与本地 ADL 通道同单位口径）
+  if (s->v_gpu_memu == 1 && s->gpu_memu > 0) d->gpu_mem_used_mb = jdiv1000(s->gpu_memu) * 1024;
+  if (s->v_gpu_memt == 1 && s->gpu_memt > 0) d->gpu_mem_total_mb = jdiv1000(s->gpu_memt) * 1024;
+  if (s->v_gpu_pwr == 1) d->gpu_pwr = jdiv1000(s->gpu_pwr);
+  if (s->v_ram_used == 1) { d->ram_used_x10 = s->ram_used / 100; }      // GB → GB×10
+  if (s->v_ram_total == 1) d->ram_total_x10 = s->ram_total / 100;
+  if (s->v_disk_load == 1) { d->disk_pct_v = 1; d->disk_pct = jdiv1000(s->disk_load); }
+  if (s->v_disk_used == 1) d->disk_used_g = jdiv1000(s->disk_used);
+  if (s->v_disk_total == 1) d->disk_total_g = jdiv1000(s->disk_total);
+  if (s->v_net_down == 1) d->net_down = jdiv1000(s->net_down);
+  if (s->v_net_up == 1) d->net_up = jdiv1000(s->net_up);
+  if (s->v_fps == 1 && s->fps > 0) { d->have_fps = 1; d->fps = (s->fps + 500) / 1000; }
+  if (s->v_fps_low == 1) { d->have_low = 1; d->fps_low = (s->fps_low + 500) / 1000; }
+  if (s->v_fan == 1 && s->fan > 0) d->fan_rpm = (s->fan + 500) / 1000;
+  // v1.4.7：帧率来源标注（只有缝合桥会置 have_src=1；8080 路径恒为 0 → 不显示，与参考版 JSON 无此字段一致）
+  if (s->have_src == 1) { d->have_src = 1; d->fps_src_len = s->fps_src_len; }
+  return 0;
+}
+// 发一次取数（返回 0 = 成功）：HTTP GET /api/data → 解析 → 折算进行构建器输入
+// hbp 指向调用方的 struct HttpBuf，sp 指向调用方的 struct ApiSnap（全局 struct 不被编译器支持）
+int http_pull(struct HttpBuf *hbp, struct ApiSnap *sp, struct FRead *d) {
+  int rc = 0;
+  g_pull_n = g_pull_n + 1;
+  rc = std::http_get("127.0.0.1", 8080, "/api/data", hbp);
+  g_http_rc = rc;
+  if (rc != 0) return rc;
+  if (std::json_to_snap(hbp->b, hbp->n, sp) != 0) return 4;
+  api_to_rows(sp, d);
+  g_http_ok = 1;
+  return 0;
+}
+int dump_rows(int *f, struct RowSet *rs, struct FSegs *g, struct FRead *dr) {
+  char hd[16];
+  char cb[80];
+  char lb[8];
+  char line[48];
+  char sep;
+  int idx;
+  int r;
+  int k;
+  int z;
+  int b0; int b1; int b2; int b3;
+  int len;
+  int mode;
+  int off;
+  int *b;
+  int *buf = g->buf;
+  int *pads = g->pads;
+  hd[0] = 'r'; hd[1] = 'o'; hd[2] = 'w'; hd[3] = 's'; hd[4] = '=';
+  hd[5] = '0' + (rs->rows % 10);
+  hd[6] = ' '; hd[7] = 's'; hd[8] = 'e'; hd[9] = 'g'; hd[10] = 's'; hd[11] = '=';
+  hd[12] = '0' + (rs->n / 10); hd[13] = '0' + (rs->n % 10); hd[14] = 10;
+  wout(f, hd, 15);
+  // v1.4.7：落盘时刻（GetTickCount 毫秒）—— 判"这份 dump 是冷启动还是稳态"只认它，不靠推算
+  hd[0] = 't'; hd[1] = 'i'; hd[2] = 'c'; hd[3] = 'k'; hd[4] = '=';
+  wout(f, hd, 5); putu(f, GetTickCount(), 1);
+  hd[0] = 10;
+  wout(f, hd, 1);
+  hd[0] = 's'; hd[1] = 'w'; hd[2] = '=';
+  hd[3] = '0' + (dr->sw / 1000 % 10); hd[4] = '0' + (dr->sw / 100 % 10);
+  hd[5] = '0' + (dr->sw / 10 % 10); hd[6] = '0' + (dr->sw % 10); hd[7] = 10;
+  wout(f, hd, 8);
+  // v1.4.3 诊断：磁盘占用率通道是否活着（C=句柄有效 O=有效读数 X=句柄失败）
+  hd[0] = 'd'; hd[1] = 'p'; hd[2] = '=';
+  hd[3] = 'X';
+  if (g_dph == 1) hd[3] = 'C';
+  if (g_dpok == 1) hd[3] = 'O';
+  hd[4] = ' '; hd[5] = 'v'; hd[6] = '=';
+  hd[7] = '0' + (dr->disk_pct_v % 10);
+  hd[8] = ' '; hd[9] = 'p'; hd[10] = '=';
+  hd[11] = '0' + (g_dppct / 100 % 10);
+  hd[12] = '0' + (g_dppct / 10 % 10);
+  hd[13] = '0' + (g_dppct % 10);
+  hd[14] = 10;
+  wout(f, hd, 15);
+  // 第 5 步诊断：HTTP 取数状态（rc=0 且 ok=1 才是「本次读数来自 8080」）
+  hd[0] = 'h'; hd[1] = 't'; hd[2] = 't'; hd[3] = 'p'; hd[4] = '=';
+  hd[5] = '0' + (g_http_rc % 10);
+  hd[6] = ' '; hd[7] = 'o'; hd[8] = 'k'; hd[9] = '=';
+  hd[10] = '0' + (g_http_ok % 10);
+  hd[11] = ' '; hd[12] = 'n'; hd[13] = '=';
+  hd[14] = '0' + (g_pull_n / 10 % 10);
+  hd[15] = 0;
+  wout(f, hd, 15);
+  hd[0] = '0' + (g_pull_n % 10);
+  hd[1] = 10;
+  wout(f, hd, 2);
+  // 第 8 步诊断：缝合桥现场（st=hw_init 状态位低 4 位 / bit3 单列出来 / m13=快照里 FPS 有效位 / rc=返回值符号）
+  hd[0] = 's'; hd[1] = 't'; hd[2] = 'i'; hd[3] = 't'; hd[4] = 'c'; hd[5] = 'h'; hd[6] = '=';
+  hd[7] = '0' + (g_stitch_st % 10);
+  hd[8] = ' '; hd[9] = 'r'; hd[10] = 't'; hd[11] = 's'; hd[12] = 's'; hd[13] = '=';
+  hd[14] = '0' + ((g_stitch_st / 8) % 2);
+  hd[15] = ' '; hd[16] = 'f'; hd[17] = 'p'; hd[18] = 's'; hd[19] = '=';
+  hd[20] = '0' + ((g_stitch_mask >> 13) & 1);
+  hd[21] = ' '; hd[22] = 'r'; hd[23] = 'c'; hd[24] = '=';
+  if (g_stitch_rc < 0) { hd[25] = '-'; } else { hd[25] = '+'; }
+  hd[26] = 10;
+  wout(f, hd, 27);
+  // 第 8 步诊断②：桥内部对 RTSS 的决策（rmode=名字来源 0默认/1环境变量/2同目录txt；rfl=读取阶段位 读值/打开/签名/命中API）
+  hd[0] = 'r'; hd[1] = 'm'; hd[2] = 'o'; hd[3] = 'd'; hd[4] = 'e'; hd[5] = '='; hd[6] = '0' + (hw_rtss_mode() % 10);
+  hd[7] = ' '; hd[8] = 'r'; hd[9] = 'f'; hd[10] = 'l'; hd[11] = '=';
+  hd[12] = '0' + ((hw_rtss_flags() / 8) % 2);
+  hd[13] = '0' + ((hw_rtss_flags() / 4) % 2);
+  hd[14] = '0' + ((hw_rtss_flags() / 2) % 2);
+  hd[15] = '0' + (hw_rtss_flags() % 2);
+  hd[16] = 10;
+  wout(f, hd, 17);
+  // v1.4.7 诊断③：PresentMon 通道现场（want=桥侧意向 / st=内部状态位 / lines=收到的数据行数 %1000 /
+  //   pmf=快照 bit4「本条 FPS 来自 PresentMon」/ n=选中进程样本数 / soff=来源名在 rbuf 里的偏移）
+  cb[0] = 'p'; cb[1] = 'm'; cb[2] = ' '; wout(f, cb, 3);
+  cb[0] = 'w'; cb[1] = 'a'; cb[2] = 'n'; cb[3] = 't'; cb[4] = '='; wout(f, cb, 5); putu(f, g_pm_want, 1);
+  cb[0] = ' '; cb[1] = 's'; cb[2] = 't'; cb[3] = '='; wout(f, cb, 4); putu(f, g_pm_status, 3);
+  cb[0] = ' '; cb[1] = 'l'; cb[2] = 'n'; cb[3] = '='; wout(f, cb, 4); putu(f, g_pm_lines % 1000, 3);
+  cb[0] = ' '; cb[1] = 'p'; cb[2] = 'm'; cb[3] = 'f'; cb[4] = '='; wout(f, cb, 5); putu(f, (g_pm_st8 / 16) % 2, 1);
+  cb[0] = ' '; cb[1] = 'n'; cb[2] = '='; wout(f, cb, 3); putu(f, g_pm_n, 3);
+  cb[0] = ' '; cb[1] = 's'; cb[2] = 'o'; cb[3] = 'f'; cb[4] = 'f'; cb[5] = '='; wout(f, cb, 6); puti(f, g_pm_src_off);
+  cb[0] = 10; wout(f, cb, 1);
+  // v1.4.7：快照原始槽（十六进制）—— 定案用：raw23 的低 8 位里 bit4 就是"本条 FPS 来自 PresentMon"
+  cb[0] = 'r'; cb[1] = 'a'; cb[2] = 'w'; cb[3] = '2'; cb[4] = '3'; cb[5] = '='; wout(f, cb, 6); putx8(f, g_raw23);
+  cb[0] = ' '; cb[1] = 'r'; cb[2] = 'a'; cb[3] = 'w'; cb[4] = '2'; cb[5] = '2'; cb[6] = '='; wout(f, cb, 7); putx8(f, g_raw22);
+  cb[0] = 10; wout(f, cb, 1);
+  // 来源名本身：按"取得的那一串字节"原样打出来（<0 = 本帧没有来源名，就别读缓冲了）
+  // ⚠️ 后面必须补换行：否则它会把下一条诊断接到同一行上（实测首跑就这样，看着像"值串了"）
+  cb[0] = 'p'; cb[1] = 'm'; cb[2] = 's'; cb[3] = 'r'; cb[4] = 'c'; cb[5] = '='; wout(f, cb, 6);
+  if (g_pm_src_off >= 0) wout(f, buf + g_pm_src_off, g_pm_src_len);
+  cb[0] = 10; wout(f, cb, 1);
+  cb[0] = 10; wout(f, cb, 1);
+  // v1.4.5 诊断：网速自主通道（rc=通道建立 / rows=选中的真网卡行数 / d,u=KB/s）
+  hd[0] = 'n'; hd[1] = 'e'; hd[2] = 't'; hd[3] = '='; hd[4] = '0' + (g_net_rc % 10);
+  hd[5] = ' '; hd[6] = 'r'; hd[7] = '=';
+  hd[8] = '0' + (g_net_rows / 10 % 10); hd[9] = '0' + (g_net_rows % 10);
+  hd[10] = ' '; hd[11] = 'd'; hd[12] = '=';
+  hd[13] = 10;
+  wout(f, hd, 14);
+  hd[0] = ' '; hd[1] = ' '; hd[2] = 'd'; hd[3] = '=';
+  wout(f, hd, 4);
+  putu(f, g_net_down, 6);
+  hd[0] = 32; hd[1] = 'u'; hd[2] = '=';
+  wout(f, hd, 3);
+  putu(f, g_net_up, 6);
+  hd[0] = 10;
+  wout(f, hd, 1);
+  // 第 5 步诊断：rd 里两个关键字段在「建行之后」到底是什么（看是不是被重置）
+  // + HTTP 取数链路各环节：pull 次数 / 响应体长 / snap 返回码 / 命中字段数
+  hd[0] = 'r'; hd[1] = 'd'; hd[2] = '=';
+  hd[3] = 'l'; hd[4] = '0' + (dr->cpu_load / 100 % 10); hd[5] = '0' + (dr->cpu_load / 10 % 10); hd[6] = '0' + (dr->cpu_load % 10);
+  hd[7] = ' '; hd[8] = 'l'; hd[9] = 'v'; hd[10] = '0' + (dr->cpu_load_v % 10);
+  hd[11] = ' '; hd[12] = 't'; hd[13] = 'v'; hd[14] = '0' + (dr->cpu_temp_v % 10);
+  hd[15] = 10;
+  wout(f, hd, 16);
+  // —— 第 6 步（6a）诊断：config 读到的每一项（file=0 表示没读到文件、全用默认；
+  //    ca = OpacityPercent 换算出的 ULW 合成常量，和 surf.const_a 是同一个数）——
+  cb[0] = 'c'; cb[1] = 'f'; cb[2] = 'g'; cb[3] = ' '; wout(f, cb, 4);
+  cb[0] = 'x'; cb[1] = '='; wout(f, cb, 2); puti(f, g_cfg_x);
+  cb[0] = ' '; cb[1] = 'y'; cb[2] = '='; wout(f, cb, 3); puti(f, g_cfg_y);
+  cb[0] = ' '; cb[1] = 'h'; cb[2] = 'x'; cb[3] = 'y'; cb[4] = '='; wout(f, cb, 5); putu(f, g_cfg_hxy, 1);
+  cb[0] = ' '; cb[1] = 'f'; cb[2] = 'o'; cb[3] = 'n'; cb[4] = 't'; cb[5] = '='; wout(f, cb, 6); putu(f, g_cfg_font, 1);
+  cb[0] = ' '; cb[1] = 'o'; cb[2] = 'p'; cb[3] = '='; wout(f, cb, 4); putu(f, g_cfg_op, 1);
+  cb[0] = ' '; cb[1] = 'c'; cb[2] = 'a'; cb[3] = '='; wout(f, cb, 4); putu(f, g_cfg_ca, 1);
+  cb[0] = ' '; cb[1] = 'f'; cb[2] = 'i'; cb[3] = 'l'; cb[4] = 'e'; cb[5] = '='; wout(f, cb, 6); putu(f, g_cfg_file, 1);
+  cb[0] = 10; wout(f, cb, 1);
+  cb[0] = 'c'; cb[1] = 'f'; cb[2] = 'g'; cb[3] = ' '; wout(f, cb, 4);
+  cb[0] = 'l'; cb[1] = 'o'; cb[2] = 'c'; cb[3] = 'k'; cb[4] = '='; wout(f, cb, 5); putu(f, g_cfg_lock, 1);
+  cb[0] = ' '; cb[1] = 'm'; cb[2] = 'i'; cb[3] = 'n'; cb[4] = 'i'; cb[5] = '='; wout(f, cb, 6); putu(f, g_cfg_mini, 1);
+  cb[0] = ' '; cb[1] = 'o'; cb[2] = 'f'; cb[3] = 'f'; cb[4] = '='; wout(f, cb, 5); puti(f, g_cfg_off);
+  cb[0] = ' '; cb[1] = 's'; cb[2] = 'w'; cb[3] = '='; wout(f, cb, 4); puti(f, g_cfg_sw);
+  cb[0] = ' '; cb[1] = 's'; cb[2] = 'a'; cb[3] = 'v'; cb[4] = 'e'; cb[5] = '='; wout(f, cb, 6); puti(f, g_cfg_save);
+  cb[0] = 10; wout(f, cb, 1);
+  // 诊断：几个关键输入值（FPS / 功耗）用十进制打出来，确认「建行时的输入」是什么
+  idx = 0;
+  r = 0;
+  while (r < rs->rows) {
+    lb[0] = 'L'; lb[1] = '0' + (r % 10); lb[2] = 10;
+    wout(f, lb, 3);
+    k = 0;
+    while (k < rs->rn[r]) {
+      mode = g->m[idx + k];
+      off = g->texts[idx + k];
+      len = 0;
+      b = 0;
+      if (off >= 0) {
+        b = buf + off;
+        len = mode;
+      } else {
+        b = pads + (idx + k) * 48;
+        if (mode == M_INT()) len = fmt_int(b, g->v1[idx + k]);
+        else if (mode == M_PCT()) len = fmt_percent(b, g->v1[idx + k], g->v2[idx + k]);
+        else if (mode == M_TEMP()) len = fmt_temp(b, g->v1[idx + k], g->v2[idx + k]);
+        else if (mode == M_CLOCK()) len = fmt_clock(b, g->v1[idx + k]);
+        else if (mode == M_G1()) len = fmt_g1(b, g->v1[idx + k]);
+        else if (mode == M_GPAIR()) len = fmt_gpair(b, g->v1[idx + k], g->v2[idx + k]);
+        else if (mode == M_SPEED()) {
+          // 同 float_rows.fl 的教训：缓冲是 int* → 双字节字符必须走**字节视图**，否则只发出 `A1 00`（画成 '?'）
+          char *bb = b;
+          if (g->v2[idx + k] == 1) { bb[0] = 0xA1; bb[1] = 0xFD; len = 2; }
+          else { bb[0] = 0xA1; bb[1] = 0xFC; len = 2; }
+          len = len + fmt_speed(bb + 2, g->v1[idx + k]);
+        }
+        else if (mode == M_SYSW()) {
+          int pw = g->v2[idx + k];
+          struct PwSt w;
+          w.sys = g->v1[idx + k];
+          w.cpu = pw % 1000;
+          w.gpu = pw / 1000;
+          len = fmt_power(b, &w, swtest(dr->sw, SW_POWERDETAIL()));
+        }
+      }
+      if (len > 0) wout(f, b, len);
+      sep = '|'; wout(f, &sep, 1);
+      k = k + 1;
+    }
+    sep = 10; wout(f, &sep, 1);
+    idx = idx + rs->rn[r];
+    r = r + 1;
+  }
+  line[0] = '-'; line[1] = '-'; line[2] = 10;
+  wout(f, line, 3);
+  return 0;
+}
+
+int main() {
+  // —— 第 6 步（6a）：读 config.json（用 X/Y 定位、OpacityPercent、FontSize、Locked、MiniMode、ShowXxx、CpuTempOffset）——
+  // 路径口径（用户 2026-09-16 02:27 拍板）：**本产物目录一份**（与 C# 各自一份、行为等价），
+  //   起始内容从 C# 的 config.json 复制；⚠️ **绝不写 C# 那份**（C# 原件只读）。
+  char cfgbuf[2048];
+  struct Cfg cfg;
+  cfg_default(&cfg);
+  cfg_load("E:\\FLINT-lab\\apps\\m2_float\\config.json", cfgbuf, 2048, &cfg);
+  g_cfg_x = cfg.x; g_cfg_y = cfg.y; g_cfg_hxy = cfg.have_xy;
+  g_cfg_font = cfg.fontsize; g_cfg_op = cfg.opacity; g_cfg_lock = cfg.locked;
+  g_cfg_mini = cfg.minimode; g_cfg_off = cfg.cpu_offset; g_cfg_sw = cfg.sw;
+  g_cfg_file = cfg.have_file;
+  // —— 窗口 ——
+  struct WndSt wnd;
+  wnd.cls = "FLINTM2";
+  wnd.w = 200;
+  wnd.ht = 130;
+  wnd.alpha = 215;
+  if (!ui_make_top(&wnd)) return 90;
+  struct Surf surf;
+  surf.h = wnd.h;
+  surf.bw = 640; surf.bh = 320;
+  surf.cw = wnd.w; surf.ch = wnd.ht;
+  surf.r = 6;
+  surf.fill_a = 255; surf.ring_a = 70;   // 面板掩码 255（见 flint_ui.fl surf_alpha 的预乘说明：参考版面板 A_eff≈0.6）
+  // 第 6 步（6a）：OpacityPercent → ULW 合成常量（C# Opacity=60% ⇔ const_a=153 = 255×60/100）
+  surf.const_a = cfg.opacity * 255 / 100;
+  if (!surf_init(&surf)) return 91;
+  g_cfg_ca = surf.const_a;
+  // 第 6 步（6a）：FontSize 来自 config（C# 初值 16；改档要重建字体 + 重算尺寸）
+  int ui_font = 0;
+  ui_font = ui_font_make(cfg.fontsize);
+  // 第 6 步（6d）：小窗中央的 CPU 占用用 12px（规格 §2「小窗绘制」）
+  int mini_font = 0;
+  mini_font = ui_font_make(12);
+  int h = 0;
+  h = wnd.h;
+  // 第 6 步（6a）：按 config 的 X/Y 定位（C# 同款：启动即落在上次位置）
+  if (cfg.have_xy == 1) MoveWindow(h, cfg.x, cfg.y, wnd.w, wnd.ht, 0);
+  struct DragSt drag;
+  drag.h = h;
+  drag.on = 0;
+  drag.sx = 0; drag.sy = 0; drag.wx = 0; drag.wy = 0;
+  drag.w = wnd.w;
+  drag.ht = wnd.ht;
+  // 第 6 步（6c）：右键菜单状态（弹菜单要窗口句柄；命令号/动作码每次右键刷新）
+  struct MenuSt menu;
+  menu.hwnd = h;
+  menu.cmd = 0;
+  menu.rc = 0;
+  struct MSG m;
+  struct RECT wr;
+  GetWindowRect(h, &wr);
+  int win_x = wr.l;
+  int win_y = wr.t;
+  int running = 1;
+  int force_size = 0;                        // 第 6 步（6d）：小窗模式切换后立刻改尺寸（不等 frame%60）
+  int last_pin = 0;                          // 第 6 步（6b）：上次置顶钉回的时刻（GetTickCount ms）
+  int last_refresh = 0;                      // 第 7 步：上次数据刷新的时刻（对齐 C# 的 500ms 定时器）
+  int canary = 12345;                        // 诊断：看 PeekMessageA/DispatchMessageA 会不会踩到相邻局部
+  int frame = 0;
+  int tick = 0;
+  // —— 硬件通道 + 读数状态 ——
+  struct HwSt hs;
+  hs.h = 0;
+  int have_hw = hw_open(&hs);
+  int *hd = hs.h;
+  struct CpuSt cs;
+  struct TmpSt ts;
+  ts.hd = hd;
+  ts.tjmax = 100;
+  ts.ncpu = 0;                                // v1.4.6.1：首次调用时自取逻辑核数（逐核取最热）
+  ts.mask_all = 0;
+  struct FreqSt fs;
+  fs.hd = hd;
+  fs.have = 0;
+  fs.bclk100 = 0;
+  struct RapSt rs_pwr;
+  rs_pwr.hd = hd;
+  rs_pwr.esu_div = 0;
+  rs_pwr.have = 0;
+  rs_pwr.qf_lo = 0;
+  struct MEM mem;
+  struct MemGb ram;
+  struct DiskSt ds;
+  struct DskGb dsk;
+  struct DiskPerfSt dps;                     // v1.4.3：真·磁盘占用率（IOCTL_DISK_PERFORMANCE）
+  struct GpuSt gpu;                          // v1.4.3：GPU 温度/频率（AMD ADL，免提权）
+  int cpu = 0;
+  int tvalid = 0;
+  int temp = 0;
+  int mhz = 0;
+  int pwr = 0;
+  int pwr_valid = 0;
+  int disk_pct_live = 0;                     // v1.4.3：真占用率（IOCTL_DISK_PERFORMANCE）
+  int disk_pct_valid = 0;
+  int gpu_temp_v = 0;                        // v1.4.3：GPU 温度（ADL）
+  int gpu_temp = 0;
+  int gpu_load = 0;                          // v1.4.5：GPU 占用%（ADL core_act，免提权）
+  int gpu_load_v = 0;
+  int gpu_pwr = 0;                           // v1.4.6.1：GPU 功耗 W（ADL OD6 CurrentPower >>8）
+  int gpu_pwr_v = 0;
+  // —— 行构建器状态 ——
+  int stxt[32]; int smode[32]; int scol[32]; int sv1[32]; int sv2[32];
+  char rbuf[256];
+  char pads[1536];
+  struct FSegs sg;
+  sg.texts = stxt; sg.m = smode; sg.col = scol; sg.v1 = sv1; sg.v2 = sv2;
+  // v1.4.7：src2 原来的用途（帧率来源名）改成"建行之后直接写进 rbuf 尾部 + 记偏移"，
+  //   因为文字段的表达方式就是 buf 里的偏移，跨缓冲的段根本表达不出来（详见 stitch.fl 的 stitch_sync_src）。
+  sg.buf = rbuf; sg.src = rbuf; sg.src2 = rbuf; sg.pads = pads; sg.cap = 256; sg.cur = 0;
+  struct RowSet rows;
+  int rowcnt[9];
+  rows.n = 0; rows.rows = 0;
+  rows.rn = rowcnt;
+  struct FRead rd;
+  rd.sw = cfg.sw;                            // 第 6 步（6a）：显示项来自 config 的 ShowXxx 位掩码
+  int rowmax = 0;
+  // —— 自检开关 ——
+  // ⚠️ CreateFileA 失败返回 **INVALID_HANDLE_VALUE = -1**（不是 0）——判断必须写 `!= -1`
+  int dump_mode = 0;
+  int demo_mode = 0;
+  // v1.4.7：dump 的"上次落盘时刻"（按时间落盘用；见 dump 块注释）
+  int g_dump_t0 = GetTickCount();
+  // 自检开关（2026-09-16 挪进 selfcheck\ 子目录：与运行开关 http.on/stitch.on 物理分开，避免交付时误留）
+  // 目录不存在 ⇒ CreateFileA 失败 ⇒ 开关不生效（预期行为，不需要预先建目录）
+  int dumpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\dump.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (dumpf != 0 - 1) { dump_mode = 1; CloseHandle(dumpf); }
+  int demof = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\demo.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (demof != 0 - 1) { demo_mode = 1; CloseHandle(demof); }
+  // 第 5 步开关：http.on 存在 → 主源走 8080 /api/data（第 5 步）；demo_mode 优先级最高
+  int http_mode = 0;
+  int httpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\http.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (httpf != 0 - 1) { http_mode = 1; CloseHandle(httpf); }
+  // 第 8 步开关：stitch.on 存在 → 数据源走「同进程缝合的 C# LHM 桥」（HwBridge.dll，导入表直调）
+  // 优先级：demo > stitch > http > 本地直读（三者都不开会保留本地直读值）
+  int stitch_mode = 0;
+  int stitchf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\stitch.on", 0x80000000, 1, 0, 3, 0, 0);
+  if (stitchf != 0 - 1) { stitch_mode = 1; CloseHandle(stitchf); }
+  // 第 5 步取数用的两个结构体（局部——见文件头「不支持 struct 全局变量」）
+  char hbuf[4096];
+  struct HttpBuf hb;
+  struct ApiSnap api;
+  hb.b = hbuf; hb.cap = 4096; hb.n = 0;
+  // —— 一次性：QPF（RAPL 计时）+ 磁盘/内存初值 + 采样起点 ——
+  struct Q qf;
+  QueryPerformanceFrequency(&qf);
+  rs_pwr.qf_lo = qf.lo;
+  hw_disk_snap(&ds, &dsk);
+  hw_diskp_open(&dps);                       // v1.4.3：打开 \\.\C:（免提权）并记基线
+  hw_diskp_pct(&dps);                        // 立刻采一次建基线（下一次即可算百分比）
+  hw_gpu_open(&gpu);                         // v1.4.3：ADL 上下文（失败则 GPU 温度显示 --）
+  {
+    int gt0 = hw_gpu_temp(&gpu);             // 立刻取一次（C# 同款：首帧就有温度）
+    if (gt0 > 0) { gpu_temp = gt0; gpu_temp_v = 1; }
+    int gl0 = hw_gpu_perf(&gpu);             // v1.4.5：顺带取一次占用（core_act，免提权）
+    if (gl0 >= 0) { gpu_load = gl0; gpu_load_v = 1; }
+  }
+  // v1.4.5：网速**自主通道**（GetIfTable，免提权）——缓冲 512KB 两块（接口要两块，本实现只用一块）
+  int *netbuf = VirtualAlloc(0, 524288, 0x3000, 4);
+  int *netbuf2 = VirtualAlloc(0, 524288, 0x3000, 4);
+  struct NetSt nets;
+  g_net_rc = net_open(&nets, netbuf, netbuf2);
+  g_net_rows = nets.rows;
+  hw_mem_snap(&mem, &ram);
+  hw_cpu_begin(&cs);
+  hw_rapl_begin(&rs_pwr);
+  int cw[128];
+  struct Drw dr;
+  dr.dc = 0;
+  dr.cw = cw;
+  // M3(a)：FLGUI 帧状态（行绘制走它的命令表；窗口/表面/拖动仍走 ui_lib —— **并存、不一刀切**）。
+  //   主题色直接对齐浮窗既有配色 ⇒ 把"有意配色变更"压到 0，像素判据才好说话。
+  struct GuiCtx gc;
+  struct GuiInput gin;
+  gui_init(&gc);
+  gc.theme_bg = C_PANEL();
+  gc.theme_border = C_RING();
+  gc.theme_text = C_MAIN();
+  gin.mx = 0; gin.my = 0; gin.down = 0; gin.pressed = 0; gin.released = 0; gin.wheel = 0;
+  int cpu_offset = cfg.cpu_offset;           // 第 6 步（6a）：温度校准来自 config（C# CpuTempOffset=-11）
+  // —— 主循环 ——
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;             // WM_CLOSE
+      if (m.message == 0x204) {                       // WM_RBUTTONDOWN → 第 6 步（6c）中文菜单
+        int mrc = menu_open(&menu, &cfg, &surf, &rd);
+        if (mrc == 1) running = 0;                    // 菜单里点了退出
+        if (mrc == 2) ui_font = ui_font_make(cfg.fontsize);   // 字号变了 → 重建字体（DC 里下一帧选入）
+        if (mrc == 3) force_size = 1;                 // 第 6 步（6d）：最小化模式切换 → 立刻改尺寸
+        g_cfg_sw = cfg.sw; g_cfg_op = cfg.opacity; g_cfg_off = cfg.cpu_offset;
+        g_cfg_lock = cfg.locked; g_cfg_mini = cfg.minimode; g_cfg_font = cfg.fontsize;
+      }
+      // 第 6 步（6c）：双击左键 = 锁定/解锁（C# :1066-1074；要有 CS_DBLCLKS 才收得到这条消息）
+      if (m.message == 0x203) {
+        if (cfg.locked == 1) cfg.locked = 0; else cfg.locked = 1;
+        cfg_save_default(&cfg);
+        g_cfg_lock = cfg.locked;
+      }
+      if (m.message == 0x201) {                       // WM_LBUTTONDOWN
+        // 第 6 步（6b）：Locked=true 时不启动拖动（C# :1021）
+        if (cfg.locked == 0) ui_drag_begin(&drag);
+      }
+      if (m.message == 0x202) {                       // WM_LBUTTONUP
+        ui_drag_end(&drag);
+        // 第 6 步（6d）：小窗模式下"单击且没拖动" → 恢复完整浮窗（C# :1055-1064）
+        if (cfg.minimode == 1) {
+          struct P pt2;
+          int dx = 0;
+          int dy = 0;
+          GetCursorPos(&pt2);
+          dx = pt2.x - drag.sx;
+          dy = pt2.y - drag.sy;
+          if (dx < 0) dx = 0 - dx;
+          if (dy < 0) dy = 0 - dy;
+          if (dx <= 3 && dy <= 3) {
+            cfg.minimode = 0;
+            cfg_save_default(&cfg);
+            force_size = 1;
+            g_cfg_mini = 0;
+          }
+        }
+        // 第 6 步（6a）：拖动结束存位置（C# 同款：拖完即落盘；位置没变就不写，省得无谓改文件）
+        GetWindowRect(h, &wr);
+        if (wr.l != cfg.x || wr.t != cfg.y) {
+          cfg.x = wr.l; cfg.y = wr.t; cfg.have_xy = 1;
+          g_cfg_save = cfg_save("E:\\FLINT-lab\\apps\\m2_float\\config.json", &cfg);
+          g_cfg_x = cfg.x; g_cfg_y = cfg.y; g_cfg_hxy = 1;
+        }
+      }
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      ui_drag_frame(&drag);
+      // 第 6 步（6b）：置顶钉回 —— 被别的窗口压住后最多 2 秒回到最上层（C# :1114-1118 同款：
+      //   HWND_TOPMOST(-1) + SWP_NOMOVE(2)|SWP_NOSIZE(1)|SWP_NOACTIVATE(0x10) = 0x13，不抢焦点、不动尺寸）
+      if (GetTickCount() - last_pin >= 2000) {
+        SetWindowPos(h, 0 - 1, 0, 0, 0, 0, 0x13);
+        last_pin = GetTickCount();
+      }
+      // —— 数据刷新：统一 500ms 一次（**对齐 C# 的 Timer Interval=500**，MonitorForm.cs:17）——
+      // ① 本地直读填 rd ② 有 http.on 就拉 8080 覆盖之（API 优先）③ **两次刷新之间不动 rd**——
+      //    原来每帧都重填 rd → API 值只活 1/30 帧、下一帧被本地值整段盖回去，看着就像"数据不刷新"
+      //    （2026-09-16 实测：http=0 ok=1 却仍显示本地值，就是这条顺序的锅）。
+      if (GetTickCount() - last_refresh >= 500) {
+        int v = hw_cpu_pct(&cs);
+        if (v >= 0) cpu = v;
+        v = hw_temp_c(&ts);
+        if (v >= 0) { temp = v + cfg.cpu_offset; tvalid = 1; }
+        v = hw_rapl_end(&rs_pwr);
+        if (v > 0) { pwr = v; pwr_valid = 1; }
+        hw_disk_snap(&ds, &dsk);
+        int dp = hw_diskp_pct(&dps);          // v1.4.3：真占用率（-1 = 无有效数据，保留旧值）
+        if (dp >= 0) { disk_pct_live = dp; disk_pct_valid = 1; }
+        int gt = hw_gpu_temp(&gpu);           // v1.4.3：GPU 温度（ADL，千分之一度→度）
+        if (gt > 0) { gpu_temp = gt; gpu_temp_v = 1; }
+        int glv = hw_gpu_perf(&gpu);          // v1.4.5：GPU 占用（ADL core_act，免提权）——上行接线
+        if (glv >= 0) { gpu_load = glv; gpu_load_v = 1; }
+        int gpw = hw_gpu_pwr(&gpu);           // v1.4.6.1：GPU 功耗（ADL OD6，原始值 >>8 = 瓦）
+        if (gpw > 0) { gpu_pwr = gpw; gpu_pwr_v = 1; }
+        net_sample(&nets);                    // v1.4.5：网速自主通道（GetIfTable，免提权；口径对标 C#）
+        g_net_rows = nets.rows;
+        g_net_down = nets.down; g_net_up = nets.up;
+        hw_mem_snap(&mem, &ram);              // 内存/总量是"立刻读"型：填 rd 之前先刷一次
+        if (have_hw == 1) {                   // 频率也放进同一个 500ms 窗口（C# 同款）
+          int fv = hw_freq(&fs);
+          if (fv > 0) mhz = fv;
+        }
+        // 下一次 CPU 占用 / RAPL 功耗的采样窗口从此刻起算（先 begin，下次刷新时 end）
+        hw_cpu_begin(&cs);
+        hw_rapl_begin(&rs_pwr);
+        // —— 行输入：先填本地直读值（= 回退路径；8080 成功时下面会整段覆盖）——
+        rd.have_fps = 0; rd.fps = 0;
+      rd.have_low = 0; rd.fps_low = 0;
+      rd.have_src = 0; rd.fps_src_len = 0;
+      rd.cpu_temp_v = tvalid; rd.cpu_temp = temp;
+      rd.cpu_load_v = 1; rd.cpu_load = cpu;
+      rd.cpu_clock = mhz;
+      rd.gpu_temp_v = gpu_temp_v; rd.gpu_temp = gpu_temp;
+      rd.gpu_load_v = gpu_load_v; rd.gpu_load = gpu_load;   // v1.4.5：ADL core_act 上行（免提权）
+      rd.gpu_mem_used_mb = 0; rd.gpu_mem_total_mb = 0;
+      rd.ram_used_x10 = hw_mem_used_gb10(&mem);
+      rd.ram_total_x10 = hw_mem_total_gb10(&mem);
+      rd.disk_pct_v = 0; rd.disk_pct = 0;
+      if (disk_pct_valid == 1) { rd.disk_pct_v = 1; rd.disk_pct = disk_pct_live; }
+      rd.disk_used_g = dsk.used; rd.disk_total_g = dsk.total;
+      rd.net_down = -1; rd.net_up = -1;
+      // v1.4.5：网速走**自主通道**（GetIfTable，免提权）；没有可用真网卡时保持 -1 → NET 行不显示（与 C# 的 null 同义）
+      if (g_net_rc == 1 && nets.rows > 0) { rd.net_down = nets.down; rd.net_up = nets.up; }
+      rd.fan_rpm = 0;
+      rd.cpu_pwr = 0; if (pwr_valid == 1) rd.cpu_pwr = pwr;
+      rd.gpu_pwr = 0; if (gpu_pwr_v == 1) rd.gpu_pwr = gpu_pwr;   // v1.4.6.1：GPU 功耗上行
+      if (demo_mode == 1) {
+        rd.cpu_temp_v = 1; rd.cpu_temp = 53;
+        rd.cpu_load_v = 1; rd.cpu_load = 21;
+        rd.cpu_clock = 3093;
+        rd.gpu_temp_v = 1; rd.gpu_temp = 41;
+        rd.gpu_load_v = 1; rd.gpu_load = 34;
+        rd.gpu_mem_used_mb = 1230; rd.gpu_mem_total_mb = 4096;
+        rd.ram_used_x10 = 79; rd.ram_total_x10 = 159;
+        rd.net_down = 20; rd.net_up = 5;
+        rd.fan_rpm = 1450;
+        rd.cpu_pwr = 74; rd.gpu_pwr = 18;
+        rd.have_fps = 1; rd.fps = 116; rd.have_low = 1; rd.fps_low = 1;
+        rd.have_src = 1; rd.fps_src_len = 6;
+        rd.sw = 4095;
+      }
+        // —— 第 5 步：从 8080 /api/data 取数（有 http.on 时启用）——
+        // 位置关键：**夹在「本地直读填完」之后、「建行」之前**；失败（8080 没开/连不上）就保留本地值当回退。
+        // 第 7 步起：整段刷新都在这个 500ms 块里，**两次刷新之间不再重填 rd** ⇒ API 值会稳定保持到下次刷新。
+        if (demo_mode == 0 && http_mode == 1 && stitch_mode == 0) {
+          if (http_pull(&hb, &api, &rd) != 0) g_http_ok = 0;
+        }
+        // —— 第 8 步：缝合桥（stitch.on）—— 优先级高于 8080；桥读不到的字段保留上面的本地直读值 ——
+        if (demo_mode == 0 && stitch_mode == 1) {
+          if (stitch_open() == 1) {
+            // v1.4.7：先告诉桥"要不要跑 PresentMon"（只在意图变化时真调导出）。口径 = **缝合开着就一直跑**：
+            //   C# 参考版也是按 FpsMode 常驻起停（与 ShowFps 开关无关，免得开开关关来回等 5 秒）；
+            //   关掉 FPS 显示项只是不画那一行，采集本身不断。
+            //   cfg.fps_src：0 = presentmon（默认）/ 1 = rtss（退回旧的共享内存通道）。
+            if (cfg.fps_src == 0) stitch_pm(1);
+            else stitch_pm(0);
+            stitch_to_snap(&api);
+            api_to_rows(&api, &rd);
+            // ⚠️ 温度校准（2026-09-16 实测补）：桥给的是 **LHM 原始读数**，而 C# 参考版是在
+            //   「快照层」才套 ApplyCpuOffset（`MonitorForm.cs:148`）——它的 8080 接口给的已经是
+            //   校准后的值。实测对照：LHM Package 62 / Core Max 61（探针 lhmprobe 全表），
+            //   参考版 8080 = 50 = 61 − 11 ✓。所以**只在缝合路径**补 cfg.cpu_offset；
+            //   8080 路径（http.on）绝不能补，否则双重校准。
+            if (api.v_cpu_temp == 1) rd.cpu_temp = rd.cpu_temp + cfg.cpu_offset;
+          }
+        }
+        last_refresh = GetTickCount();
+      }
+      // —— 建行 + 画 ——
+      // 第 6 步（6c）：显示项开关可能在右键菜单里被改过 → 每帧回读（demo 自检模式用固定掩码，别覆盖）
+      if (demo_mode == 0) rd.sw = cfg.sw;
+      int *dc = surf.dc;
+      ui_font_use(dc, ui_font);
+      dr.dc = dc;
+      sg.dc = dc;                     // M3(a)：FLGUI 路径量宽也用它（同一条 DC、同一个已选入的字体）
+      // —— 建行前先记下"缓冲现在用到哪儿了"（sg.cur 在建行过程中会被改，之后就算不出尾部了）——
+      int src_a = sg.cur + 1;
+      rowmax = build_rows(&rows, &sg, &rd);
+      // v1.4.7（2026-09-17）：帧率来源名（PresentMon 选中的进程名）**建行之后**搬进 rbuf 尾部。
+      //   顺序要点：① 偏移必须用**建行前**记下的 src_a（建行后 sg.cur 已经跑掉了，用它算会把来源名
+      //   盖到第一段文字上）；② 建行时 FPS 段已登记 isrc（长度来自 rd.fps_src_len），但读的是**全局偏移**
+      //   g_pm_src_off —— 每帧现算现用，不会串帧；这一帧没搬成（<0）就不画标注。
+      if (rd.have_src == 1 && rd.fps_src_len > 0) stitch_sync_src(sg.buf, src_a, rd.fps_src_len);
+      else { g_pm_src_off = 0 - 1; g_pm_src_len = 0; }
+      int dpok = 0;
+      int dppv = hw_diskp_pct(&dps);        // v1.4.3 诊断：dump 前现采一次
+      if (dppv >= 0) dpok = 1;
+      g_dpok = dpok;
+      if (dps.h != 0 - 1) g_dph = 1;         // ⚠️ 地址不能进全局 int，只存"是否有效"
+      g_dppct = dppv;
+      // v1.4.5：dump 门槛从 30 帧放宽到 90 帧 —— 网速通道要**两次采样**才有速率（首帧速率为 0）。
+      // v1.4.6.1 再放宽到 130 帧：采样点在 tick 60/120，90 帧时**只有基线没有第一次速度**
+      //   （实测 02:1x：dump 出来 net 恒为 0K，而 C# 同刻 70.9KB/s —— 门槛不足会伪装成"网速坏"）。
+      if (dump_mode == 1 && GetTickCount() - g_dump_t0 >= 10000) {
+        // v1.4.7 修法（两轮实测教训）：**不能用"帧数 ≥130"当落盘条件**——建窗/图层/WM_PAINT 的启动突发
+        //   会在 100ms 内把 frame 刷过 130，落盘时连第一次 500ms 刷新都还没发生
+        //   （证据：dump 里 raw23=0x00000707 ⇒ 采样序号 = 0，是**第一条**快照；st=003/ln=000 全在冷启动）。
+        //   改成**按时间**：启动满 10 秒后每 10 秒覆盖写一次 ⇒ 后写的那份一定是稳态。
+        g_dump_t0 = GetTickCount();
+        int *dwf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\rows-dump.txt", 0x40000000, 0, 0, 2, 0, 0);
+        if (dwf != 0) { dump_rows(dwf, &rows, &sg, &rd); CloseHandle(dwf); }
+      }
+      if (cfg.minimode == 1) {
+        // —— 第 6 步（6d）小窗绘制（规格 §2）：填充 ARGB(215,16,16,18)、描边 ARGB(90,130,200,255)、
+        //    中心画 CPU 占用%（12px）——
+        surf.fill_a = 255;
+        surf.ring_a = 90;
+        surf_paint(&surf, C_PANEL(), C_RING());
+        ui_font_use(dc, mini_font);
+        SetBkMode(dc, 1);
+        SetTextColor(dc, C_MAIN());
+        if (rd.cpu_load_v == 1) ui_num_center(dc, surf.cw, surf.ch, rd.cpu_load);
+        else ui_text_center(dc, surf.cw, surf.ch, "--");
+        surf.fill_a = 255;
+        surf.ring_a = 70;
+      } else {
+        // M3(a)：行绘制走 FLGUI 绘制层 —— gui_begin → 逐段进命令表（kind 5 文本 + 逐段显式色）→ gui_end
+        //   → 平台层 gui_win_render 遍历命令表上屏。**面板/描边也由它按主题色画**（gui_win_render 内部先
+        //   surf_paint(theme_bg, theme_border)，与旧路同一对颜色/同一对缓存画笔 ⇒ 像素应逐点相同）。
+        //   后面 surf_alpha + surf_flush（ULW 上屏）照旧 —— 那是"表面层"，仍归 ui_lib。
+        // M4d：时间戳注入 —— 本 app 没走平台层那条采集链（`gui_win_input`），就在**唯一调用 gui_begin 的地方**
+        //   按同一口径每帧注入一次。**仍然不在内核层取时**（理由见 flgui.fl 的 GuiInput 注释）。
+        gin.ms = GetTickCount();
+        gui_begin(&gc, &gin);
+        rowmax = draw_rows_gui(&gc, &rows, &sg, swtest(rd.sw, SW_POWERDETAIL()));
+        gui_end(&gc);
+        gui_win_render(&surf, &gc, ui_font);
+      }
+      surf_alpha(&surf);
+      surf_flush(&surf);
+      if (force_size == 1 || (frame % 60 == 0 && drag.on == 0)) {
+        int nw = rowmax + 8;
+        int nh = 16 + rows.rows * 19;
+        // 第 6 步（6d）：小窗模式 = 固定 34×34（C# MiniBoxSize；配合 WM_GETMINMAXINFO 才不被钳回）
+        if (cfg.minimode == 1) { nw = 34; nh = 34; }
+        if (nw < 60 && cfg.minimode == 0) nw = 60;
+        if (nw > surf.bw - 2) nw = surf.bw - 2;
+        if (nh > surf.bh - 2) nh = surf.bh - 2;
+        if (nw != drag.w || nh != drag.ht) {
+          GetWindowRect(h, &wr);
+          win_x = wr.l;
+          win_y = wr.t;
+          MoveWindow(h, win_x, win_y, nw, nh, 0);
+          drag.w = nw;
+          drag.ht = nh;
+          surf.cw = nw;
+          surf.ch = nh;
+        }
+      }
+      frame = frame + 1;
+      gui_win_frame_wait(&gc);      // M4e：唯一"等完这一帧"入口（按 gc.frame_fps 档位限速；默认 60fps）
+    }
+  }
+  // 第 6 步（6a）：退出时存位置（C# 同款）。
+  // ⚠️ dump / demo 是**自检模式**，不写配置——否则自检用的 sw=4095 会污染真实 config。
+  if (dump_mode == 0 && demo_mode == 0) {
+    GetWindowRect(h, &wr);
+    cfg.x = wr.l; cfg.y = wr.t; cfg.have_xy = 1;
+    g_cfg_save = cfg_save("E:\\FLINT-lab\\apps\\m2_float\\config.json", &cfg);
+  }
+  return 0;
+}

@@ -1,0 +1,5 @@
+# boot-bench baseline -- boot-side ticks (min of N rounds). Recorded by bench\boot-bench.ps1 -Record
+# 2026-09-22 03:19:29  iters=7 rounds=3  b1_emit sha256=0672384BBC4E0C5F
+k1 boot_ticks_min=95061 flint_ticks_min=95038 ratio=1
+k2 boot_ticks_min=208232 flint_ticks_min=237685 ratio=0.88
+k3 boot_ticks_min=190184 flint_ticks_min=190024 ratio=1

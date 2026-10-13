@@ -1,0 +1,4 @@
+// b2y0_lib.fl — 前置条件样本：库自带 api 声明，且被 include 在函数定义之后
+api kernel32 int GetTickCount();
+
+int b2y0_tick() { return GetTickCount(); }

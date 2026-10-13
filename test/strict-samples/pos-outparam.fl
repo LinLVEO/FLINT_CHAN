@@ -1,0 +1,8 @@
+// pos-outparam.fl -- -strict 正例：先声明、再由 &x 交给别人写的常规写法必须放行
+//   （未初始化检查的保守方向：取过址就标"可能已写"——宁可漏报，绝不误报）
+int fill(int *out) { *out = 42; return 0; }
+int main() {
+  int v;
+  fill(&v);
+  return v;
+}

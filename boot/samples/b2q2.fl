@@ -1,0 +1,36 @@
+// b2q2.fl — B2q：boot 编译标准库 num/mem/chr 三库（差分样本：boot 与真 flint 产物必须同为 42）
+include "../../lib/num_lib.fl"
+include "../../lib/mem_lib.fl"
+include "../../lib/chr_lib.fl"
+
+int main() {
+  int r = 0;
+  char b[16];
+  char a[8];
+  char c[8];
+
+  // —— num ——
+  if (std::itoa(-42, b) == 3) r |= 1;
+  if (std::atoi(b) == -42) r |= 2;
+  if (std::itohex(255, b) == 2) r |= 4;
+  if (b[0] == 'f' && b[1] == 'f') r |= 8;
+  if (std::numlen(2147483647) == 10) r |= 16;
+
+  // —— mem ——
+  std::memset(a, 0, 8);
+  std::memset(c, 0, 8);
+  if (std::memset(a, 65, 4) == 4) r |= 32;
+  if (std::memcmp(a, c, 4) == 0) r |= 64;
+  if (std::memcpy(c, a, 4) == 4) r |= 128;
+  if (std::memcmp(a, c, 4) == 1) r |= 256;
+
+  // —— chr ——
+  if (std::is_digit('7') == 1) r |= 512;
+  if (std::is_alpha('q') == 1) r |= 1024;
+  if (std::is_space(10) == 1) r |= 2048;
+  if (std::to_upper('a') == 'A') r |= 4096;
+  if (std::to_lower('Z') == 'z') r |= 8192;
+
+  if (r == 16383) return 42;
+  return r;
+}

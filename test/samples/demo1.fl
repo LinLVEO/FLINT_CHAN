@@ -1,0 +1,101 @@
+// demo1.fl — FLINT-UI v0.1 交互实证：自绘窗口 + 按钮命中 + 鼠标消息 + 计数条
+// 玩法：点 CLICK 计数条增长；点 QUIT 关窗（退出码 = 点击数）；25s 无操作自动退
+// 回归防线（开窗前纯算术自测）：60/61 = lParam 坐标解析错；70-74 = 命中测试错
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 int FillRect(int, int, int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api kernel32 void Sleep(int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct RECT { int l; int t; int r; int b; }
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }  // WM_PAINT 吞掉防合成洪泛
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int hit_rect(int mx, int my, struct RECT *rc) {
+  if (mx < rc->l) return 0;
+  if (mx >= rc->r) return 0;
+  if (my < rc->t) return 0;
+  if (my >= rc->b) return 0;
+  return 1;
+}
+
+int main() {
+  // —— 纯算术自测：lParam 坐标解析 + 命中（不依赖窗口）——
+  int lx = 0x00C80064;                       // 模拟 lParam：x=100(0x64) y=200(0xC8)
+  int mx = lx & 0xFFFF;
+  int my = (lx >> 16) & 0xFFFF;
+  if (mx != 100) return 60;
+  if (my != 200) return 61;
+  struct RECT t1; t1.l = 40; t1.t = 50; t1.r = 160; t1.b = 90;
+  if (hit_rect(50, 60, &t1) != 1) return 70;
+  if (hit_rect(160, 60, &t1) != 0) return 72;
+  if (hit_rect(50, 90, &t1) != 0) return 74;
+  // —— 窗口 ——
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTDEMO";
+  if (RegisterClassA(&wc) == 0) return 90;
+  int *h = CreateWindowExA(0, "FLINTDEMO", "FLINT-UI v0.1 demo", 0x00CF0000, 100, 80, 380, 220, 0, 0, 0, 0);
+  if (h == 0) return 91;
+  ShowWindow(h, 1);
+  // —— UI 状态（全在 main 局部，无全局变量）——
+  struct MSG m;
+  int running = 1;
+  int frame = 0;
+  int count = 0;
+  struct RECT client; client.l = 0; client.t = 0; client.r = 380; client.b = 220;
+  struct RECT btnClick; btnClick.l = 50; btnClick.t = 50; btnClick.r = 170; btnClick.b = 100;
+  struct RECT btnQuit;  btnQuit.l = 200; btnQuit.t = 50; btnQuit.r = 320; btnQuit.b = 100;
+  struct RECT bar;      bar.l = 0; bar.t = 0; bar.r = 0; bar.b = 0;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) running = 0;        // WM_CLOSE：点 X
+      if (m.message == 0x201 && running) {       // WM_LBUTTONDOWN
+        int px = m.lparam;                       // 64 位读 → 32 位截断（坐标打包在低 32）
+        int cxm = px & 0xFFFF;
+        int cym = (px >> 16) & 0xFFFF;
+        if (hit_rect(cxm, cym, &btnClick)) { count++; if (count > 24) count = 24; }
+        if (hit_rect(cxm, cym, &btnQuit)) running = 0;
+      }
+      if (running) DispatchMessageA(&m);
+    }
+    if (running) {
+      int *dc = GetDC(h);
+      FillRect(dc, &client, GetStockObject(0));      // 白底
+      FillRect(dc, &btnClick, GetStockObject(2));    // CLICK 灰
+      TextOutA(dc, 88, 68, "CLICK", 5);
+      FillRect(dc, &btnQuit, GetStockObject(2));     // QUIT 灰
+      TextOutA(dc, 236, 68, "QUIT", 4);
+      TextOutA(dc, 50, 130, "clicks:", 7);
+      int i = 0;                                     // 计数条：count 个黑块
+      while (i < count) {
+        bar.l = 110 + i * 14; bar.t = 130; bar.r = bar.l + 10; bar.b = 142;
+        FillRect(dc, &bar, GetStockObject(4));
+        i++;
+      }
+      ReleaseDC(h, dc);
+      frame++;
+      if (frame > 1500) running = 0;                 // 25s 兜底自动退
+      Sleep(16);
+    }
+  }
+  return count;
+}

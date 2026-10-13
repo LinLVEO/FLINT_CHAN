@@ -1,0 +1,1776 @@
+// flgui_win32.fl — FLGUI 平台层（L0，M1 最小版）：**参数化建窗** ＋ 共享 WNDPROC ＋ 输入采集（轮询式）
+//   ＋ 按命令表绘制（DC_BRUSH 零对象创建路线）＋ ULW/Surf 上屏（D5 定案的默认后端）。
+//
+// 复用 ui_lib.fl 的既有资产：Surf（32bpp DIB + UpdateLayeredWindow 逐像素 alpha）／字体（CreateFontA + SelectObject）／
+//   Win32 api 声明与结构体（WNDCLASS / MSG / RECT / PT / SZS / BF）。
+// 不复用 ui_make/ui_make_top：它们把窗口位置与最小尺寸写死（300,180 / 34×34），
+//   而 FLGUI 的窗口要**按调用方给的 x/y/w/h/alpha 参数化**（计划 §3 L0）。
+//
+// 三条纪律：
+//   ① **一律不 CreateSolidBrush** —— 每帧 Create 不 Delete 会漏 GDI 对象（ui_lib 里那条真事故：每秒涨 65 个、
+//      窗口活不过约 2 分钟）。填充/描边走 GetStockObject(18) DC_BRUSH ＋ SetDCBrushColor。
+//   ② 每帧只许库级 call（守门线 SPEC 原则 10）；③ 本层不放控件逻辑（那在 flgui_widgets.fl）。
+// 输入走**轮询**（GetCursorPos + GetAsyncKeyState）：M1 不用 SetCapture ⇒ 也就不需要 WM_MOUSELEAVE。
+// ✅ **2026-09-28（M4m，用户拍板那一刀）给这条欠账的结论：不补 `TrackMouseEvent` / `WM_MOUSELEAVE`，
+//   用"每帧轮询"兜底** —— 不再两可。三条理由（都能在代码里指到行）：
+//   ① 本库的悬停/按下**本来就是每帧轮询重算**的：`gui_begin` 每帧 `c->hot = 0`、再按 `mx/my` 重新命中
+//      ⇒ **没有任何"靠消息维持的悬停态"**，也就没有 `WM_MOUSELEAVE` 要治的那个病（光标离开窗口后 hot 卡住）。
+//   ② 拖动的**收尾不靠 `WM_LBUTTONUP`**：`gui_win_drag_frame` 每帧查**物理左键**（`GetAsyncKeyState(1)`），
+//      一松手立刻自己 `ui_drag_end`（见那个函数里的"轮询兜底"那行）⇒ "快拖出窗口、松手消息落到别的窗口"
+//      那次真事故（2026-09-23 浮窗"粘手"）在**消息层丢没丢都不影响结果**：`SetCapture` 是第一保险，
+//      每帧轮询是第二保险（`ui_lib.fl:394-425` 记的就是这套双保险）。
+//   ③ **导入预算是硬账**：本层所在的 `m2_float` 链已是 **96/96（MAX_IMPORTS 满格，见下面 api 段）**
+//      ⇒ 把最后一格花在一个**我们根本不消费**的消息上，不如留给真正要用的函数。
+
+// —— 平台层自己要用的 api（ui_lib 未声明的；别重复声明 ui_lib 已有的，会撞重复声明）——
+api user32 int ScreenToClient(int, int);
+api user32 int GetClientRect(int, int);
+api user32 int GetAsyncKeyState(int);
+api gdi32 int GetDeviceCaps(int, int);                                // 88 = LOGPIXELSX（读 DPI 用；ui_lib 未声明）
+api user32 int TranslateMessage(int);                                 // M4b：**必须有它才有 WM_CHAR**（见 gui_win_pump 注释）
+// ===== M4c 键盘档的字符翻译：**只用这一条 api**（导入预算够用，且不依赖 IME/系统输入语言）=====
+//   `MapVirtualKeyA(扫描码, 1)` = MAPVK_VSC_TO_VK：扫描码 → 虚拟键。**纯表查询，IME 与输入语言都影响不到它。**
+//   ⚠️ 为什么不用 `ToAscii`/`TranslateMessage`（2026-09-23 实测，一次"时好时坏"的事故）：
+//     IME 接管本线程时，系统把 `WM_KEYDOWN` 的 `wParam` 换成 **`VK_PROCESSKEY = 0xE5`**（键先交给 IME 处理）
+//     ⇒ `ToAscii(0xE5, …)` 恒返回 0、`TranslateMessage` 也一个 `WM_CHAR` 都不产生；
+//     而 `lParam` 里的**扫描码始终正确**（'K'=0x25、退格=0x0E）。⇒ **VK 一律从扫描码反查**，字符查库内 US 表。
+//     同一台机器、同一个产物：输入语言 en-US 时老路能用、切成 zh-CN（微软拼音在跑）后整条失效 —— 这就是"时好时坏"的真因。
+//   ⚠️ 口径边界：字符表按 **US 布局**（zh-CN 底层也是 US，符号位置一致）；**德/法这类换位布局会打错**；
+//     中文/IME 组合输入仍未做（要 `WM_IME_*` ＋ `ImmGetContext` 一族，另开卡）。
+api user32 int MapVirtualKeyA(int, int);
+// ===== M4d 动画地基①：**唯一取时点** ＋ **唯一"等一帧"入口**（两条一起动，因为都属"帧协议"）=====
+//   `GetTickCount` = 平台层**唯一的取时点**（内核层不许取时，理由见 flgui.fl 的 GuiInput 注释：内核一取时，
+//     逐字节 dump 基线当场失效）。粒度 ~15.6ms（= 系统定时器粒度）；因为进度按**绝对时间**算
+//     （进度 =（now − 起始戳）/ 时长），掉帧只影响当帧步长、**不会累积跑偏**（同族纪律：`别用帧数当计时器`）。
+//   `MsgWaitForMultipleObjects(0, 0, 0, ms, QS_ALLINPUT)`：队列里**没有**任何输入时才等到超时，
+//     有键/鼠标/消息就**立刻醒** ⇒ 打字延迟从"最多一整帧（~41ms）"降到"投递 + 几 ms"。
+//     QS_ALLINPUT = **0x1CFF**（2026-09-26 在本机 MinGW `winuser.h` 核实：QS_INPUT|QS_POSTMESSAGE|QS_TIMER
+//     |QS_PAINT|QS_HOTKEY|QS_SENDMESSAGE，其中 QS_INPUT 含 RAWINPUT/TOUCH/POINTER ⇒ 0x1C07|0x00F8 = 0x1CFF）。
+//     签名 5 参（`DWORD, const HANDLE*, BOOL, DWORD, DWORD`）：api 声明的参数个数不受"FLINT 函数最多 4 参"限制。
+// ⚠️ **导入预算**（真 flint `MAX_IMPORTS = 96`，含槽 0 ExitProcess）：本次两条里 `GetTickCount` **不吃新槽**
+//     （与 `m2_float` 链上已有的同名声明**合并** —— 2026-09-26 探针实测：同签名跨模块也合并成一格，
+//     而**签名不同会直接编译报错**，所以"同一个名字声明两次吃两格"这件事根本不会发生）；
+//     真正吃 +1 的是 `MsgWaitForMultipleObjects` ⇒ `m2_float` 链 **95/96（余量 1）**。
+//     ⇒ **加"新名字"的声明前先 `objdump -p <产物>` 数导入条目**；顶爆**只在 `m2_float` 那条链先炸**。
+api kernel32 int GetTickCount();
+api user32 int MsgWaitForMultipleObjects(int, int, int, int, int);
+// ===== M4e（2026-09-27）：**帧率档位**的另一条后端 —— 跟屏幕合成节拍 =====
+//   `DwmFlush()`（dwmapi.dll）等下一次屏幕合成（本机屏幕 144Hz ⇒ 实测帧周期 **6.94ms**、抖动 ±0.6ms、CPU 2.5% 单核）。
+//   为什么必须留这条通道：系统定时器粒度默认 15.6ms，**光靠"等一帧"压不到 15.6ms 以下**
+//     （要 16ms 会向上取整成 31.2ms ⇒ 32.6fps）；而 DwmFlush **不碰系统设置**就能到屏幕刷新率。
+//   ⚠️ 导入预算是**硬账**（真 flint `MAX_IMPORTS = 96`，含槽 0 ExitProcess）：加这条之后
+//     `m2_float` 那条最胖的链正好 **96/96 满格**、且 `dwmapi.dll` 占满**第 8 个 DLL 组**（MAX_GROUPS）。
+//     2026-09-27 用户拍板「现在就花」；以后再要"新函数/新 DLL"必须先腾格子或抬上限（见 lib\FLGUI.md §3.1）。
+api dwmapi int DwmFlush();
+
+include "ui_lib.fl"
+include "flgui_widgets.fl"
+
+// ===== M4：字体缓存（**建一次，缓存在局部变量里**）=====
+// 为什么要有这一段：M1~M3 里每个 app 各自 `ui_font_make(px)`、再把句柄当参数传给 gui_win_render
+//   ⇒ "字体建几次 / 谁负责"没有口径（多次建 = GDI 句柄累积，同 ui_lib 那次泄漏事故的风险类）。
+// ⚠️⚠️ **不能把字体句柄缓存在全局**（2026-09-22 M4 实测，真 flint 硬拒）：
+//   `int gui_hf_cached = 0;` ＋ 函数里 `gui_hf_cached = ui_font_make(px);` ⇒ 报
+//   「**地址值（64 位）不能装进全局 int / char 变量**」（该标记跨函数传播，抽 helper"洗值"也躲不掉）。
+//   ⇒ 正解 = **句柄由 app 存在局部 `int *` 变量里**，本函数就是"建一次"的唯一入口（返回该句柄）。
+// 字体是 **DC 的状态**（不是进程级）⇒ 每帧渲染前都要重选一次（`ui_font_use`），但**建**只做一次。
+int *gui_win_font_init(int px) {
+  int *hf = 0;
+  int a = 0;
+  if (px < 1) { px = 14; }
+  hf = ui_font_make(px);
+  // 2026-09-23：**建字时量一次真实字宽**写进内核层的 `gui_char_adv`（光标等位置类计算读它）。
+  //   为什么在这里：本函数是"字体只建一次"的唯一入口，量宽要 DC＋字体（两者都只有平台层有）。
+  //   量不到（返回 0）就保留内核默认 8 ⇒ 行为与从前一致（字体层坏掉也不该让光标算崩）。
+  a = ui_font_adv(hf);
+  if (a > 0) { gui_char_adv = a; gui_char_adv_ok = 1; }
+  return hf;
+}
+
+// M4q（2026-09-28，卡 T-20260928-223422）：**按档建字体 ＋ 登记该档字宽**（"档 ⇒ px"的**单点定义**）。
+//   档口径（拍板①）：档 0 标题 = 基准 **+4** ｜ 档 1 正文 = 基准 **+0** ｜ 档 2 说明 = 基准 **−2**；
+//   **三档一律过 `gui_dpi_scale`**；档号越界 ⇒ 当基准档（与内核 `gui_font_push` 同口径；越界那处由内核记账）。
+//   ⚠️ `96 dpi ⇒ gui_dpi_scale 恒等` ⇒ 本机（96dpi）基准 14 就是 **18 / 14 / 12** —— "正文与今天
+//     逐字节相同"因此是**结构性**的（不是靠调参凑出来的）。
+//   ⚠️ 为什么要有这个函数（而不是让 app 自己 `ui_font_make`）：① "档 ⇒ px" 与 "档 ⇒ 字宽" 必须**单点定义**
+//     （否则每个 app 各抄一份，判据也得跟着抄）；② 量宽要 DC ＋ 字体句柄，只有平台层有（同 `gui_win_font_init`）。
+//   ⚠️ 老入口 `gui_win_font_init(px)` **一个字没改**：不切档的 app 走它 ⇒ 行为逐字节不变。
+//   登记去哪：档 1 ⇒ 老的全局 `gui_char_adv` / `gui_char_adv_ok`（M4c 那条老路）；档 0/2 ⇒ 状态池的
+//     `k=2` / `k=3`（内核 `gui_textfield_edit` 的光标尺子按当前档取；**零新增全局槽**）。
+//     量不到（`ui_font_adv` 返回 0）⇒ **什么都不写**（保留兜底 ⇒ 与今天同）。
+//   ⚠️ 字体句柄**不能存全局**（见 `gui_win_font_init` 上面那段实测）⇒ 由调用方存在局部 `int *` 里，
+//     再写进表面（`Surf.ft0/ft1/ft2`）由渲染端按 `kind 22/23` 取用。
+int *gui_win_font_tier(struct GuiCtx *c, int px, int tier) {
+  int *hf = 0;
+  int a = 0;
+  int t = 1;
+  if (tier == 0) { t = 0; }
+  if (tier == 2) { t = 2; }
+  if (px < 1) { px = 14; }
+  if (t == 0) { px = px + 4; }
+  if (t == 2) { px = px - 2; }
+  px = gui_dpi_scale(c, px);                     // 三档一律过 DPI（96dpi 恒等 ⇒ 与今天逐字节同）
+  hf = ui_font_make(px);
+  a = ui_font_adv(hf);
+  if (a > 0) {
+    if (t == 1) { gui_char_adv = a; gui_char_adv_ok = 1; }
+    else {
+      if (t == 0) { gui_pool_put(gui_hash("__flgui_font") ^ 0x464F4E54, 2, a); }
+      else { gui_pool_put(gui_hash("__flgui_font") ^ 0x464F4E54, 3, a); }
+    }
+  }
+  return hf;
+}
+
+// M4b 诊断计数器：本进程各收到了多少条键盘消息（真输入探针用它区分"消息没到"与"消息到了但没人消费"）
+int gui_key_down_n = 0;
+int gui_key_char_n = 0;
+// M4c 诊断计数器：WM_KEYDOWN 里 **hwnd == 0（线程消息）** 的条数。
+//   为什么单记它：`TranslateMessage` 只能把"**投给某个窗口**"的 WM_KEYDOWN 翻成 WM_CHAR；
+//   对 hwnd==0 的线程消息它无处投递 ⇒ **ch 恒 0**。2026-09-23 实测（键盘档）：真按键 `D=2 C=0`
+//   ⇒ 这一栏就是"翻译不出来的那一半"的判据（对半切：D 管到没到、N 管是什么身份、C 管翻没翻）。
+int gui_key_null_n = 0;
+// M4c 诊断计数器：真按键消息里 **lParam 的扫描码字节**（bit16..23）到底是什么。
+//   为什么单记它：`TranslateMessage`→`ToUnicode` **按扫描码查键盘布局表** —— 扫描码丢了，
+//   字母就翻不出字符（而回车/退格这类控制字符靠 VK 就能翻出来 ⇒ 症状恰好是"字母不行、回车行"）。
+//   `gui_key_scan0_n` = 扫描码字节为 0 的条数；`gui_key_lp0_n` = lParam 整个为 0 的条数；
+//   `gui_key_scan_last` = 最近一条 WM_KEYDOWN 的扫描码字节（'O' 应是 0x18=24）。
+int gui_key_scan0_n = 0;
+int gui_key_lp0_n = 0;
+int gui_key_scan_last = 0;
+// M4c 诊断计数器：**键盘档库内表翻出来的字符条数** —— 与 `gui_key_char_n`（WM_CHAR，默认档那条系统路）
+//   分开记，这样"字符是系统翻出来的还是我们翻出来的"一眼可辨（真输入探针的账本里是 `X=` 栏）。
+int gui_key_tr_n = 0;
+// M4c 诊断：**库内 US 表翻出多少个字符**（= 键盘档唯一的翻译路），账本里的 `B=` 栏。
+int gui_key_fb_n = 0;
+// M4c 诊断：最近一条 WM_KEYDOWN 的 `wParam`（**IME 接管时它会变成 `VK_PROCESSKEY = 0xE5` = 229**：
+//   账本 `M=` 栏出现 229，就说明"这一轮是 IME 在吃键"，也正是老路子（`ToAscii`/`TranslateMessage`）失效的原因）。
+int gui_key_vk_last = 0;
+// M4c 诊断：最近一条 WM_KEYDOWN **实际用于判键的那个 VK**（= 扫描码反查结果；`G=` 栏）——
+//   把它和 `M=`（原始 wParam）摆在一起，就能分清"IME 换掉了 wParam"与"我们反查错了"。
+int gui_key_vk_used = 0;
+
+// ===== M4c 兜底翻译表（**纯库内代码，不占导入位**）=====
+// 为什么要它（2026-09-23 实测，一次"时好时坏"的事故）：
+//   `ToAscii` 只在**本线程没有 IME 上下文**时可用；系统输入语言是 zh-CN（微软拼音在跑）时，
+//   窗口一被激活就挂上 IME 上下文 ⇒ `ToAscii` **恒返回 0**（同一台机器、同一个产物：
+//   系统输入语言是 en-US 时 `Y=1` 打得进字，切成 zh-CN 后 `Y=0` 一个字都进不来 —— 表现为"时好时坏"）。
+//   ⇒ 兜底 = 自己按 **US 布局**把 VK 翻成 ASCII（zh-CN 的底层布局就是 US，符号位置一致），
+//     大小写与上档符号用 `GetAsyncKeyState`（**已声明**，不再多占导入位）判 Shift/CapsLock。
+//   ⚠️ 口径边界：**只覆盖 US 布局**（德/法这类换位布局会打错）；非 ASCII 与 IME 组合输入仍未做。
+int gui_kbd_vk_ascii(int vk) {
+  if (vk >= 65) { if (vk <= 90) { return vk + 32; } }      // A..Z → 小写 a..z
+  if (vk >= 48) { if (vk <= 57) { return vk; } }           // 0..9
+  if (vk == 32) { return 32; }                             // 空格
+  if (vk == 186) { return 59; }                            // ; :
+  if (vk == 187) { return 61; }                            // = +
+  if (vk == 188) { return 44; }                            // , <
+  if (vk == 189) { return 45; }                            // - _
+  if (vk == 190) { return 46; }                            // . >
+  if (vk == 191) { return 47; }                            // / ?
+  if (vk == 192) { return 96; }                            // ` ~
+  if (vk == 219) { return 91; }                            // [ {
+  if (vk == 220) { return 92; }                            // \ |
+  if (vk == 221) { return 93; }                            // ] }
+  if (vk == 222) { return 39; }                            // ' "
+  if (vk == 106) { return 42; }                            // 小键盘 *
+  if (vk == 107) { return 43; }                            // 小键盘 +
+  if (vk == 109) { return 45; }                            // 小键盘 -
+  if (vk == 110) { return 46; }                            // 小键盘 .
+  if (vk == 111) { return 47; }                            // 小键盘 /
+  if (vk >= 96) { if (vk <= 105) { return vk - 48; } }     // 小键盘 0..9 → '0'..'9'
+  return 0;
+}
+
+// US 布局的上档（Shift）字符：查不到就原样返回（字母的大写在调用点单独处理）
+int gui_kbd_shift_char(int c) {
+  if (c == 49) { return 33; }     // ! 
+  if (c == 50) { return 64; }     // @
+  if (c == 51) { return 35; }     // #
+  if (c == 52) { return 36; }     // $
+  if (c == 53) { return 37; }     // %
+  if (c == 54) { return 94; }     // ^
+  if (c == 55) { return 38; }     // &
+  if (c == 56) { return 42; }     // *
+  if (c == 57) { return 40; }     // (
+  if (c == 48) { return 41; }     // )
+  if (c == 45) { return 95; }     // _
+  if (c == 61) { return 43; }     // +
+  if (c == 91) { return 123; }    // {
+  if (c == 93) { return 125; }    // }
+  if (c == 92) { return 124; }    // |
+  if (c == 59) { return 58; }     // :
+  if (c == 39) { return 34; }     // "
+  if (c == 44) { return 60; }     // <
+  if (c == 46) { return 62; }     // >
+  if (c == 47) { return 63; }     // ?
+  if (c == 96) { return 126; }    // ~
+  return c;
+}
+// M4b：`gui_key_pending` / `gui_key_last` **定义在 flgui_edit.fl**（消费方与它同文件：样本只 include 控件层
+//   也必须能编过）。平台层这里只用它们，不重复定义。
+int gui_kb_prev = 0;   // M4b：键盘兜底轮询的"按下沿"状态（0 = 三个编辑键都松着）
+
+// ===== M4：DPI 读回（真窗口；内核里的 gui_dpi_scale 只认 ctx.dpi 这个数）=====
+// ⚠️ 口径（D6 拍板）：**只做"纯函数换算 ＋ 96dpi 真窗口对照"**，不引 per-monitor v2（不做 manifest、
+//   不处理 WM_DPICHANGED）—— 那套要改窗口创建与消息处理，本机 96dpi 下零收益。
+// 实现选型：`GetDeviceCaps(screenDC, LOGPIXELSX 88)` = **老 API 但零依赖**（不需要 MonitorFromPoint 的
+//   16 字节 POINTL 载体，也不用 GetDpiForWindow 的版本条件）⇒ 全进程同一档 DPI（正是本档位的语义）。
+//   返回 0 = 读失败（调用方保持原值）。
+int gui_win_dpi() {
+  int *screen = GetDC(0);
+  int dpi = 0;
+  if (screen == 0) { return 0; }
+  dpi = GetDeviceCaps(screen, 88);
+  ReleaseDC(0, screen);
+  if (dpi < 48) { return 0; }
+  return dpi;
+}
+
+// 读回 DPI 写进 ctx（读失败保持原值）。返回值 = 写进 ctx 的那个数（真窗口对照的判据就用它）。
+int gui_win_dpi_apply(struct GuiCtx *c) {
+  int d = gui_win_dpi();
+  if (d > 0) { c->dpi = d; }
+  return c->dpi;
+}
+
+
+
+// 窗口：位置/尺寸/透明度全部由调用方填（不再是写死的 300,180）
+// ⚠️ `kbd` = 建窗档位（0 = 纯后台档，1 = 键盘档）——**由建窗函数写死、不由调用方直接填**：
+//    2026-09-23 探针 `tmp\m4c\uninit2.fl` 实测（双端 3/3）：**局部 struct 字段不会被清零**
+//    （脏栈后读回上一轮的 999）⇒ 若让调用方"忘了填就用默认"，读到的是垃圾值 —— 档位必须是显式的参数。
+// ===== M4e：帧率限速器的**模块级状态**（用法/理由见下方 gui_win_frame_wait）=====
+//   为什么放模块级而不是塞进 `GuiWin`：m2_float 那条链**不用 GuiWin**（老路自建窗口）⇒ 挂 GuiWin 就等于
+//   "只有新式 app 能限速"。放这里 ⇒ 谁都能调同一个入口（同族纪律：一个入口，别各写各的）。
+int gui_win_fend = 0;      // 上一帧"等完"的时刻（ms）；0 = 还没开始
+int gui_win_tick = 0;      // 现场标定的定时器粒度（ms）；0 = 还没标定
+
+struct GuiWin { int *hwnd; int *cls; int x; int y; int w; int h; int alpha;
+                int down_prev; int ok; int frames; int kbd;
+                int shift; }
+//   ^ `shift` = **M4o 加的"消息驱动 Shift 态"**（1 = Shift 按着）。为什么必须有它（本刀真按键探针实测）：
+//     泵是**一批一批**取消息的（`while (PeekMessageA(...))`）—— 一次 pump 里可能同时拿到
+//     「Shift 按下 / Tab 按下 / Tab 抬起 / Shift 抬起」四条 ⇒ 处理 Tab 那一条时**去轮询物理键态**
+//     （`GetAsyncKeyState(16)`）读到的已经是"Shift 早就抬起来了"（实测 raw=**1**：只有"自上次调用后被按过"
+//     的低位，高位 = 0）⇒ **Shift+Tab 被当成 Tab**（探针实测：焦点从 0 前进到 1，而不是回绕到 4）。
+//     ⇒ 正解 = **方向从消息流里记**（WM_KEYDOWN/WM_KEYUP 的扫描码反查 VK_SHIFT）——它天然与
+//     "这条 Tab 消息"同序、不受泵的批处理影响。轮询那一路只留作"起窗时 Shift 已经按着"的兜底。
+
+// —— 窗口过程：只做"必须由消息驱动"的三件事 ——
+// WM_PAINT 必须派发并 ValidateRect（计划 §6.3：不派发 ⇒ 窗口永远脏 ⇒ 系统反复投递 ⇒ 内层 PeekMessage 死循环）
+int gui_win_proc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  if (msg == 0x14) { return 1; }                                     // WM_ERASEBKGND：内容我们全画，不许系统擦（防闪）
+  if (msg == 0x20) { SetCursor(LoadCursorA(0, 32512)); return 1; }   // WM_SETCURSOR：自己设箭头，别走 DefWindowProc 兜圈
+
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// 建窗（两档共用；调用方走下面两个入口，别直接调本函数）
+//   默认档 = ULW 图层路线：WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_NOACTIVATE ＋ WS_POPUP（不调 SetLayeredWindowAttributes）
+//   ⚠️⚠️ **扩展样式必须在建窗时定**（2026-09-23 M4c 实测）：`SetWindowLongA(hwnd,-20,...)` 运行时摘掉
+//      `WS_EX_NOACTIVATE` 后行为与没摘**一模一样**（三个探针变体全白跑）⇒ 别再把"运行时改样式"当实验手段。
+int gui_win_make_tier(struct GuiWin *g, int kbd) {
+  struct WNDCLASS wc;
+  int exs = 0;
+  g->ok = 0;  g->down_prev = 0;
+  g->frames = 0;
+  g->shift = 0;                                         // M4o：消息驱动 Shift 态（起窗时先当作"没按"）
+  gui_win_fend = 0;                                     // M4e：限速器状态复位（**模块级**，不挂在 GuiWin 上 ——
+  gui_win_tick = 0;                                     //   这样不用 GuiWin 的老 app（m2_float）也能用同一个入口）
+  if (kbd == 1) { g->kbd = 1; } else { g->kbd = 0; }   // 归一化：只认显式的 1，其余一律默认档
+  wc.style = 0;
+  wc.fn = &gui_win_proc;
+  wc.cb1 = 0;
+  wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0;
+  wc.cur = LoadCursorA(0, 32512);
+  wc.brush = 0;
+  wc.menu = 0;
+  wc.cls = g->cls;
+  // ⚠️ 类名每进程只注册一次：多窗口要各给一个类名（计划 §6.4）
+  if (RegisterClassA(&wc) == 0) { return 0; }
+  // M4c 两档（唯一变量 = 建窗扩展样式）：
+  //   默认档 `0x08080008` = TOPMOST|LAYERED|NOACTIVATE ⇒ **纯后台**：不抢焦点、键盘消息只到线程不到窗口
+  //     （真按键 WM_KEYDOWN 到得了，但 TranslateMessage 翻不出 WM_CHAR ⇒ 打不进字）。
+  //   键盘档 `0x00080008` = TOPMOST|LAYERED（**去掉 NOACTIVATE**）⇒ 窗口可被激活，点击取焦点后真按键能翻出 WM_CHAR
+  //     —— 这一档正是 PowerShell 对照窗 `tmp\m4c\control-win.ps1` 实测能打字的那套样式（唯一变量就是它）。
+  //   ⚠️ 未收口（下一小步单独验）：键盘档窗口可激活 ⇒ 可能进任务栏；C# 参考浮窗同样没有 WS_EX_TOOLWINDOW
+  //      却不上任务栏（机制未定，只读到 flag、没读 GW_OWNER）⇒ 这维度别顺手猜，要用真窗口单独量。
+  exs = 0x08080008;
+  if (g->kbd == 1) { exs = 0x00080008; }
+  g->hwnd = CreateWindowExA(exs, g->cls, "", 0x80000000, g->x, g->y, g->w, g->h, 0, 0, 0, 0);
+  if (g->hwnd == 0) { return 0; }
+  // M4c 键盘档：**建窗只需一件事 —— 不带 `WS_EX_NOACTIVATE`**（窗口可被激活 ⇒ 真点击时由**系统**完成
+  //   前台与焦点；实测够用，我们自己不必也不能靠 `SetForegroundWindow`/`SetFocus` 去抢，那两个声明还会
+  //   各占一个导入位，见 api 块的导入预算注记）。
+  //   ⚠️ 这里**曾经**做过"点亮键盘布局"（`LoadKeyboardLayoutA(..., KLF_ACTIVATE)`）——**已撤掉**：
+  //     那招是靠"把线程切到 en-US"绕开 IME，一旦窗口被激活、系统把输入语言重新套上来就失效（正是那次
+  //     "时好时坏"）；现在正解 = **按扫描码查库内 US 表**，不依赖输入语言/IME，见 api 块注记。
+  ShowWindow(g->hwnd, 1);
+  SetCursor(LoadCursorA(0, 32512));
+  g->ok = 1;
+  return 1;
+}
+
+// 默认档建窗（M1~M4b 的老入口 —— **签名与行为一字未动**，既有 app/文档/基线全不受影响）
+int gui_win_make(struct GuiWin *g) {
+  return gui_win_make_tier(g, 0);
+}
+
+// 键盘档建窗（M4c 新增）：要真键盘输入（可编辑文本域）的 app 用这个；
+// 与默认档的唯一差别 = 建窗时不带 WS_EX_NOACTIVATE ＋ 点击时取焦点（见 gui_win_input）。
+int gui_win_make_kbd(struct GuiWin *g) {
+  return gui_win_make_tier(g, 1);
+}
+
+// M4o：**Shift 当前是否按着** —— 判据**内联**在两处（Tab 方向 / 键盘档上档翻译），**不另立函数**：
+//   函数预算只剩 1 格（见 `flgui.fl` 上方"函数预算"段），而这里只有 2 个调用点。
+//   两条路都要留：① `g->shift`（WM_KEYDOWN/WM_KEYUP 按扫描码反查记下的）与"这条按键消息"**同序**
+//   ⇒ 批处理也不怕；② `GetAsyncKeyState(16)` 只覆盖"起窗那一刻 Shift 就已经按着"（那时没收到 keydown）。
+//   ⚠️ `GetAsyncKeyState` 是**已声明**的 api（零新导入）。
+
+// 消息泵一步：返回 0 = 收到 WM_QUIT（退出）。TranslateMessage 留给 M4（WM_CHAR/IME）
+// 滚轮在这里取：WM_MOUSEWHEEL(0x020A) 的 wParam 高 16 位 = 带符号的"格数 × 120"。
+// ⚠️ wParam 读出来是"装过地址的值"（MSG.wparam 是 int* 字段）⇒ **不许落到全局 int**（语言硬规则），
+//    只在局部算完直接累加进调用方的 GuiInput 字段（结构体字段可以收）。
+// ⚠️ **每帧清零也归这里**（2026-09-22 M3(b) 修的真 bug）：原先清零点写在 gui_win_input 里，
+//    而 app 的循环是「先 pump（累加）→ 后 input（清零）」⇒ **真滚轮事件在消费之前就被抹掉**，
+//    两个 app（demo / ui_gallery）都收不到滚轮；脚本化输入的门（flgui3 直接喂 in.wheel）看不见这个缺口。
+//    ⇒ 判据：**"谁累加谁清零"必须落在同一个函数里**，清零点放在累加循环之前 ⇒ 与调用顺序无关。
+// M4b：键盘同理 —— `in->key` 的**清零 + 累加也都在本函数**（WM_CHAR 走字符、WM_KEYDOWN 走退格/回车/Esc）。
+int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
+  struct MSG m;
+  int wq = 0;
+  int d = 0;
+  int k = 0;
+  // M4c 键盘档字符翻译用的局部量（`kc` = 表里查出来的 ASCII；`k` 上面那个 = 从扫描码反查到的 VK）
+  int kc = 0;
+  in->wheel = 0;                 // 本帧滚轮量（本轮）：由本函数独自负责清零 + 累加
+  // ⚠️ **`in->key` 不是"每帧清零"的量**（与 wheel 不同，2026-09-22 M4b 实测踩到）：
+  //   一次按键序列（如 "ok!"）会在**同一个 pump 里**产出多条 WM_CHAR，而界面**一帧只消费一个字符**
+  //   ⇒ 若像 wheel 那样每帧清 0，前几个字符会被**静默吃掉**（实测只进得去 1 个："len=1"）。
+  //   ⇒ 口径：`in->key` = **待消费槽**（由消费方置 0，见 `gui_edit_key`）；`gui_key_pending` = **还剩几个字符没被消费**
+  //     （消费方每取走一个减 1）。每帧开头：还有待消费的字符就**原样端过来**（下一条 WM_CHAR 再覆盖），否则清 0。
+  if (gui_key_pending > 0) { in->key = gui_key_last; }
+  else { in->key = 0; }
+  while (PeekMessageA(&m, 0, 0, 0, 1) != 0) {
+    if (m.message == 0x12) { return 0; }
+    // ⚠️⚠️ **TranslateMessage 是"打字"的必经一步**（2026-09-22 M4b 真输入探针抓到的真 bug）：
+    //   WM_CHAR **不是系统主动投递的**，而是 `TranslateMessage` 把 `WM_KEYDOWN` 翻译出来的
+    //   ⇒ 不调它，键盘永远只有 WM_KEYDOWN、**一个 WM_CHAR 都收不到**（实测 keydown=6 / keychar=0）。
+    //   M1~M3 没有文本输入所以从没暴露；脚本化输入（直接写 `in.key`）更看不见这层缺口。
+    // ⚠️⚠️ **M4c 实测订正：键盘档下 TranslateMessage 指望不上** —— 真按键、扫描码正确（实测 'K'=0x25、
+    //   退格=0x0E）、消息投给本窗口（不是线程消息）、前台与线程焦点都是本窗，它**依然一条 WM_CHAR 都不产生**
+    //   （账本 `D=2 C=0`，`tmp\m4c\` 与 `apps\flgui_demo\kb-probe.ps1` 的账目）。
+    //   ⇒ 键盘档（`g->kbd == 1`）**不调它**，改走下面 WM_KEYDOWN 分支里的"平台层自带翻译"（`ToAscii`）；
+    //     默认档（纯后台、不做文本输入）保持原样调它，行为一字不动。
+    if (g->kbd == 0) { TranslateMessage(&m); }
+    if (m.message == 0x020A) {
+      wq = m.wparam;
+      d = wq / 65536;
+      d = d & 0xFFFF;
+      if (d > 32767) { d = d - 65536; }
+      in->wheel = in->wheel + d / 120;
+    }
+    // WM_CHAR(0x0102)：已经过键盘布局/IME 翻译的字符（wParam 低位 = 字符码）。
+    //   控制字符由 WM_KEYDOWN 那条路单独处理 ⇒ 这里跳过（否则 8/13/27 会被当成"字符"重复算一次）。
+    //    ⚠️ **消息参数是"装过地址的值"**：写进结构体 int 字段（含 `in->key` 这种解引用）会被真 flint 硬拒
+    //       （"地址值 64 位装不进 4 字节 int"）。实测（`tmp\m4b\probe_wparam*.fl`）三条口径：
+    //         · `in->key = m->wparam % 65536;` **一行写完** ✅（与既有 wheel 那行同形）
+    //         · 先存局部 `k = m->wparam; k = k % 65536; in->key = k;` ❌（标记跨语句传播）
+    //         · `a + 0` / `a * 1` 这类恒等式 ❌，除法/取模 ✅
+    //       ⇒ 取低位一律"**在赋值表达式里**取模"，别先存中间变量再写。
+    if (m.message == 0x0102) {
+      gui_key_char_n = gui_key_char_n + 1;
+      in->key = m.wparam % 65536;
+      // 只把"可打印"记成待消费：>= 32 且 != 127（控制字符走 WM_KEYDOWN 那条路）；
+      // 0x7F..0xA0 是 C1 控制区（含 DEL/光标键被翻译出来的噪声）⇒ 当垃圾丢掉（真 flint 的消息参数写进
+      // 结构体字段只能"表达式里取模"这一条路，取完再判范围、不合适就当没收到，见文件上方那条实测注记）。
+      if (in->key >= 32) {
+        if (in->key != 127) {
+          if (in->key >= 161) { gui_key_pending = gui_key_pending + 1; gui_key_last = in->key; }
+          else { if (in->key <= 126) { gui_key_pending = gui_key_pending + 1; gui_key_last = in->key; } }
+        }
+      }
+    }
+    // WM_KEYDOWN(0x0100)：退格(VK_BACK 8) / 回车(VK_RETURN 13) / Esc(VK_ESCAPE 27)
+    if (m.message == 0x0100) {
+      gui_key_down_n = gui_key_down_n + 1;
+      // M4c 诊断：这条按键是"投给本窗口的"还是"投给线程的"（后者 TranslateMessage 翻不出字符）
+      if (m.hwnd == 0) { gui_key_null_n = gui_key_null_n + 1; }
+      gui_key_vk_last = m.wparam % 65536;    // 诊断：IME 接管时这里会是 229（VK_PROCESSKEY）
+      // M4c 诊断：lParam 里的扫描码字节（**单表达式里除法+取模** —— 与既有 wheel 那行同形，
+      //   避免"先把消息参数存进局部变量"那种被真 flint 硬拒的写法）
+      if (m.lparam == 0) { gui_key_lp0_n = gui_key_lp0_n + 1; }
+      gui_key_scan_last = m.lparam / 65536 % 256;
+      if (gui_key_scan_last == 0) { gui_key_scan0_n = gui_key_scan0_n + 1; }
+      // M4c：**VK 一律从扫描码反查**（`MapVirtualKeyA(sc, 1)`）——IME 接管时 `m.wparam` 是
+      //   `VK_PROCESSKEY`(0xE5) 而不是真键，老代码 `k = m.wparam` 那条路在 IME 下会整个失灵；
+      //   扫描码在 `lParam` 里始终正确。反查失败（0）才退回用 `m.wparam`。
+      k = MapVirtualKeyA(gui_key_scan_last, 1) % 65536;
+      if (k == 0) { k = m.wparam % 65536; }
+      gui_key_vk_used = k;
+      if (k == 8) { in->key = 8; }
+      if (k == 13) { in->key = 13; }
+      if (k == 27) { in->key = 27; }
+      // M4o：**Shift 态从消息流里记**（VK 从扫描码反查）—— 见 `struct GuiWin.shift` 那段实测注记：
+      //   泵是一批一批取消息的 ⇒ 在 Tab 那一条上去轮询物理键态会读到"Shift 已经抬起来了"（方向丢掉）。
+      if (k == 16) { g->shift = 1; }
+      if (k == 160) { g->shift = 1; }
+      if (k == 161) { g->shift = 1; }
+      // M4o（2026-09-28）：**Tab / Shift+Tab ⇒ 焦点链导航**（`gui_begin` 里由 `gui_focus_nav` 消费）。
+      //   ⚠️ **方向必须在这里解**（内核层拿不到 Shift 状态）：`GuiInput` 只有一个 `key` 槽 ⇒
+      //     把方向编码进键值：`9`（VK_TAB）＝前进 ／ `0x0109` = 0x100（Shift 位）| VK_TAB ＝ 后退。
+      //     判据 = `gui_shift_down(g)`：**消息流优先**（`g->shift`），物理轮询当兜底 —— 两条都留着，
+      //     "批处理把 Shift 也一起取了"与"起窗时 Shift 本就按着"两种情形各有一条路覆盖。
+      //   ⚠️ Tab **不进 `gui_key_pending`**（它不是"待打印字符"）：进了会让 `in->key` 被当成字符
+      //     端过来端过去，还会把 `gui_key_pending` 的账搅乱（那条账是"可打印字符"专用的）。
+      if (k == 9) {
+        if (g->shift == 1) { in->key = 0x0109; }                  // 消息流：Shift 按着 ⇒ 反向
+        else {
+          if ((GetAsyncKeyState(16) & 0x8000) != 0) { in->key = 0x0109; }   // 兜底：物理键态
+          else { in->key = 9; }
+        }
+      }
+      // M4c **键盘档字符翻译（唯一一条路）**：VK → 库内 US 表 → ASCII。
+      //   ⚠️ 为什么不用 `TranslateMessage` / `ToAscii`（2026-09-23 实测）：
+      //     IME 接管本线程时 `wParam` 变 `VK_PROCESSKEY`、键先交给 IME ⇒ `TranslateMessage` **一个 WM_CHAR
+      //     都不产生**、`ToAscii(0xE5,…)` **恒 0**（同一产物：输入语言 en-US 时能用、切 zh-CN 后整条废掉
+      //     —— 就是那次"时好时坏"）。库内表只吃**扫描码**，输入语言与 IME 都影响不到它。
+      //   ⚠️ 口径：**US 布局**（zh-CN 底层也是 US）；只认可打印 ASCII 32..126；中文/IME 组合输入未做。
+      //   只在这条键**没被上面的控制键认领**时翻译（否则同一条消息会被算两次）。
+      if (g->kbd == 1) {
+        if (in->key == 0) {
+          kc = gui_kbd_vk_ascii(k);
+          if (kc != 0) {
+            // **Shift 判据内联**（不另立函数：函数预算只剩 1 格）——消息流优先、物理轮询兜底，
+            //   理由见上面 WM_KEYDOWN 的 Tab 那一段（批处理会把"Shift 抬起"一起取走）。
+            if (g->shift == 1) {                                   // VK_SHIFT 按着 ⇒ 上档
+              kc = gui_kbd_shift_char(kc);
+              if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+            } else {
+              if ((GetAsyncKeyState(16) & 0x8000) != 0) {           // 兜底：物理键态
+                kc = gui_kbd_shift_char(kc);
+                if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+              } else {
+                if ((GetAsyncKeyState(20) & 1) != 0) {             // CapsLock 开着 ⇒ 字母大写
+                  if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+                }
+              }
+            }
+            gui_key_fb_n = gui_key_fb_n + 1;
+          }
+          if (kc != 0) {
+            if (kc >= 32) {
+              if (kc <= 126) {
+                in->key = kc % 65536;
+                gui_key_pending = gui_key_pending + 1;
+                gui_key_last = in->key;
+                gui_key_tr_n = gui_key_tr_n + 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    // M4o：**WM_KEYUP(0x0101)** —— 只干一件事：把"消息驱动 Shift 态"清掉。
+    //   ⚠️ 与 WM_KEYDOWN 同一条纪律：**扫描码必须"在赋值表达式里"取**（消息参数是"装过地址的值"，
+    //     先存局部再算会被真 flint 硬拒）；这里把它直接喂给 `MapVirtualKeyA`（实参位置，合规）。
+    //   ⚠️⚠️ **反查失败必须退回 `m.wparam`**（与上面 WM_KEYDOWN 那两行同一条口径）—— 探针实测：
+    //     `keybd_event` 注入的键**扫描码可以是 0**（探针给 Shift 传的就是 0，账本 `Z=` 栏数得到），
+    //     而 `MapVirtualKeyA(0,1)` = 0 ⇒ 少了这条兜底就**永远清不掉** Shift 态：
+    //     症状 = 下一次单独的 Tab 被当成 Shift+Tab（真按键探针实测：idx 从 4 退到 3，而期望是回绕到 0）。
+    if (m.message == 0x0101) {
+      k = MapVirtualKeyA(m.lparam / 65536 % 256, 1) % 65536;
+      if (k == 0) { k = m.wparam % 65536; }
+      if (k == 16) { g->shift = 0; }
+      if (k == 160) { g->shift = 0; }
+      if (k == 161) { g->shift = 0; }
+    }
+    DispatchMessageA(&m);
+  }
+  return 1;
+}
+
+// 输入采集（每帧一次）：客户区光标 + 左键down/pressed/released
+int gui_win_input(struct GuiWin *g, struct GuiInput *in) {
+  struct PT pt;
+  int down = 0;
+  pt.x = 0;
+  pt.y = 0;
+  GetCursorPos(&pt);
+  ScreenToClient(g->hwnd, &pt);
+  in->mx = pt.x;
+  in->my = pt.y;
+  in->down = 0;
+  in->pressed = 0;
+  in->released = 0;
+  // M4d：**平台层唯一的取时点** —— 本帧时间戳（毫秒）在这里注入（内核层不取时，见上面 api 段与 flgui.fl）。
+  //   与 mx/my 同位：都是"外部世界的事实"，一帧采一次。分配点唯一 ⇒ 无头样本看不到它、平台层才有真值。
+  in->ms = GetTickCount();
+  // in->wheel 不在这里动 —— 它的"清零 + 累加"都归 gui_win_pump（见那里的注释：跨函数分工曾让真滚轮被抹掉）
+  if ((GetAsyncKeyState(1) & 0x8000) != 0) { down = 1; }
+  in->down = down;
+  if (down == 1) { if (g->down_prev == 0) { in->pressed = 1; } }
+  if (down == 0) { if (g->down_prev == 1) { in->released = 1; } }
+  g->down_prev = down;
+  // M4c 键盘档：**点击时不再自己抢前台/焦点** —— 改成靠"窗口本来就可激活"这一条：
+  //   建窗不带 `WS_EX_NOACTIVATE` ⇒ 用户真点击时由**系统**完成激活与焦点设置（探针实测：真点击后
+  //   `GetForegroundWindow()==本窗`、且被测线程自己的焦点窗也是本窗，无需我们插手）。
+  //   为什么改成这样：真 flint 的 `MAX_IMPORTS=96` 余量只剩 4 位，而 `m2_float` 那条链已吃到 92
+  //   ⇒ `SetForegroundWindow`/`SetFocus` 这两个声明每一条都要占位（`SetForegroundWindow` 虽在 `menu.fl`
+  //   里有同一条，但**导入表按声明条数计**，实测不合并）⇒ 把这钱省给真正必需的翻译与布局。
+  //   ⚠️ 若以后发现"点一下没拿到键盘"（例如窗口被别的程序盖住时点击），再把 `SetFocus` 加回来即可（+1 导入）。
+  // M4b：键盘**兜底轮询** —— 只给**默认档**用（`WS_EX_NOACTIVATE|WS_POPUP`，不抢焦点 ⇒ 键盘消息在某些情况下收不到）；
+  //   三个编辑键用 GetAsyncKeyState 兜一层（只补"还没收到"的情况）。
+  //   ⚠️ **必须做"按下沿"**（2026-09-22 M4b 实测踩到）：轮询只看"键现在按着吗"⇒ 按住不放会**每帧都触发一次**
+  //      （实测退格删了 2 个字符："len=6 → len=4"）。记忆里那条通用纪律正是这个：**键盘输入要走边沿，不要走电平**
+  //      （同族：`TrackMouseEvent`/`WM_MOUSELEAVE` 与"短于一帧的点击"那类轮询缺口）。
+  //   ⚠️⚠️ **键盘档必须关掉它**（2026-09-23 M4c 账本实测，一次"同一个退格删两个字符"的事故）：
+  //      键盘档窗口有焦点 ⇒ 消息一定到得了，但**IME 会把控制键的 `WM_KEYDOWN` 推迟一帧**
+  //      （账本原样：`L=2 T=ok` → `L=1 T=o`（`I=8`＝兜底轮询先删）→ `L=0 T=`（`M=8 G=8 S=14`＝迟到的那条
+  //      消息**又删一次**））⇒ 兜底与消息**对同一次按键各算一次**。⇒ 口径：**兜底只属于"消息到不了"的那一档。**
+  //   ⚠️ 字符（字母/数字）**没法用轮询兜**（要键盘布局 + 大小写 + IME）⇒ 真打字走上面的扫描码表。
+  if (g->kbd == 0) {
+    if (in->key == 0) {
+      if ((GetAsyncKeyState(8) & 0x8000) != 0) {
+        if (gui_kb_prev == 0) { in->key = 8; gui_kb_prev = 1; }
+      } else {
+        if ((GetAsyncKeyState(13) & 0x8000) != 0) {
+          if (gui_kb_prev == 0) { in->key = 13; gui_kb_prev = 1; }
+        } else {
+          if ((GetAsyncKeyState(27) & 0x8000) != 0) {
+            if (gui_kb_prev == 0) { in->key = 27; gui_kb_prev = 1; }
+          } else { gui_kb_prev = 0; }   // 三个键都松开 ⇒ 复位（下一次按下才算"沿"）
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// ===== M4m（2026-09-28，卡 T-20260928-005959）：**窗口拖动** ＋ **双击顶栏最大化/还原** =====
+// 库件复用：`ui_lib.fl` 的 `ui_drag_begin/frame/end`（`SetCapture` ＋ 记光标/窗口原点 → `MoveWindow` 跟手
+//   → `ReleaseCapture`）—— 本文件**早就 include 了 ui_lib** ⇒ **零新导入**（`ShowWindow` 也已在导入表）。
+//   本层欠的只是三件事：① 拖动区判定（**顶栏 24px**，用户 2026-09-28 拍板）② 与主循环的配合（每帧一调 ＋
+//   抬手收尾）③ 双击顶栏最大化/还原。
+// 主循环用法（app 侧三行，顺序有讲究）：
+//   if (in.pressed == 1)  { gui_win_drag_begin(&dg, &g, in.my); }   // 只有顶栏里的按下会真的开拖
+//   if (in.released == 1) { gui_win_drag_end(&dg); }                // 抬手先收尾
+//   gui_win_drag_frame(&dg);                                        // 每帧跟手（内含物理左键兜底）
+// ⚠️ 拖动**不碰 GuiCtx**：本组函数只收 `struct DragSt *`（原生拖动状态）＋ 窗口句柄，命令表一个字节都不动
+//   —— 无头判据见 `test\samples\flgui13.fl`（同帧两套拖动状态下命令表逐字段相同）。
+int gui_wd_ms = 0;      // 上一次"顶栏按下"的时刻（双击判定；本文件唯一取时点仍是 gui_win_input 的 in->ms）
+int gui_wd_x = 0;       // 上一次按下时的屏幕光标 x
+int gui_wd_y = 0;
+int gui_wd_max = 0;     // 本窗是否被我们最大化过（双击在"最大化 ↔ 还原"之间切；不引 `IsZoomed`，省一格导入）
+// **最大化前的窗口矩形**（双击还原时自己 MoveWindow 用）。为什么不靠 `ShowWindow(SW_RESTORE)` 让系统还原：
+//   2026-09-28 实测 —— 最大化期间 `gui_win_show` 每帧按 `cw×ch` 调 ULW，**ULW 顺带把窗口位置也设成了 (0,0)**，
+//   系统记的"还原矩形"因此变成那个位置 ⇒ 再双击只还原了尺寸、位置留在 (0,0)。自己记原矩形才确定。
+int gui_wd_rl = 0;
+int gui_wd_rt = 0;
+int gui_wd_rw = 0;
+int gui_wd_rh = 0;
+
+// 顶栏按下：**只在顶栏 24px 内**开拖；同位置 400ms 内的第二次按下 ⇒ **双击**（最大化/还原），不进拖动。
+// 返回：1 = 已进入拖动状态 ｜ 2 = 双击（已切换最大化/还原）｜ 0 = 不在拖动区（按钮/滑块/视口上的按下不算拖窗）。
+// ⚠️ `my` = **客户区** y（调用方给 `in->my`）；24 这条线是"面板顶栏"的既定口径（用户拍板）。
+int gui_win_drag_begin(struct DragSt *d, struct GuiWin *g, int my) {
+  struct P pt;
+  struct RECT wr;
+  int now = 0;
+  int dx = 0;
+  int dy = 0;
+  if (my < 0) { return 0; }
+  if (my >= 24) { return 0; }                 // 不在顶栏 ⇒ 不是"拖窗口"
+  GetCursorPos(&pt);
+  now = GetTickCount();
+  dx = pt.x - gui_wd_x; if (dx < 0) { dx = 0 - dx; }
+  dy = pt.y - gui_wd_y; if (dy < 0) { dy = 0 - dy; }
+  if (now - gui_wd_ms <= 400) {               // 400ms = Windows 双击时限的常用值（我们自己计时，不靠 WM_LBUTTONDBLCLK：
+    if (dx <= 4) {                            //   本库的窗口类 style = 0，**没有 CS_DBLCLKS** ⇒ 系统压根不发那条消息）
+      if (dy <= 4) {
+        // ⚠️⚠️ **双击分支第一件事：把"在跑的拖动令牌"收掉**（`ui_drag_end` = 清 `on` + `ReleaseCapture`）。
+        //   为什么必须有这一步（2026-09-28 独立复核抓到的 flaky，真缺陷，不是探针问题）：
+        //     `gui_win_input` 的按下/抬起是**每帧采一次**（`GetAsyncKeyState`），而最大化之后每帧要处理
+        //     2M 像素的 alpha ＋ 推 8MB ULW ⇒ 帧周期可以长到几百 ms；于是"按下—抬起"有可能**整个落在一个帧里**，
+        //     抬起沿被漏采 ⇒ 上一次拖动的令牌与**在最大化窗口上记的锚点 (0,0)** 活了下来。
+        //     双击还原之后（窗口回到原矩形），残留的 `gui_win_drag_frame` 仍按旧锚点调 `MoveWindow`
+        //     ⇒ 窗口被拖回 (0,0)：**尺寸对、位置错**（实测就是这个形态，3 跑 2 败）。
+        //   ⇒ 双击（无论最大化还是还原）都**不许**再有任何拖动活着。
+        d->on = 0;
+        ui_drag_end(d);
+        if (gui_wd_max == 0) {
+          wr.l = 0; wr.t = 0; wr.r = 0; wr.b = 0;
+          GetWindowRect(g->hwnd, &wr);         // 记下"最大化前"的矩形（还原时按它 MoveWindow）
+          gui_wd_rl = wr.l; gui_wd_rt = wr.t;
+          gui_wd_rw = wr.r - wr.l; gui_wd_rh = wr.b - wr.t;
+          ShowWindow(g->hwnd, 3);              // SW_MAXIMIZE
+          gui_wd_max = 1;
+        } else {
+          ShowWindow(g->hwnd, 9);              // SW_RESTORE（尺寸先交回系统）
+          if (gui_wd_rw > 0) {                 // 位置/尺寸按**自己记的**原矩形定死（见上面那条实测注记）
+            if (gui_wd_rh > 0) {
+              MoveWindow(g->hwnd, gui_wd_rl, gui_wd_rt, gui_wd_rw, gui_wd_rh, 0);
+            }
+          }
+          gui_wd_max = 0;
+        }
+        gui_wd_ms = 0;                       // 双击后**清时刻** ⇒ 连点第三下不会被再判一次双击（否则"三击"会来回切）
+        gui_wd_x = pt.x; gui_wd_y = pt.y;
+        return 2;                             // 双击那一按**不进拖动**（否则会和最大化抢窗口位置）
+      }
+    }
+  }
+  gui_wd_ms = now;
+  gui_wd_x = pt.x; gui_wd_y = pt.y;
+  d->h = g->hwnd;
+  d->w = g->w;                                // 拖动期间尺寸不变（ui_drag_frame 用 w/ht 传 MoveWindow）
+  d->ht = g->h;
+  ui_drag_begin(d);
+  return 1;
+}
+
+// 每帧调一次（拖动中）：跟手移动 ＋ **每帧查物理左键兜底**（一松手立刻收尾 —— 快拖出窗口也不"粘手"）。
+// 返回 1 = 本帧确实在拖（窗口已跟着移），0 = 没在拖（含"刚自愈收尾"那一帧）。
+// ⚠️ **最大化窗口被"真拖"了 ⇒ 先还原到原矩形再跟手**（Windows 的习惯）。为什么不在"按下"那一刻还原：
+//   单击和双击的**第一下**按键是同一条路径，按下就还原会让"双击还原"变成"单击还原 + 双击又最大化"
+//   （实测踩到：探测脚本里第二对点击的结果是"又最大化了"）。⇒ 只有**光标真的动了**才还原。
+int gui_win_drag_frame(struct DragSt *d) {
+  struct P pt;
+  int dx = 0;
+  int dy = 0;
+  if (d->on == 0) { return 0; }
+  if ((GetAsyncKeyState(1) & 0x8000) == 0) { ui_drag_end(d); return 0; }   // 轮询兜底：物理左键已松 ⇒ 立刻收尾
+  if (gui_wd_max == 1) {
+    // ⚠️⚠️ **最大化窗口上"按住不动" ⇒ 本函数什么都不做**（2026-09-28 独立复核抓到的真缺陷，可复现）。
+    //   为什么必须挡住：最大化窗口上按下顶栏会走 `ui_drag_begin`，而它记的锚点 = **最大化矩形的原点 (0,0)**；
+    //   若这一帧照常走 `ui_drag_frame(d)`，`MoveWindow(0+Δx, 0+Δy, 面板宽, 面板高)` 会把窗口**光按住不动**
+    //   就搬到 (0,0) 并缩回面板尺寸（Δ=0 也一样）—— 实测形态：`0,0 420x260`，也就是"尺寸对、位置错"。
+    //   Windows 的习惯：标题条上**单击不动**什么都不该发生；**真拖**才"还原 ＋ 跟手"。
+    pt.x = 0; pt.y = 0;
+    GetCursorPos(&pt);
+    dx = pt.x - d->sx; if (dx < 0) { dx = 0 - dx; }
+    dy = pt.y - d->sy; if (dy < 0) { dy = 0 - dy; }
+    if (dx == 0) { if (dy == 0) { return 0; } }
+    ShowWindow(d->h, 9);                        // SW_RESTORE：光标真动了 ⇒ 还原到原矩形 + 锚点重设到当前光标
+    if (gui_wd_rw > 0) { MoveWindow(d->h, gui_wd_rl, gui_wd_rt, gui_wd_rw, gui_wd_rh, 0); }
+    gui_wd_max = 0;
+    d->sx = pt.x; d->sy = pt.y;
+    d->wx = gui_wd_rl; d->wy = gui_wd_rt;
+  }
+  ui_drag_frame(d);
+  return 1;
+}
+
+// 抬手收尾（调用方在 `in->released == 1` 那一帧调；重复调用安全 —— `ui_drag_end` 只是清标志 + ReleaseCapture）
+int gui_win_drag_end(struct DragSt *d) {
+  ui_drag_end(d);
+  return 0;
+}
+
+// 等一帧（M4d 动画地基①）——**库层唯一的"等一帧"入口**：别在 app 里直接 `Sleep(16)`。
+// 为什么不是 Sleep：本机实测 `Sleep(16)` 实睡 **~28～31ms**（Windows 默认 15.6ms 定时器粒度向上取整）
+//   ⇒ 帧周期 ~41ms（≈24fps）且**输入要等这一帧走完**才被处理（打字延迟的主项）。
+// MsgWaitForMultipleObjects 的语义 = "队列里没有输入时才睡"：有键/鼠标/消息**立刻醒**（打字立刻进框），
+//   空闲时仍按 ms 退让 CPU（不空转 —— 与"每帧只许库级 call / 不空转烧风扇"同一条口径）。
+// ⚠️ 它**只看不取**：这里不消费任何消息，Pump 那边照旧 PeekMessage 取；返回 0 = 收到 WM_QUIT 的那条路不受影响。
+// ⚠️ 空闲帧周期仍受系统定时器粒度限制（≈15.6ms 的整数倍）；要"空闲也稳 60fps"得走 `timeBeginPeriod(1)`
+//   （**系统级副作用，须用户拍板**）或等 DWM 合成节拍 —— 两者都不在本刀范围内，先量后议。
+int gui_win_wait(int ms) {
+  MsgWaitForMultipleObjects(0, 0, 0, ms, 0x1CFF);     // 0x1CFF = QS_ALLINPUT（见顶部 api 段）
+  return 0;
+}
+
+// ===== M4e：帧率限速（**唯一"等完这一帧"入口**，在每帧"上屏之后"调一次）=====
+// 为什么不是 `gui_win_wait(16)`（M4d 及以前的写法）：**固定等待值在粒度面前必翻车** ——
+//   ① 要 16ms ⇒ 被向上取整成 2 格（31.2ms）⇒ 只有 32.6fps；
+//   ② 改成要 1ms 能拿 1 格（15.6ms ≈65fps），但别的进程一旦把粒度抬到 1ms（浏览器/播放器/游戏常见），
+//      同一份 `wait(1)` 立刻变成 **2.38ms/帧（420fps、26% 单核，空转）**（2026-09-27 真窗实测）。
+// ⇒ 正解 = **现场标定粒度 + 按"目标周期 − 本帧已用"算，且等待量永不为 0**（下限 1ms，天生不会空转）。
+//
+// 两种后端（按目标周期选，这就是"更高帧率留好通道"的那条通道）：
+//   ① 目标周期 ≥ 15ms（≤66fps，30/60 档）：上面那套"折成几格"的等待 —— 零新导入、零系统副作用。
+//   ② 目标周期 < 15ms（>66fps，90/144 档）：**DwmFlush 跟屏**（等下一次屏幕合成）—— 系统定时器粒度是 15.6ms，
+//      光靠等待压不到它以下；DwmFlush 不碰系统设置就能到屏幕刷新率（本机 144Hz ⇒ 实测 6.94ms、CPU 2.5% 单核）。
+//      ⚠️ 诚实边界：这一档给的是**屏幕刷新率**，不是任意目标值（144Hz 屏上要 90fps 拿不到 90；要精确 90 得
+//      走 `timeBeginPeriod(1)`，属未做的另一条路，见 lib\FLGUI.md §5.7）。
+// ⚠️ 掉帧不补偿：本帧已经超时就**立刻下一帧**（动画进度按绝对时间算，不靠帧数计 —— 同族纪律）。
+int gui_win_frame_wait(struct GuiCtx *c) {
+  int tgt = gui_frame_ms(c);
+  int now = 0;
+  int ticks = 0;
+  int rem = 0;
+
+  now = GetTickCount();
+  if (gui_win_tick <= 0) {                    // 粒度**只标一次**：现场等一格，量出"一格 = 几毫秒"
+    gui_win_wait(1);
+    gui_win_tick = GetTickCount() - now;
+    if (gui_win_tick <= 0) { gui_win_tick = 16; }   // 兜底：量不到就当 15.6ms 档（老默认值）
+    now = GetTickCount();
+  }
+  if (tgt <= 0) {                             // 0 = 不限速（尽快跑）：不等，只记时刻
+    gui_win_fend = now;
+    return 0;
+  }
+  if (tgt < 15) {                             // 高帧率档：跟屏（本机 144Hz）
+    DwmFlush();
+    gui_win_fend = GetTickCount();
+    return 2;
+  }
+  ticks = (tgt + gui_win_tick / 2) / gui_win_tick;        // 目标周期折成"几格"（四舍五入）
+  if (ticks < 1) { ticks = 1; }
+  // 掉帧就不补偿：上一帧已经晚了**两格以上**（窗口被拖走/系统卡了一下）⇒ 本帧直接下一帧，别把迟到累积成"追赶"
+  //   （动画进度按绝对时间算，不靠帧数计 —— 同族纪律；`gui_win_fend` 这条读取就是它的用途）
+  if (gui_win_fend != 0) {
+    if (now - gui_win_fend > tgt * 2) {
+      gui_win_fend = now;
+      return 3;
+    }
+  }
+  // ⚠️⚠️ 请求值必须是「跨过 (ticks−1) 格再多 1ms」，**不能直接要 `ticks * tick`**：
+  //   `Sleep/MsgWait(n)` 是在"请求时间之后的下一个格边界"醒来 ⇒ 要 16ms 得到 31.2ms、要 33ms 得到 46.8ms
+  //   —— 每一次都多跨一格（2026-09-27 实测：30fps 档想给 2 格，结果平均 45.5ms＝3 格，只有 22fps）。
+  //   实测可靠的三档：wait(1) → 1 格、wait(16) → 2 格、wait(31) → 3 格（请求值 = (k−1)×格 + 1）。
+  //   ⇒ 顺带两条保证：① 请求值永不为 0（**天生不会空转**，粒度变成 1ms 时也只是 wait(1)=1ms）；
+  //     ② 粒度细到 1ms 时同一个式子自动变精确（60fps ⇒ 16 格 ⇒ wait(16) = 16ms）。
+  rem = (ticks - 1) * gui_win_tick + 1;
+  if (rem > 0) { gui_win_wait(rem); }
+  gui_win_fend = GetTickCount();
+  return 1;
+}
+
+// 建表面（尺寸一次性分配到位；**M4m 起 DIB 留"屏幕大小"的余量** —— 见下面那段注释；ULW 每帧只推 cw×ch 区域）
+int gui_win_surf(struct Surf *s, struct GuiWin *g, int radius) {
+  int *scr = 0;
+  int sw = 0;
+  int sh = 0;
+  s->h = g->hwnd;
+  s->bw = g->w;
+  s->bh = g->h;
+  // M4m：**为什么要留余量** —— `surf_flush` 走 ULW 且 `psize = cw×ch`，而 **ULW 会按 psize 重设窗口尺寸**：
+  //   2026-09-28 实测（`tmp\m4m\winmax-probe.fl`）：`ShowWindow(SW_MAXIMIZE)` 后窗口 1920×1080，
+  //   **下一帧 ULW 立刻把它顶回 420×260、只留下位置 (0,0)** ⇒ 表面没有余量，"双击顶栏最大化"根本长不大。
+  //   余量取主屏分辨率（`GetDeviceCaps` 的 8 = HORZRES / 10 = VERTRES，两条都已在导入表 ⇒ **零新导入**）：
+  //   本机 1920×1080 ⇒ ≈ **8.3MB/表面**（DIB 是虚拟内存、按需提交）。`cw/ch` 仍 = 面板尺寸，
+  //   上屏前由 `gui_win_show` 同步成"当前窗口矩形，**夹到 bw/bh**" ⇒ 绝不越写。
+  scr = GetDC(0);
+  if (scr != 0) {
+    sw = GetDeviceCaps(scr, 8);
+    sh = GetDeviceCaps(scr, 10);
+    ReleaseDC(0, scr);
+    if (sw > s->bw) { s->bw = sw; }
+    if (sh > s->bh) { s->bh = sh; }
+  }
+  s->cw = g->w;
+  s->ch = g->h;
+  s->r = radius;
+  s->fill_a = 200;     // 面板逐像素 alpha（与浮窗口径一致）
+  s->ring_a = 70;      // 1px 描边 alpha
+  s->const_a = g->alpha;
+  return surf_init(s);
+}
+
+// 命令 kind → 颜色（COLORREF = 0x00BBGGRR）
+int gui_win_color(struct GuiCtx *c, int kind) {
+  if (kind == 2) { return c->theme_btn; }
+  if (kind == 3) { return c->theme_btn_hot; }
+  if (kind == 4) { return c->theme_btn_down; }
+  if (kind == 8) { return c->theme_border; }
+  if (kind == 9) { return c->theme_box; }
+  if (kind == 10) { return c->theme_border; }     // 分隔线
+  if (kind == 11) { return c->theme_track; }      // 滑块轨道
+  if (kind == 12) { return c->theme_fill; }       // 填充条
+  if (kind == 13) { return c->theme_btn; }        // 进度条底
+  if (kind == 14) { return c->theme_btn; }        // 文本域盒
+  if (kind == 15) { return c->theme_text; }       // M4b：文本光标条（用文字色，跟字一个色阶）
+  return c->theme_panel;
+}
+
+// ===== M4h：逐命令不透明度的**软件混合**（零新导入）=====
+// ⚠️ 为什么不用 GDI：① **最重链的导入预算 96/96 已满**（`objdump -p` 实测；`src\pe.c` 的 MAX_IMPORTS）
+//   ⇒ 多引一个名字（msimg32 的 `AlphaBlend` / gdi32 未文档的 `GdiAlphaBlend`）就会让 `m2_float` 链编译失败；
+//   ② GDI 本来也没有"按 alpha 混合一次填充"的原语（透明模式只有二值掩码）。
+//   ⇒ 走 `Surf.bits`（现成的 32bpp DIB 直写通道，`surf_alpha` 已在用）。
+// ⚠️ 裁剪要自己算：`FillRect` 吃 DC 的裁剪区，**直写像素吃不到** ⇒ 这里维护一份与内核同源的裁剪矩形栈
+//   （内核压栈时给的就是"已与父层求交"的矩形 ⇒ 直接存，不用再求交）。
+int gwb_cln = 0;
+int gwb_clx0[8];
+int gwb_cly0[8];
+int gwb_clx1[8];
+int gwb_cly1[8];
+
+// 把 src 色按 a/255 混进矩形内的像素（COLORREF = 0x00BBGGRR ⇒ 低字节才是 R；直读像素别读反）
+int gui_win_blend(struct Surf *s, int x0, int y0, int x1, int y1, int color, int a) {
+  char *px = s->bits;
+  int x = 0;
+  int y = 0;
+  int i = 0;
+  int db = 0;
+  int dg = 0;
+  int dr = 0;
+  // ⚠️ 2026-09-27（M4k 轮）**修掉一笔从 M4h 就在的真 bug**：这三行原先把"低字节"当成 B，
+  //   而 **COLORREF = 0x00BBGGRR（低字节才是 R）**、**DIB 32bpp = BGRA（低字节是 B）**
+  //   ⇒ 直写路把 R/B **写反**，与 GDI 路（`SetDCBrushColor`+`FillRect` 按 COLORREF 解释）**不同色**。
+  //   为什么一直没暴露：M4h 的判据全用**灰阶色**（0x101010/0x202020），R/B 对调看不出来。
+  //   本轮的取证 = 用一个三通道互不相等的色（琥珀字面量 0x00E0A060）：GDI 路写 `224,160,96`、
+  //   直写路写 `96,160,224`（**首尾互换**）⇒ 判据 `tmp\chanprobe\chan-probe.fl`（4 位）。
+  int sr = color % 256;                 // 低字节 = R
+  int sg = (color / 256) % 256;         // G
+  int sb = (color / 65536) % 256;       // 第三字节 = B
+  int ia = 255 - a;
+  if (x0 < 0) { x0 = 0; }
+  if (y0 < 0) { y0 = 0; }
+  if (x1 > s->cw) { x1 = s->cw; }
+  if (y1 > s->ch) { y1 = s->ch; }
+  y = y0;
+  while (y < y1) {
+    x = x0;
+    while (x < x1) {
+      i = (y * s->bw + x) * 4;
+      db = px[i] % 256; dg = px[i + 1] % 256; dr = px[i + 2] % 256;   // 目标（底）像素
+      px[i]     = (db * ia + sb * a) / 255;                            // B
+      px[i + 1] = (dg * ia + sg * a) / 255;                            // G
+      px[i + 2] = (dr * ia + sr * a) / 255;                            // R
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 画一条"填充类"命令：`a >= 255` 走 GDI（**老路，逐字节不变**）；`a < 255` 走软件混合
+// ⚠️ 老路刻意**留在调用点内联**（不进本函数）：常见路径与改前**逐字节同形**，连一次函数调用都不多花
+int gwb_fill(struct Surf *s, struct GuiCtx *c, int k, int i, int *brush, int a) {
+  int x0 = 0;
+  int y0 = 0;
+  int x1 = 0;
+  int y1 = 0;
+  int j = 0;
+  x0 = gui_cmd_x[i]; y0 = gui_cmd_y[i];
+  x1 = x0 + gui_cmd_w[i]; y1 = y0 + gui_cmd_h[i];
+  if (a <= 0) { return 0; }             // 全透明：不画（也省掉像素循环）
+  if (gwb_cln > 0) {
+    j = gwb_cln - 1;
+    if (x0 < gwb_clx0[j]) { x0 = gwb_clx0[j]; }
+    if (y0 < gwb_cly0[j]) { y0 = gwb_cly0[j]; }
+    if (x1 > gwb_clx1[j]) { x1 = gwb_clx1[j]; }
+    if (y1 > gwb_cly1[j]) { y1 = gwb_cly1[j]; }
+  }
+  if (x0 >= x1) { return 0; }
+  if (y0 >= y1) { return 0; }
+  return gui_win_blend(s, x0, y0, x1, y1, gui_win_color(c, k), a);
+}
+
+// ===== M4i（2026-09-27）：**离屏层** —— 把 kind 20/21 之间那一段真做成"一个层"=====
+// 为什么需要它：M4h 的逐命令软件混合**吃不到文本**（GDI 写的字没法逐命令混）⇒"一整段（含文本）
+//   一起淡出"做不到。办法 = 把这一层**先画进离屏 DIB**（GDI 照常用 ⇒ 文本也画进去了），再整块按
+//   层的 alpha 混回主表面。零新导入（还是 `Surf.bits` 直写通道，与 M4h 同一条）。
+// ⚠️ **有意变更的语义（M4i 定义）**：`20..配对的 21` 之间 = **一个层 ⇒ 整体只合成一次**
+//   （层内多次叠加**不再累积** alpha —— M4h 是逐命令累加：两块 a=128 得 28，层语义得 24）。
+//   层边界靠 `gui_cmd_kind == 20` 与"配对的 21"找（`gwb_layer_end` 按嵌套计数）。
+// ⚠️ **只做一层**（诚实边界）：层内再出现 `kind 20` ⇒ **退回逐命令语义**（内层的文本只吃到外层 alpha）。
+//   真要真层栈（多层离屏）得给每层一个表面 —— 表面对指针敏感、全局存不下，等有真需求再加。
+// `gwb_in_layer`：正在往离屏里画（挡住嵌套）；层表面由**应用持有**（句柄不许进全局 int，见 flint.h 规则）。
+int gwb_in_layer = 0;
+// 当前层的 alpha（= 那条 kind 20 自带的值）。层内命令的"自己那一层 alpha"要**扣掉外层**：
+//   层内命令拿到的 `gui_cmd_a` 是**栈顶解析后的绝对值**（M4h 口径）⇒ 直接照它画会把外层 alpha 用两次
+//   （实测：a=128 的面板在层里先被混合成 24，合成时再混一次 ⇒ 出 20 而不是 24 —— 本刀第一版就这么错的）。
+//   正解 = 层内按 `cmd_a * 255 / layer_a` 还原成"相对本层的 alpha"（255 = 层内不透明 ⇒ 走 GDI 老路）。
+int gwb_layer_a = 255;
+
+// 应用侧建层表面（几何跟随主表面；**建一次、每帧复用** —— 别每帧 CreateDIBSection）
+int gui_win_layer(struct Surf *lay, struct Surf *s) {
+  lay->bw = s->bw; lay->bh = s->bh; lay->cw = s->cw; lay->ch = s->ch;
+  lay->r = 0; lay->fill_a = 0; lay->ring_a = 0; lay->const_a = 255;
+  lay->br_fill = 0; lay->br_ring = 0;
+  return surf_init(lay);
+}
+
+// 层表面就绪检查（几何变了才重建；`bits == 0` = 本次渲染不支持层）
+int gwb_layer_fit(struct Surf *s, struct Surf *lay) {
+  if (lay->bits == 0) { return 0; }
+  if (lay->bw != s->bw || lay->bh != s->bh) {
+    if (gui_win_layer(lay, s) == 0) { return 0; }
+  }
+  lay->cw = s->cw; lay->ch = s->ch;
+  return 1;
+}
+
+// 找与 i 配对的 kind 21（按嵌套计数）；没有配对 ⇒ 返回 -1
+int gwb_layer_end(int i) {
+  int d = 0;
+  int j = i;
+  while (j < gui_cmd_n) {
+    if (gui_cmd_kind[j] == 20) { d = d + 1; }
+    if (gui_cmd_kind[j] == 21) {
+      d = d - 1;
+      if (d == 0) { return j; }
+    }
+    j = j + 1;
+  }
+  return 0 - 1;
+}
+
+// 层的包围盒 = 层内**绘制类命令**（kind < 20）矩形的并集 ∩ 当前裁剪；没有可画的 ⇒ 返回 0
+// 为什么按"绘制类命令的并集"而不是整窗：离屏只处理这一块，代价与层的大小成正比（不是整窗）。
+int gwb_layer_bbox(struct Surf *s, int i0, int i1, int *bx0, int *by0, int *bx1, int *by1) {
+  int i = i0;
+  int x0 = 0; int y0 = 0; int x1 = 0; int y1 = 0; int any = 0;
+  int j = 0;
+  while (i <= i1) {
+    if (gui_cmd_kind[i] < 20) {
+      if (any == 0) {
+        x0 = gui_cmd_x[i]; y0 = gui_cmd_y[i];
+        x1 = gui_cmd_x[i] + gui_cmd_w[i]; y1 = gui_cmd_y[i] + gui_cmd_h[i];
+        any = 1;
+      } else {
+        if (gui_cmd_x[i] < x0) { x0 = gui_cmd_x[i]; }
+        if (gui_cmd_y[i] < y0) { y0 = gui_cmd_y[i]; }
+        if (gui_cmd_x[i] + gui_cmd_w[i] > x1) { x1 = gui_cmd_x[i] + gui_cmd_w[i]; }
+        if (gui_cmd_y[i] + gui_cmd_h[i] > y1) { y1 = gui_cmd_y[i] + gui_cmd_h[i]; }
+      }
+    }
+    i = i + 1;
+  }
+  if (any == 0) { return 0; }
+  if (gwb_cln > 0) {
+    j = gwb_cln - 1;
+    if (x0 < gwb_clx0[j]) { x0 = gwb_clx0[j]; }
+    if (y0 < gwb_cly0[j]) { y0 = gwb_cly0[j]; }
+    if (x1 > gwb_clx1[j]) { x1 = gwb_clx1[j]; }
+    if (y1 > gwb_cly1[j]) { y1 = gwb_cly1[j]; }
+  }
+  if (x0 < 0) { x0 = 0; }
+  if (y0 < 0) { y0 = 0; }
+  if (x1 > s->cw) { x1 = s->cw; }
+  if (y1 > s->ch) { y1 = s->ch; }
+  if (x0 >= x1) { return 0; }
+  if (y0 >= y1) { return 0; }
+  *bx0 = x0; *by0 = y0; *bx1 = x1; *by1 = y1;
+  return 1;
+}
+
+// 主表面 → 层表面（把这一块底子抄过去；**没被层画到的像素抄完还是原样 ⇒ 混回去是恒等变换**）
+int gwb_copy_to_layer(struct Surf *s, struct Surf *lay, int x0, int y0, int x1, int y1) {
+  char *dp = lay->bits;
+  char *sp = s->bits;
+  int x = 0; int y = 0; int i = 0; int j = 0;
+  y = y0;
+  while (y < y1) {
+    x = x0;
+    while (x < x1) {
+      i = (y * s->bw + x) * 4;
+      j = (y * lay->bw + x) * 4;
+      dp[j] = sp[i]; dp[j + 1] = sp[i + 1]; dp[j + 2] = sp[i + 2]; dp[j + 3] = 255;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 层表面 → 主表面（整块按层 alpha 混；**文本像素走的是同一条路 ⇒ 文字跟着淡**）
+int gwb_blend_layer(struct Surf *s, struct Surf *lay, int x0, int y0, int x1, int y1, int a) {
+  char *dp = s->bits;
+  char *lp = lay->bits;
+  int x = 0; int y = 0; int i = 0; int j = 0;
+  int db = 0; int dg = 0; int dr = 0;
+  int sb = 0; int sg = 0; int sr = 0;
+  int ia = 255 - a;
+  y = y0;
+  while (y < y1) {
+    x = x0;
+    while (x < x1) {
+      i = (y * s->bw + x) * 4;
+      j = (y * lay->bw + x) * 4;
+      db = dp[i] % 256; dg = dp[i + 1] % 256; dr = dp[i + 2] % 256;
+      sb = lp[j] % 256; sg = lp[j + 1] % 256; sr = lp[j + 2] % 256;
+      dp[i]     = (db * ia + sb * a) / 255;
+      dp[i + 1] = (dg * ia + sg * a) / 255;
+      dp[i + 2] = (dr * ia + sr * a) / 255;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// ===== M4k（2026-09-27）：**现代档** = 控件圆角 ＋ 控件描边（单点开关 `c->theme_radius`）=====
+// 为什么**全在渲染端、且不动命令流**：① 零新导入是硬约束（最重链 96/96 已满 ⇒ GDI 的 `RoundRect` 进不来），
+//   而直写 `Surf.bits` 这条路 M4h/M4i 已经走通；② 控件层若"补发描边命令"，**11 条 dump 基线的命令条数与下标全变**
+//   （等于把一个观感改动变成一次全量重录）。⇒ 做法 = **渲染端按 kind 决定画法**：
+//   盒类命令（面板/按钮/勾选框/进度底/文本域盒）在 `theme_radius > 0` 时走"圆角填充 ＋（按钮/文本域盒）1px 描边"。
+//   **`theme_radius == 0`（深色默认）⇒ 下面这些函数一次都不进**，与改前逐像素同形（"不退化"的结构性保证）。
+// 快路径：中间几条带仍走 GDI（不透明）或整块混合，只有 **4 个 r×r 角块**与**描边圈**逐像素。
+int gwb_box_kind(int k) {
+  if (k == 1) { return 1; }      // 面板 / 弹层
+  if (k == 2) { return 1; }      // 按钮常态
+  if (k == 3) { return 1; }      // 悬停
+  if (k == 4) { return 1; }      // 按下
+  if (k == 9) { return 1; }      // 勾选框块
+  if (k == 13) { return 1; }     // 进度条底
+  if (k == 14) { return 1; }     // 文本域盒
+  if (k == 12) { return 1; }     // M4n：填充条（进度条填充 / 滑块已选段 / 滚动条滑块）⇒ **圆角端点**
+  //   > 为什么连滑块/滚动条的条一起圆：它们同族（都用 `theme_fill`），而"填充条在圆角底上戳出直角"
+  //   >   正是进度条那条观感缺陷本身；`theme_radius = 0`（经典档）⇒ 不进 gwb_round_box、逐像素同 M4m。
+  return 0;
+}
+
+// 还要描一圈 1px 的盒（按钮三态 ＋ 文本域盒）：蓝白主题下 `theme_btn` 与 `theme_panel` 同为白，
+//   **全靠这条描边才看得见按钮**（见 lib\FLGUI.md §5 第 5 条与 §1.9）。
+int gwb_box_edge(int k) {
+  if (k == 2 || k == 3 || k == 4 || k == 14) { return 1; }
+  return 0;
+}
+
+// 圆角矩形内判定（rect = [x0,x1)×[y0,y1)，半径 r）—— **圆心约定照抄 `surf_inside`**（窗口圆角那套），
+//   免得同一份代码里出现两套"圆角长什么样"。
+int gwb_rr_inside(int x0, int y0, int x1, int y1, int r, int x, int y) {
+  int dx = 0;
+  int dy = 0;
+  int rr = r * r;
+  if (x < x0 || y < y0 || x >= x1 || y >= y1) { return 0; }
+  if (r <= 0) { return 1; }
+  if (x < x0 + r) {
+    if (y < y0 + r) { dx = x0 + r - x; dy = y0 + r - y; if (dx * dx + dy * dy > rr) { return 0; } }
+    if (y > y1 - 1 - r) { dx = x0 + r - x; dy = y - (y1 - 1 - r); if (dx * dx + dy * dy > rr) { return 0; } }
+  }
+  if (x > x1 - 1 - r) {
+    if (y < y0 + r) { dx = x - (x1 - 1 - r); dy = y0 + r - y; if (dx * dx + dy * dy > rr) { return 0; } }
+    if (y > y1 - 1 - r) { dx = x - (x1 - 1 - r); dy = y - (y1 - 1 - r); if (dx * dx + dy * dy > rr) { return 0; } }
+  }
+  return 1;
+}
+
+// 矩形 ∩ 最近一层裁剪（就地改；与 gwb_fill 内联那段同一套口径）
+int gwb_clip_span(int *x0, int *y0, int *x1, int *y1) {
+  int j = 0;
+  if (gwb_cln > 0) {
+    j = gwb_cln - 1;
+    if (*x0 < gwb_clx0[j]) { *x0 = gwb_clx0[j]; }
+    if (*y0 < gwb_cly0[j]) { *y0 = gwb_cly0[j]; }
+    if (*x1 > gwb_clx1[j]) { *x1 = gwb_clx1[j]; }
+    if (*y1 > gwb_cly1[j]) { *y1 = gwb_cly1[j]; }
+  }
+  return 0;
+}
+
+// 单像素写：a >= 255 直写（不透明）/ a < 255 混合；**裁剪自己算**（直写像素吃不到 DC 裁剪区）
+int gwb_put(struct Surf *s, int x, int y, int color, int a) {
+  char *px = s->bits;
+  int i = 0;
+  int db = 0; int dg = 0; int dr = 0;
+  // 通道取法与 GDI 路同序：**COLORREF 低字节 = R，DIB 低字节 = B**（M4k 轮修掉的那笔 R/B 互换 bug）
+  int sr = color % 256;                 // 低字节 = R
+  int sg = (color / 256) % 256;         // G
+  int sb = (color / 65536) % 256;       // 第三字节 = B
+  int ia = 255 - a;
+  if (a <= 0) { return 0; }
+  if (x < 0 || y < 0 || x >= s->cw || y >= s->ch) { return 0; }
+  if (gwb_cln > 0) {
+    i = gwb_cln - 1;
+    if (x < gwb_clx0[i] || y < gwb_cly0[i]) { return 0; }
+    if (x >= gwb_clx1[i] || y >= gwb_cly1[i]) { return 0; }
+  }
+  i = (y * s->bw + x) * 4;
+  if (a >= 255) { px[i] = sb; px[i + 1] = sg; px[i + 2] = sr; return 0; }
+  db = px[i] % 256; dg = px[i + 1] % 256; dr = px[i + 2] % 256;
+  px[i]     = (db * ia + sb * a) / 255;
+  px[i + 1] = (dg * ia + sg * a) / 255;
+  px[i + 2] = (dr * ia + sr * a) / 255;
+  return 0;
+}
+
+// 一条矩形：a >= 255 走 GDI（快路径）/ a < 255 走软件混合。调用前矩形应已与裁剪求交。
+int gwb_rect_fill(struct Surf *s, int x0, int y0, int x1, int y1, int color, int a, int *brush) {
+  struct RECT rc;
+  if (x0 >= x1 || y0 >= y1) { return 0; }
+  if (a >= 255) {
+    SetDCBrushColor(s->dc, color);
+    rc.l = x0; rc.t = y0; rc.r = x1; rc.b = y1;
+    FillRect(s->dc, &rc, brush);
+    return 0;
+  }
+  return gui_win_blend(s, x0, y0, x1, y1, color, a);
+}
+
+// ===== M4l（2026-09-28）：**盒类投影（层次）**（单点开关 `c->theme_shadow`，**0 = 关**）=====
+// 为什么这么画：① 零新导入是硬约束（GDI 没有投影，AlphaBlend/RoundRect 又进不了 96/96 的预算）⇒ 走 `gwb_put` 逐像素；
+//   ② 形状 = **按 Chebyshev 距离分层的环** —— 第 d 层 = "外扩 d 的圆角形" 减 "外扩 d-1 的圆角形"（d = 1..blur），
+//      **环与环不重叠** ⇒ 同一点不会被混合两次（M4k 圆角那条纪律）；③ 整块**向下偏 `sh_dy`**（光从上方来）；
+//   ④ α 随距离线性递减：`alpha(d) = theme_shadow * (blur + 1 - d) / blur`（d=1 最强 = theme_shadow）。
+// 作用范围：**只给 kind 1（面板 / 弹层）** —— 按钮/勾选框逐个投影会让每帧多出几万次逐像素写（gallery 40 个按钮实测），
+//   而"层次"的观感主要来自卡片/菜单浮起。`theme_shadow == 0` ⇒ 本函数一次都不进（与 M4k 及以前逐像素同形）。
+// 裁剪：`gwb_put` 自己算（直写像素吃不到 DC 裁剪区）；alpha 也与命令 alpha `a` 相乘（层内淡出时投影一起淡）。
+// 第 d 层环的逐点判定（角块用）：外形（外扩 d）内 ∩ 内边界（外扩 d−1）外
+int gwb_shadow_ring(int x0, int y0, int x1, int y1, int r, int d, int dy, int x, int y) {
+  if (gwb_rr_inside(x0 - d, y0 - d + dy, x1 + d, y1 + d + dy, r + d, x, y) == 0) { return 0; }
+  if (gwb_rr_inside(x0 - d + 1, y0 - d + 1 + dy, x1 + d - 1, y1 + d - 1 + dy, r + d - 1, x, y) == 1) { return 0; }
+  return 1;
+}
+
+int gwb_shadow_box(struct Surf *s, struct GuiCtx *c, int i, int a) {
+  int x0 = gui_cmd_x[i];
+  int y0 = gui_cmd_y[i];
+  int x1 = x0 + gui_cmd_w[i];
+  int y1 = y0 + gui_cmd_h[i];
+  int str = c->theme_shadow;
+  int r = c->theme_radius;
+  int blur = 4;
+  int dy = 2;
+  int d = 0;
+  int rr = 0;
+  int al = 0;
+  int ax = 0;
+  int ay = 0;
+  int qx = 0;
+  int qy = 0;
+  if (str <= 0 || a <= 0) { return 0; }
+  if (x1 <= x0 || y1 <= y0) { return 0; }
+  if (r < 0) { r = 0; }
+  if (r > (x1 - x0) / 2) { r = (x1 - x0) / 2; }
+  if (r > (y1 - y0) / 2) { r = (y1 - y0) / 2; }
+  if (r > 8) { r = 8; }                        // 与 gwb_round_box 同口径（角块逐像素，别无界）
+  d = blur;
+  while (d > 0) {
+    // 第 d 层的外形 / 内边界（内边界 = 第 d-1 层的外形；d = 1 时就是盒子本身）
+    al = str * (blur + 1 - d) / blur * a / 255;
+    if (al > 0) {
+      rr = r + d;
+      // ① 上下两条横带（都避开角块）
+      ax = x0 - d + rr;
+      while (ax < x1 + d - rr) {
+        if (gwb_rr_inside(x0 - d, y0 - d + dy, x1 + d, y1 + d + dy, rr, ax, y0 - d + dy) == 1) {
+          if (gwb_rr_inside(x0 - d + 1, y0 - d + 1 + dy, x1 + d - 1, y1 + d - 1 + dy, rr - 1, ax, y0 - d + dy) == 0) {
+            gwb_put(s, ax, y0 - d + dy, 0, al);
+          }
+        }
+        if (gwb_rr_inside(x0 - d, y0 - d + dy, x1 + d, y1 + d + dy, rr, ax, y1 + d + dy - 1) == 1) {
+          if (gwb_rr_inside(x0 - d + 1, y0 - d + 1 + dy, x1 + d - 1, y1 + d - 1 + dy, rr - 1, ax, y1 + d + dy - 1) == 0) {
+            gwb_put(s, ax, y1 + d + dy - 1, 0, al);
+          }
+        }
+        ax = ax + 1;
+      }
+      // ② 左右两条竖带（同样避开角块）
+      ay = y0 - d + dy + rr;
+      while (ay < y1 + d + dy - rr) {
+        if (gwb_rr_inside(x0 - d, y0 - d + dy, x1 + d, y1 + d + dy, rr, x0 - d, ay) == 1) {
+          if (gwb_rr_inside(x0 - d + 1, y0 - d + 1 + dy, x1 + d - 1, y1 + d - 1 + dy, rr - 1, x0 - d, ay) == 0) {
+            gwb_put(s, x0 - d, ay, 0, al);
+          }
+        }
+        if (gwb_rr_inside(x0 - d, y0 - d + dy, x1 + d, y1 + d + dy, rr, x1 + d - 1, ay) == 1) {
+          if (gwb_rr_inside(x0 - d + 1, y0 - d + 1 + dy, x1 + d - 1, y1 + d - 1 + dy, rr - 1, x1 + d - 1, ay) == 0) {
+            gwb_put(s, x1 + d - 1, ay, 0, al);
+          }
+        }
+        ay = ay + 1;
+      }
+      // ③ 4 个角块（逐像素；环判定 = 外形内 ∩ 内边界外）
+      qy = 0;
+      while (qy < rr) {
+        qx = 0;
+        while (qx < rr) {
+          if (gwb_shadow_ring(x0, y0, x1, y1, r, d, dy, x0 - d + qx, y0 - d + dy + qy) == 1) {
+            gwb_put(s, x0 - d + qx, y0 - d + dy + qy, 0, al);
+          }
+          if (gwb_shadow_ring(x0, y0, x1, y1, r, d, dy, x1 + d - 1 - qx, y0 - d + dy + qy) == 1) {
+            gwb_put(s, x1 + d - 1 - qx, y0 - d + dy + qy, 0, al);
+          }
+          if (gwb_shadow_ring(x0, y0, x1, y1, r, d, dy, x0 - d + qx, y1 + d + dy - 1 - qy) == 1) {
+            gwb_put(s, x0 - d + qx, y1 + d + dy - 1 - qy, 0, al);
+          }
+          if (gwb_shadow_ring(x0, y0, x1, y1, r, d, dy, x1 + d - 1 - qx, y1 + d + dy - 1 - qy) == 1) {
+            gwb_put(s, x1 + d - 1 - qx, y1 + d + dy - 1 - qy, 0, al);
+          }
+          qx = qx + 1;
+        }
+        qy = qy + 1;
+      }
+    }
+    d = d - 1;
+  }
+  return 0;
+}
+
+// ===== M4n（2026-09-28，UI 美术第 2 批）：勾 / 圆拇指 / 圆角端点 / 圆点 / 焦点圈 =====
+// 做法与 M4k（圆角）/ M4l（影环）**同一条老路**：全在渲染端逐像素写 `Surf.bits`（`gwb_put`）
+//   ⇒ **命令流一个字节不动**、13 条 dump 基线一字未改（机械证据 = `tmp\artprobe\run-art-classic.ps1`：
+//   同一份源码分别用 M4m 的库与本刀的库编译，整块表面逐像素比）。
+// 四个开关（全部"0 = 关 = 老行为"，字段注释见 `flgui.fl`）：
+//   ① `theme_check`  —— 勾选框（kind 9）里画 ✓（两段 2px 线；色 = `theme_panel`）
+//   ② `theme_radius` —— 滑块拇指（圆，直径 = 轨道高）＋ 填充条（kind 12）圆角端点
+//   ③ `theme_focus`  —— 光标条（kind 15）所在那个 kind 14 盒的**外沿 1px 圈**
+//   ④ 形状通道（`gui_cmd_col == GUI_SHAPE_CIRCLE`）—— kind 8 = 1px 圆环 / kind 9 = 实心圆盘（`gui_radio` 用）
+// 四条几何纪律（同族的坑都在这儿）：**一律从命令矩形现算**（不写死坐标）；小盒子**夹取不崩**（照 M4k
+//   "3×3、r 夹到 1"那一格）；圆用 **2 倍整数坐标**（没有半像素偏移 ⇒ 上下左右对称）；
+//   线与圆的"盖章"一律**钳在盒内**，不许画到控件外沿以外。
+
+// 圆盘内判定：内切于 [x0,x1)×[y0,y1)。圆心/半径走 2 倍坐标（像素中心的 2 倍 = 2x+1）⇒ 严格对称。
+//   ⚠️ 圆心 = `x0 + x1`（**不是** `x0 + x1 - 1`）：像素 x 覆盖 [x,x+1)、中心 = x+0.5 ⇒ 覆盖区的几何中心
+//   在 2 倍坐标下就是 x0+x1。少 1 会让整个圆偏左上半个像素（12px 的圆上看着就是"歪一点"）。
+//   这条与 `gwb_rr_inside`（圆角矩形那套）**刻意不同**：那里判的是"到角心的距离"，这是"到中心的距离"。
+int gwb_disc_inside(int x0, int y0, int x1, int y1, int x, int y) {
+  int d = 0;
+  int cx2 = 0;
+  int cy2 = 0;
+  int r2 = 0;
+  int dx2 = 0;
+  int dy2 = 0;
+  if (x < x0 || y < y0 || x >= x1 || y >= y1) { return 0; }
+  d = x1 - x0;
+  if (y1 - y0 < d) { d = y1 - y0; }
+  if (d <= 0) { return 0; }
+  cx2 = x0 + x1;
+  cy2 = y0 + y1;
+  r2 = d;                                  // 2 倍半径 = 直径
+  dx2 = 2 * x + 1 - cx2;
+  dy2 = 2 * y + 1 - cy2;
+  if (dx2 * dx2 + dy2 * dy2 > r2 * r2) { return 0; }
+  return 1;
+}
+
+// 实心圆盘
+int gwb_disc(struct Surf *s, int x0, int y0, int x1, int y1, int col, int a) {
+  int x = 0;
+  int y = 0;
+  if (a <= 0) { return 0; }
+  if (x1 <= x0 || y1 <= y0) { return 0; }
+  y = y0;
+  while (y < y1) {
+    x = x0;
+    while (x < x1) {
+      if (gwb_disc_inside(x0, y0, x1, y1, x, y) == 1) { gwb_put(s, x, y, col, a); }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 1px 圆环（= 外形内 ∩ 内缩一像素的形状外；与 gwb_round_box 的描边同一套"环"口径）
+int gwb_ring(struct Surf *s, int x0, int y0, int x1, int y1, int col, int a) {
+  int x = 0;
+  int y = 0;
+  if (a <= 0) { return 0; }
+  if (x1 <= x0 || y1 <= y0) { return 0; }
+  y = y0;
+  while (y < y1) {
+    x = x0;
+    while (x < x1) {
+      if (gwb_disc_inside(x0, y0, x1, y1, x, y) == 1) {
+        if (gwb_disc_inside(x0 + 1, y0 + 1, x1 - 1, y1 - 1, x, y) == 0) { gwb_put(s, x, y, col, a); }
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 盒内单像素（钳在 [lx0,lx1)×[ly0,ly1) 内 —— 线与圆的"盖章"不许出控件）
+int gwb_dot_in(struct Surf *s, int x, int y, int col, int a, int lx0, int ly0, int lx1, int ly1) {
+  if (x < lx0 || y < ly0 || x >= lx1 || y >= ly1) { return 0; }
+  return gwb_put(s, x, y, col, a);
+}
+
+// 2px 粗线（整数 DDA ＋ 每步盖一个 2×2 方章），钳在 [lx0,lx1)×[ly0,ly1) 内
+int gwb_line2(struct Surf *s, int ax, int ay, int bx, int by, int col, int a, int lx0, int ly0, int lx1, int ly1) {
+  int dx = 0;
+  int dy = 0;
+  int n = 0;
+  int i = 0;
+  int px = 0;
+  int py = 0;
+  dx = bx - ax;
+  if (dx < 0) { dx = 0 - dx; }
+  dy = by - ay;
+  if (dy < 0) { dy = 0 - dy; }
+  n = dx;
+  if (dy > n) { n = dy; }
+  if (n <= 0) {
+    gwb_dot_in(s, ax, ay, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, ax + 1, ay, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, ax, ay + 1, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, ax + 1, ay + 1, col, a, lx0, ly0, lx1, ly1);
+    return 0;
+  }
+  while (i <= n) {
+    px = ax + (bx - ax) * i / n;
+    py = ay + (by - ay) * i / n;
+    gwb_dot_in(s, px, py, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, px + 1, py, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, px, py + 1, col, a, lx0, ly0, lx1, ly1);
+    gwb_dot_in(s, px + 1, py + 1, col, a, lx0, ly0, lx1, ly1);
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 勾（✓）：两段线，三个种子点按**盒子的比例**取 —— 12×12 ⇒ (3,6)/(5,8)/(9,3)（小盒子自动等比缩小，
+//   盖章再钳回盒内）⇒ 四角必然仍是块色（判据就判这个 + 三个种子点是勾色）。
+int gwb_tick(struct Surf *s, struct GuiCtx *c, int i, int a) {
+  int x0 = 0; int y0 = 0; int x1 = 0; int y1 = 0;
+  int col = 0;
+  int al = 0;
+  int ax = 0; int ay = 0; int bx = 0; int by = 0; int cx = 0; int cy = 0;
+  if (c->theme_check <= 0) { return 0; }
+  x0 = gui_cmd_x[i]; y0 = gui_cmd_y[i];
+  x1 = x0 + gui_cmd_w[i]; y1 = y0 + gui_cmd_h[i];
+  if (x1 <= x0 || y1 <= y0) { return 0; }
+  al = c->theme_check * a / 255;                 // 强度（与 theme_shadow 同族：也要跟命令 alpha 相乘）
+  if (al <= 0) { return 0; }
+  col = c->theme_panel;                          // 勾色 = 面板色（深色 #202020 on #60A0E0 ／ 蓝白 #FFFFFF on #2563EB）
+  ax = x0 + (x1 - x0) * 3 / 10;  ay = y0 + (y1 - y0) / 2;
+  bx = x0 + (x1 - x0) * 9 / 20;  by = y0 + (y1 - y0) * 7 / 10;
+  cx = x0 + (x1 - x0) * 4 / 5;   cy = y0 + (y1 - y0) * 3 / 10;
+  gwb_line2(s, ax, ay, bx, by, col, al, x0, y0, x1, y1);
+  gwb_line2(s, bx, by, cx, cy, col, al, x0, y0, x1, y1);
+  return 0;
+}
+
+// M4o：**矩形版**焦点圈 —— 给 `kind 16`（焦点标记命令）用，也给"光标条那条老路"复用。
+//   几何与 M4n 那条**一字不差**：圈画在矩形**外沿**（上下左右各外扩 1px）⇒ "盒外沿 1px = theme_focus、
+//   再外 2px = 底色"这条像素判据对新旧两条路都成立。`col == 0`（深色默认）⇒ 直接不画（"关就是真关"）。
+//   ⚠️ 原来的 `gwb_focus_ring(i)`（往前找 kind 14 盒）**已删**、改成调用点现算盒矩形（函数预算只剩 1 格）。
+int gwb_focus_ring_rect(struct Surf *s, struct GuiCtx *c, int x0, int y0, int x1, int y1, int a) {
+  int col = 0;
+  int x = 0;
+  int y = 0;
+  col = c->theme_focus;
+  if (col == 0) { return 0; }
+  if (a <= 0) { return 0; }
+  x = x0 - 1;
+  y = y0 - 1;
+  while (x <= x1) { gwb_put(s, x, y, col, a); gwb_put(s, x, y1, col, a); x = x + 1; }
+  y = y0;
+  while (y < y1) { gwb_put(s, x0 - 1, y, col, a); gwb_put(s, x1, y, col, a); y = y + 1; }
+  return 0;
+}
+
+// ===== M4n：滑块拇指（圆形，直径 = 轨道高）=====
+// ⚠️ 为什么"预判在轨道命令（kind 11）、**画**在填充之后"：拇指要**盖在填充之上**（它是抓手），
+//   而 kind 11 在 kind 12 之前 —— 在 11 上就画，填充会把左半个圆盖掉。
+// ⚠️ 为什么不能只靠"往前找 kind 12"：**值 = 0 时控件层根本不发 kind 12**（`if (fill > 0)`），
+//   而 0 恰恰是最该看得见拇指的位置 ⇒ 用"下一条命令"分流：
+//     · 下一条是 kind 12 且**高度与轨道相同** ⇒ 横向滑块、值 > 0 ⇒ 值点 = 填充右端
+//     · 下一条是 kind 5（标签）            ⇒ 横向滑块、值 = 0  ⇒ 值点 = 轨道左端
+//     · 其它（含"kind 12 但更矮"= 纵向滚动条滑块）⇒ **不是滑块**，不画
+//   （纵向滚动条的 kind 12 高度 = 滑块高 < 视图高 ⇒ 天然被这一条排掉。）
+// ⚠️ 几何：值点 = **圆心**；**填充在拇指左沿处截断**（`gwb_thumb_x0`）⇒ 两者相接、不重叠：
+//   圆心是填充色（拇指自己画的）、**圆的包围盒四角是轨道色**（判据就判这四处 —— "是圆不是方"）。
+// ⚠️ 夹取：拇指整体钳在轨道矩形内（值 = 0 / = max 两个端点不越出控件）。
+int gwb_thumb_on = 0;
+int gwb_thumb_x0 = 0;
+int gwb_thumb_y0 = 0;
+int gwb_thumb_d = 0;
+
+int gwb_thumb_plan(struct GuiCtx *c, int i, int to) {
+  int cx = 0;
+  int d = 0;
+  int w = 0;
+  int h = 0;
+  int tx0 = 0;
+  gwb_thumb_on = 0;
+  if (c->theme_radius <= 0) { return 0; }         // 经典档不画（= 老行为）
+  w = gui_cmd_w[i];
+  h = gui_cmd_h[i];
+  if (w < 1 || h < 1) { return 0; }
+  if (i + 1 >= to) { return 0; }
+  tx0 = gui_cmd_x[i];
+  if (gui_cmd_kind[i + 1] == 12) {
+    if (gui_cmd_h[i + 1] != h) { return 0; }      // 高度不同 ⇒ 纵向滚动条的滑块，不是滑块控件
+    cx = gui_cmd_x[i + 1] + gui_cmd_w[i + 1];
+  } else {
+    if (gui_cmd_kind[i + 1] != 5) { return 0; }
+    cx = tx0;
+  }
+  d = h;
+  if (d > w) { d = w; }
+  if (d < 1) { return 0; }
+  gwb_thumb_x0 = cx - d / 2;
+  if (gwb_thumb_x0 < tx0) { gwb_thumb_x0 = tx0; }
+  if (gwb_thumb_x0 + d > tx0 + w) { gwb_thumb_x0 = tx0 + w - d; }
+  gwb_thumb_y0 = gui_cmd_y[i] + (h - d) / 2;
+  gwb_thumb_d = d;
+  gwb_thumb_on = 1;
+  return 1;
+}
+
+int gwb_thumb_draw(struct Surf *s, struct GuiCtx *c, int a) {
+  if (gwb_thumb_on == 0) { return 0; }
+  gwb_thumb_on = 0;
+  return gwb_disc(s, gwb_thumb_x0, gwb_thumb_y0, gwb_thumb_x0 + gwb_thumb_d, gwb_thumb_y0 + gwb_thumb_d, c->theme_fill, a);
+}
+
+// 现代档的一个"盒"：圆角填充 ＋（按钮/文本域盒）1px 描边。分解 = **不重叠**的三块带 ＋ 4 个角块
+//   （不重叠很重要：a < 255 时重叠区会被混合两次，值就不对了 —— 本刀第一版就按"两条大带"写、重叠区偏亮）。
+int gwb_round_box(struct Surf *s, struct GuiCtx *c, int k, int i, int a, int *brush) {
+  int x0 = gui_cmd_x[i];
+  int y0 = gui_cmd_y[i];
+  int x1 = x0 + gui_cmd_w[i];
+  int y1 = y0 + gui_cmd_h[i];
+  int r = c->theme_radius;
+  int col = gui_win_color(c, k);
+  int ecol = c->theme_border;
+  int w = x1 - x0;
+  int h = y1 - y0;
+  int qx = 0;
+  int qy = 0;
+  int x = 0;
+  int y = 0;
+  int bx0 = 0; int by0 = 0; int bx1 = 0; int by1 = 0;
+  int ir = 0;
+  if (w <= 0 || h <= 0) { return 0; }
+  if (r > w / 2) { r = w / 2; }
+  if (r > h / 2) { r = h / 2; }
+  if (r > 8) { r = 8; }                       // 上限：角块逐像素 = 4r²，别让它无界
+  if (r <= 0) { return gwb_rect_fill_box(s, x0, y0, x1, y1, col, a, brush); }   // 夹到 0 ⇒ 老画法
+  // ① 中间竖带（满高）
+  bx0 = x0 + r; by0 = y0; bx1 = x1 - r; by1 = y1;
+  gwb_clip_span(&bx0, &by0, &bx1, &by1);
+  gwb_rect_fill(s, bx0, by0, bx1, by1, col, a, brush);
+  // ② 左右两条中带（不重叠：都不碰中间竖带，也不碰角块）
+  bx0 = x0; by0 = y0 + r; bx1 = x0 + r; by1 = y1 - r;
+  gwb_clip_span(&bx0, &by0, &bx1, &by1);
+  gwb_rect_fill(s, bx0, by0, bx1, by1, col, a, brush);
+  bx0 = x1 - r; by0 = y0 + r; bx1 = x1; by1 = y1 - r;
+  gwb_clip_span(&bx0, &by0, &bx1, &by1);
+  gwb_rect_fill(s, bx0, by0, bx1, by1, col, a, brush);
+  // ③ 4 个角块（逐像素，含 alpha）
+  qy = 0;
+  while (qy < r) {
+    qx = 0;
+    while (qx < r) {
+      x = x0 + qx; y = y0 + qy;
+      if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) { gwb_put(s, x, y, col, a); }
+      x = x1 - 1 - qx; y = y0 + qy;
+      if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) { gwb_put(s, x, y, col, a); }
+      x = x0 + qx; y = y1 - 1 - qy;
+      if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) { gwb_put(s, x, y, col, a); }
+      x = x1 - 1 - qx; y = y1 - 1 - qy;
+      if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) { gwb_put(s, x, y, col, a); }
+      qx = qx + 1;
+    }
+    qy = qy + 1;
+  }
+  // ④ 1px 描边（只在"环"上：外形内 ∩ 内缩一像素的形状外）—— 4 条直边 ＋ 4 个角块，**同样不重叠**
+  if (gwb_box_edge(k) == 1) {
+    ir = r - 1;
+    if (ir < 0) { ir = 0; }
+    x = x0 + r;
+    while (x < x1 - r) {
+      gwb_put(s, x, y0, ecol, a);
+      gwb_put(s, x, y1 - 1, ecol, a);
+      x = x + 1;
+    }
+    y = y0 + r;
+    while (y < y1 - r) {
+      gwb_put(s, x0, y, ecol, a);
+      gwb_put(s, x1 - 1, y, ecol, a);
+      y = y + 1;
+    }
+    qy = 0;
+    while (qy < r) {
+      qx = 0;
+      while (qx < r) {
+        x = x0 + qx; y = y0 + qy;
+        if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) {
+          if (gwb_rr_inside(x0 + 1, y0 + 1, x1 - 1, y1 - 1, ir, x, y) == 0) { gwb_put(s, x, y, ecol, a); }
+        }
+        x = x1 - 1 - qx; y = y0 + qy;
+        if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) {
+          if (gwb_rr_inside(x0 + 1, y0 + 1, x1 - 1, y1 - 1, ir, x, y) == 0) { gwb_put(s, x, y, ecol, a); }
+        }
+        x = x0 + qx; y = y1 - 1 - qy;
+        if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) {
+          if (gwb_rr_inside(x0 + 1, y0 + 1, x1 - 1, y1 - 1, ir, x, y) == 0) { gwb_put(s, x, y, ecol, a); }
+        }
+        x = x1 - 1 - qx; y = y1 - 1 - qy;
+        if (gwb_rr_inside(x0, y0, x1, y1, r, x, y) == 1) {
+          if (gwb_rr_inside(x0 + 1, y0 + 1, x1 - 1, y1 - 1, ir, x, y) == 0) { gwb_put(s, x, y, ecol, a); }
+        }
+        qx = qx + 1;
+      }
+      qy = qy + 1;
+    }
+  }
+  return 0;
+}
+
+// 圆角夹到 0 时的退路（= 老画法：整块一条）
+int gwb_rect_fill_box(struct Surf *s, int x0, int y0, int x1, int y1, int col, int a, int *brush) {
+  gwb_clip_span(&x0, &y0, &x1, &y1);
+  return gwb_rect_fill(s, x0, y0, x1, y1, col, a, brush);
+}
+
+// 遍历命令表画到表面内存 DC（M1：矩形填充 / 文本 / 裁剪压栈出栈；M4h：逐命令不透明度；M4i：离屏层）
+// M4：字体句柄由调用方持有（见 gui_win_font_init 的注释：**全局存不下指针**）—— 传 0 就退成 DC 的 stock 字体。
+// `from/to` 让本函数能被"层"递归调用（只画命令表的一段）；`lay` 见上方 M4i 说明。
+// M4q：字体档**进入本段渲染时**的档（= 离屏层递归要用它继承外层的档；顶层调用恒传 1 = 基准）。
+//   ⚠️ 档号越界在渲染端一律当基准（内核 `gui_font_push` 已经记过账，渲染端不重复报）。
+int gwb_render_range(struct Surf *s, struct GuiCtx *c, int *hf, int tier_in, int from, int to, struct Surf *lay) {
+  int i = 0;
+  int k = 0;
+  int a = 0;
+  int *brush = 0;
+  struct RECT rc;
+  int lx0 = 0; int ly0 = 0; int lx1 = 0; int ly1 = 0;
+  int j = 0; int q = 0; int cl_save = 0;
+  int wtmp = 0; int shp = 0; int shp_circ = 0;
+  int fcur = 1;                        // M4q：当前档
+  int fdir = 0;                        // M4q：1 = 需要把当前档的字体重新选进 DC
+  int *want = 0;                       // M4q：当前档实际要用的句柄
+  int shpmark = gui_shape_circle();   // 形状通道取值 = 函数（别改成全局常量：见 flgui.fl 的编译器坑注记）
+  if (from == 0) { gwb_cln = 0; }      // 自己的裁剪栈每帧清空（与内核裁剪栈同生命周期）
+  fcur = tier_in;
+  if (fcur < 0 || fcur > 2) { fcur = 1; }
+  ui_font_use(s->dc, hf);
+  SetBkMode(s->dc, 1);                 // TRANSPARENT：文字不糊底
+  brush = GetStockObject(18);          // DC_BRUSH（颜色靠 SetDCBrushColor 换 → 零对象创建）
+  i = from;
+  while (i < to) {
+    k = gui_cmd_kind[i];
+    a = gui_cmd_a[i];                  // M4h：生效不透明度（内核压栈那一刻解析进每条命令）
+    if (gwb_in_layer == 1) {
+      // 层内：把绝对 alpha 还原成"相对本层"的 alpha（见 gwb_layer_a 的注释）
+      if (gwb_layer_a > 0) { a = gui_cmd_a[i] * 255 / gwb_layer_a; } else { a = 255; }
+      if (a > 255) { a = 255; }
+    }
+    if (k == 6) {
+      SaveDC(s->dc);
+      IntersectClipRect(s->dc, gui_cmd_x[i], gui_cmd_y[i], gui_cmd_x[i] + gui_cmd_w[i], gui_cmd_y[i] + gui_cmd_h[i]);
+      if (gwb_cln < 8) {
+        gwb_clx0[gwb_cln] = gui_cmd_x[i];
+        gwb_cly0[gwb_cln] = gui_cmd_y[i];
+        gwb_clx1[gwb_cln] = gui_cmd_x[i] + gui_cmd_w[i];
+        gwb_cly1[gwb_cln] = gui_cmd_y[i] + gui_cmd_h[i];
+        gwb_cln = gwb_cln + 1;
+      }
+    } else {
+      if (k == 7) {
+        RestoreDC(s->dc, -1);
+        if (gwb_cln > 0) { gwb_cln = gwb_cln - 1; }
+        fdir = 1;                        // M4q：**RestoreDC 会把 DC 的字体一起回滚**（SaveDC 那一刻的）
+        //   ⇒ 出栈之后必须按"当前档"重选一次，否则"压了档 ⇒ 开裁剪 ⇒ 出裁剪"这段里的文字会退回旧字体。
+        //   ⚠️ 这是本刀唯一一处"渲染端要维护状态"的地方：判据见 `tmp\m4q\tier-pixel-probe.fl` 的
+        //     "档 + 裁剪 + 出裁剪"场景（不重选的话，出裁剪后的文字比期望的小一号）。
+      } else {
+        if (k == 5) {
+          // M4n：滑块 **值 = 0** 时控件层不发 kind 12（见 gwb_thumb_plan 的注释）⇒ 拇指在这里补画，
+          //   而且必须在文字**之前**画（标签是叠在轨道上的，画晚了会被字压住一半）。
+          if (gwb_thumb_on == 1) { gwb_thumb_draw(s, c, a); }
+          // M4q：**按当前档选字体**（`kind 22/23` 已经把它维护好了）。只在"标记为脏"时才真选一次
+          //   ⇒ 不切档的路径**一次多余的 SelectObject 都不多花**（老 app 的 GDI 调用序列与今天同形）。
+          if (fdir == 1) {
+            want = hf;
+            if (fcur == 0) { if (s->ft0 != 0) { want = s->ft0; } }
+            if (fcur == 2) { if (s->ft2 != 0) { want = s->ft2; } }
+            ui_font_use(s->dc, want);
+            fdir = 0;
+          }
+          // M3：命令自带显式颜色时用它（浮窗逐段配色），否则用主题色（控件默认口径）
+          // ⚠️ M4h 语义边界：**文本不吃 alpha**（GDI 写的字没法逐命令混合）—— 见 lib\FLGUI.md §1.4
+          if (gui_cmd_col[i] != 0) { SetTextColor(s->dc, gui_cmd_col[i]); }
+          else { SetTextColor(s->dc, c->theme_text); }
+          TextOutA(s->dc, gui_cmd_x[i], gui_cmd_y[i], gui_text_at(gui_cmd_toff[i]), gui_cmd_tlen[i]);
+        } else {
+          if (k >= 20) {
+            // 状态命令：20 = 层的开始 / 21 = 层的结束（M4h 起进命令流，M4i 起**渲染端真的用它**）。
+            // M4i：若本次渲染**支持离屏层**（`lay->bits != 0`）且层不透明度 < 255 ⇒ 把 `20..配对的 21`
+            //   整段先画进离屏 DIB（GDI 照常用 ⇒ 文本也在里面），再整块按层 alpha 混回本表面。
+            //   `a >= 255`（不透明层）**刻意不走离屏**：与改前同路、连一次拷贝都不多花（"不退化"的结构性保证）。
+            if (k == 20 && gwb_in_layer == 0 && lay->bits != 0 && a < 255) {
+              j = gwb_layer_end(i);
+              if (j > i) {
+                if (a <= 0) {
+                  i = j;                                     // 全透明层：整段不画（含文本）
+                } else {
+                  if (gwb_layer_fit(s, lay) == 1) {
+                    if (gwb_layer_bbox(s, i + 1, j - 1, &lx0, &ly0, &lx1, &ly1) == 1) {
+                      gwb_copy_to_layer(s, lay, lx0, ly0, lx1, ly1);
+                      SaveDC(lay->dc);
+                      q = 0;                                 // 外层裁剪也要施加到离屏 DC
+                      while (q < gwb_cln) {                  //   （直写像素自己算，GDI 得靠 DC 裁剪）
+                        IntersectClipRect(lay->dc, gwb_clx0[q], gwb_cly0[q],
+                                          gwb_clx1[q], gwb_cly1[q]);
+                        q = q + 1;
+                      }
+                      IntersectClipRect(lay->dc, lx0, ly0, lx1, ly1);
+                      // M4q：三档字体句柄**跟表面走**（层表面是应用持有的另一块 Surf，`surf_init` 已清 0）
+                      //   ⇒ 进层前从主表面抄过来，层内的 `kind 22/23` 才换得动字体。
+                      lay->ft0 = s->ft0; lay->ft1 = s->ft1; lay->ft2 = s->ft2;
+                      ui_font_use(lay->dc, hf);
+                      SetBkMode(lay->dc, 1);
+                      cl_save = gwb_cln;
+                      gwb_in_layer = 1;                      // 挡住嵌套（只做一层）
+                      gwb_layer_a = a;                       // 层内按"相对本层 alpha"画（见其注释）
+                      // M4q：层那一段是**递归**画的 ⇒ 把"进层时的档"传进去（继承外层当时的状态）。
+                      //   ⚠️ 诚实边界：递归**不回传**出层时的档 ⇒ "层内 pop 掉层外压的档"这种**跨层不闭合**
+                      //     写法，层外后续文字仍按进层前的档画（正常写法 = 压/弹成对，压在外、层内不动）。
+                      gwb_render_range(lay, c, hf, fcur, i + 1, j, lay);
+                      gwb_layer_a = 255;
+                      gwb_in_layer = 0;
+                      gwb_cln = cl_save;
+                      RestoreDC(lay->dc, 0 - 1);
+                      gwb_blend_layer(s, lay, lx0, ly0, lx1, ly1, a);
+                      i = j;                                 // 20..21 整段已消费（循环尾 +1 ⇒ 落到 j+1）
+                    }
+                  }
+                }
+              }
+            }
+            // 其余（21 / 不支持层时的 20 / 层内再出现的 20）：渲染端无状态 ⇒ 不画任何东西。
+            // M4q：**字体档的状态命令**（22 = 压 / 23 = 弹）。载荷 = `gui_cmd_w` = **该命令之后生效的档号**
+            //   （绝对值 ⇒ 渲染端不需要维护档栈；配对与嵌套由内核的池栈负责）。
+            if (k == 22 || k == 23) {
+              fcur = gui_cmd_w[i];
+              if (fcur < 0 || fcur > 2) { fcur = 1; }
+              fdir = 1;                                  // 这一档的字体要在下一条文字命令前选进 DC
+            }
+          } else {
+            // ===== M4n：拇指预判 ＋ 形状通道（全在渲染端；命令表对外一个字节不动）=====
+            // 拇指的"预判"只在轨道命令（11）上做；其余命令（除 12 = 填充 / 5 = 标签）一律清掉待画标志，
+            //   免得一个陈旧的拇指画到后面某条无关的 kind 5 上。
+            if (k != 11) {
+              if (k != 12) {
+                if (k != 5) { gwb_thumb_on = 0; }
+              }
+            }
+            if (k == 11) { gwb_thumb_plan(c, i, to); }
+            wtmp = gui_cmd_w[i];
+            if (k == 12) {
+              if (gwb_thumb_on == 1) {
+                // 填充在**拇指左沿**处截断（临时改这一条的 w，画完立刻还原 —— 命令表内容不变、
+                //   设置与还原之间没有 return ⇒ 不会漏还原）。不截断的话圆的左两角会被填充盖住。
+                if (gui_cmd_x[i] + wtmp > gwb_thumb_x0) { gui_cmd_w[i] = gwb_thumb_x0 - gui_cmd_x[i]; }
+                if (gui_cmd_w[i] < 0) { gui_cmd_w[i] = 0; }
+              }
+            }
+            shp = gui_cmd_col[i];
+            shp_circ = 0;
+            if (shp == shpmark) {
+              if (k == 8) { shp_circ = 1; }        // 圆环（单选钮外圈）
+              if (k == 9) { shp_circ = 2; }        // 实心圆盘（单选钮选中点）
+            }
+            if (k == 15) {
+              // 焦点圈：挂在**光标条**上（= "这个可编辑文本域有焦点"的信号）。
+              //   M4o：原来这一步在 `gwb_focus_ring(i)` 里（往前找盒），现在**内联**到这里 ——
+              //   函数预算只剩 1 格（见 `flgui.fl` 上方那段）。口径一字未改：往前**最多 4 步**找最近的
+              //   `kind 14` 盒，且光标条要落在那个盒的**横向范围内**（离远了就不认，别乱画圈）。
+              j = i - 1;
+              q = 0;
+              while (q < 4) {
+                if (j < 0) { q = 4; }
+                else {
+                  if (gui_cmd_kind[j] == 14) {
+                    if (gui_cmd_x[i] >= gui_cmd_x[j]) {
+                      if (gui_cmd_x[i] < gui_cmd_x[j] + gui_cmd_w[j]) {
+                        gwb_focus_ring_rect(s, c, gui_cmd_x[j], gui_cmd_y[j],
+                                            gui_cmd_x[j] + gui_cmd_w[j], gui_cmd_y[j] + gui_cmd_h[j], a);
+                        q = 4;
+                      }
+                    }
+                  }
+                  if (q < 4) { j = j - 1; q = q + 1; }
+                }
+              }
+            }
+            if (k == 16) {
+              // M4o：**焦点圈标记**（rect = 这条命令自己的矩形 = 焦点控件的整个矩形）。
+              //   只画圈、**不填充**（`kind 16` 不是"盒类命令"，`gui_win_color`/`gwb_box_kind` 都不认它）
+              //   ⇒ 所以它必须**绕过**下面那整段填充/圆角/投影逻辑。
+              gwb_focus_ring_rect(s, c, gui_cmd_x[i], gui_cmd_y[i],
+                                  gui_cmd_x[i] + gui_cmd_w[i], gui_cmd_y[i] + gui_cmd_h[i], a);
+            } else {
+            if (shp_circ > 0) {
+              if (shp_circ == 1) {
+                gwb_ring(s, gui_cmd_x[i], gui_cmd_y[i], gui_cmd_x[i] + gui_cmd_w[i], gui_cmd_y[i] + gui_cmd_h[i], gui_win_color(c, k), a);
+              } else {
+                gwb_disc(s, gui_cmd_x[i], gui_cmd_y[i], gui_cmd_x[i] + gui_cmd_w[i], gui_cmd_y[i] + gui_cmd_h[i], gui_win_color(c, k), a);
+              }
+            } else {
+            if (c->theme_shadow > 0 && k == 1) {
+              // M4l（2026-09-28）**层次/投影**：只给面板/弹层（kind 1）铺一圈递减 α 的影（**先影后盒**；
+              //   `theme_shadow == 0` ⇒ 这里连函数都不进，与 M4k 及以前逐像素同形）
+              gwb_shadow_box(s, c, i, a);
+            }
+            if (c->theme_radius > 0 && gwb_box_kind(k) == 1) {
+              // M4k **现代档**：盒类命令走"圆角 ＋（按钮/文本域盒）1px 描边"（全在渲染端 ⇒ 命令流一个字节没动）
+              gwb_round_box(s, c, k, i, a, brush);
+            } else {
+            if (a >= 255) {
+              // **老路（逐字节不变）**：a = 255 = 不透明 ⇒ 与 M4g 及以前完全同形的 GDI 填充
+              SetDCBrushColor(s->dc, gui_win_color(c, k));
+              rc.l = gui_cmd_x[i];
+              rc.t = gui_cmd_y[i];
+              rc.r = gui_cmd_x[i] + gui_cmd_w[i];
+              rc.b = gui_cmd_y[i] + gui_cmd_h[i];
+              FillRect(s->dc, &rc, brush);
+            } else {
+              gwb_fill(s, c, k, i, brush, a);     // a < 255：软件混合（含"自己算裁剪"）
+            }
+            }
+            }
+            }
+            gui_cmd_w[i] = wtmp;
+            if (k == 12) { gwb_thumb_draw(s, c, a); }
+            if (k == 9) {
+              if (shp_circ == 0) { gwb_tick(s, c, i, a); }   // 勾只画在"勾选框块"上（圆点不带勾）
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 4 参数版（M4i）：`lay` = **应用持有**的离屏层表面（`gui_win_layer` 建一次、每帧复用）——
+//   传它 = 启用离屏层（kind 20/21 之间的段按"层"整体合成一次，文本跟着淡）。
+int gui_win_render_layered(struct Surf *s, struct GuiCtx *c, int *hf, struct Surf *lay) {
+  surf_paint(s, c->theme_bg, c->theme_border);   // 只有主表面要铺底（离屏那块是从主表面抄来的）
+  gwb_in_layer = 0;
+  // M4q：顶层渲染**每帧从基准档（1）起步**（与内核 `gui_begin` 清档栈同口径）
+  return gwb_render_range(s, c, hf, 1, 0, gui_cmd_n, lay);
+}
+
+// 3 参数版（**老 API，行为逐字节不变**）：内部传一个 `bits == 0` 的哑表面 ⇒ **不启用离屏层**，
+//   kind 20/21 与 M4h 完全同义（逐命令混合、文本不吃 alpha）。既有的 3 个 app 与所有老探针都走这条。
+int gui_win_render(struct Surf *s, struct GuiCtx *c, int *hf) {
+  struct Surf dummy;
+  dummy.bits = 0;
+  return gui_win_render_layered(s, c, hf, &dummy);
+}
+
+// 上屏：**先把表面尺寸同步成"窗口当前尺寸"**（夹到 DIB 上限），再按圆角掩码写 alpha（含预乘）→ ULW 推上屏
+// M4m：为什么要这一步 —— 窗口尺寸只有两个来源：ULW 的 `psize`（= `cw×ch`）与**外部**（`ShowWindow` 最大化/还原、
+//   将来的窗口缩放/多窗口）。老路径下二者恒等（老 app 的窗口尺寸从不被外部改）⇒ **同步是恒等变换、像素逐字节不变**；
+//   有了它，"双击顶栏最大化/还原"才真的画得出来（否则 ULW 每帧把窗口顶回面板尺寸 —— 见 gui_win_surf 的实测注记）。
+//   ⚠️ 先清 rect 再 `GetWindowRect`：句柄无效时（如 `hwnd == 0` 的哑表面）读到的必须是 0 而不是脏栈值。
+int gui_win_show(struct Surf *s) {
+  struct RECT wr;
+  int gw = 0;
+  int gh = 0;
+  wr.l = 0; wr.t = 0; wr.r = 0; wr.b = 0;
+  GetWindowRect(s->h, &wr);
+  gw = wr.r - wr.l;
+  gh = wr.b - wr.t;
+  if (gw > 0) {
+    if (gh > 0) {
+      if (gw > s->bw) { gw = s->bw; }        // 夹到 DIB 上限（余量之外不越写）
+      if (gh > s->bh) { gh = s->bh; }
+      s->cw = gw;
+      s->ch = gh;
+    }
+  }
+  surf_alpha(s);
+  surf_flush(s);
+  return 0;
+}

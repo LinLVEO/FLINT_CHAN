@@ -1,0 +1,13 @@
+// b4a3.fl — B4a for 语句（boot 侧差分）：嵌套 for + 负步长（i--）+ for 内 return
+int main() {
+  int s = 0;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 2; j >= 0; j--) { s = s + j; }            // 每轮 +3 → 共 9
+  }
+  if (s != 9) return 1;
+  int t = 0;
+  for (int i = 10; i > 0; i--) { t = t + 1; }              // 负步长 10 次
+  if (t != 10) return 2;
+  for (int i = 0; i < 100; i++) { if (i == 5) return 42; } // for 内 return 直接跳出函数
+  return 3;
+}

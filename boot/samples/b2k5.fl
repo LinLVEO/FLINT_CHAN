@@ -1,0 +1,37 @@
+// b2k5: pointers must keep their full 64-bit address through ++/-- and compound assignment.
+//   Regression sample for task card T-20260918-005227 (the boot emitter treated a pointer-valued
+//   ++/-- result as int and zero-extended it, so mov eax,eax wiped the high 32 bits).
+//   With DllCharacteristics = 0x0160 (DYNAMIC_BASE|HIGH_ENTROPY_VA) the loader relocates the image
+//   to 0x7FF6xxxxxxxx, so a truncated address dereferences garbage or crashes (0xC0000005).
+//   Every check below fails on the old emitter; none of them depends on the pointer step unit.
+int main() {
+  int v = 5;
+  int *p = &v;
+  int *old = p++;
+  if (*old != 5) { return 7; }          // postfix ++: the OLD value must still be a live address
+  if (p == old) { return 8; }           // ... and p must have advanced
+
+  int w = 9;
+  int *q = &w;
+  int *nw = ++q;
+  if (nw != q) { return 9; }            // prefix ++ returns the NEW address (full 64-bit)
+
+  int arr[2];
+  arr[0] = 5;
+  int *r = arr;
+  int *ro = r++;
+  if (*ro != 5) { return 10; }          // array base carried through postfix ++
+
+  char buf[4];
+  char *s = buf;
+  s[1] = 40;
+  s[1] += 2;
+  if (s[1] != 42) { return 11; }        // compound assignment through char* subscript
+
+  int *t = arr;
+  t[1] = 41;
+  t[1] += 1;
+  if (t[1] != 42) { return 12; }        // compound assignment through int* subscript
+
+  return 42;
+}

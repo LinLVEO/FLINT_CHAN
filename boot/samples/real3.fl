@@ -1,0 +1,3 @@
+// real3.fl — B2h 探路：只吃 lib_parse.fl（不含 b1_parse.fl 测试驱动）
+include "../lib_parse.fl"
+int main() { return 42; }

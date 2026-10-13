@@ -1,0 +1,4 @@
+// inc_cycle_a.fl — B2v 负例：a↔b 循环 include 必须仍报「include 循环引用」
+// （去重不能把循环静默吞掉——双端行为要一致）
+include "inc_cycle_b.fl"
+int inc_cycle_a() { return 1; }

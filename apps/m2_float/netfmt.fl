@@ -1,0 +1,79 @@
+// netfmt.fl — NET 行格式探针：打印 fmt_speed / M_SPEED 分支产出的原始字节（十六进制 + 可读）
+// 背景：dump 里 NET 行是「?0K|?0K」，预期「↓0K|↑0K」→ 先看字节，别猜。
+// 输出：E:\FLINT-lab\tmp\row-probe\netfmt.txt
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+api kernel32 int CloseHandle(int);
+include "ui_lib.fl"
+include "float_rows.fl"
+
+char out[4096];
+int gpos = 0;
+
+int putc_(char b) { out[gpos] = b; gpos = gpos + 1; return gpos; }
+
+int puthex(int v) {
+  char *hx = "0123456789ABCDEF";
+  putc_(hx[(v / 16) % 16]);
+  putc_(hx[v % 16]);
+  putc_(32);
+  return gpos;
+}
+
+int puts(char *s) {
+  int i = 0;
+  while (s[i] != 0) { putc_(s[i]); i = i + 1; }
+  return gpos;
+}
+
+int dumpb(char *b, int n, char *label) {
+  int i = 0;
+  puts(label);
+  i = 0;
+  while (i < n) { puthex(b[i]); i = i + 1; }
+  puts("  | ");
+  i = 0;
+  while (i < n) {
+    if (b[i] >= 32 && b[i] < 127) putc_(b[i]);
+    else putc_(46);
+    i = i + 1;
+  }
+  putc_(10);
+  return gpos;
+}
+
+int main() {
+  char b[32];
+  int n = 0;
+  int w = 0;
+
+  // 1) 直接调 fmt_speed（只有数字部分）
+  b[0] = 'X';
+  n = fmt_speed(b, 0);
+  dumpb(b, n, "fmt_speed(0)      = ");
+
+  n = fmt_speed(b, 20);
+  dumpb(b, n, "fmt_speed(20)     = ");
+
+  n = fmt_speed(b, 1500);
+  dumpb(b, n, "fmt_speed(1500)   = ");
+
+  // 2) 复刻 build_rows 里 M_SPEED 的写法（箭头字节 + fmt_speed）
+  b[0] = 0xA1; b[1] = 0xFD; n = 2;
+  n = n + fmt_speed(b + n, 0);
+  dumpb(b, n, "arrow-down + 0    = ");
+
+  b[0] = 0xA1; b[1] = 0xFC; n = 2;
+  n = n + fmt_speed(b + n, 20);
+  dumpb(b, n, "arrow-up + 20     = ");
+
+  // 3) 箭头字节单独看（确认字面量本身没被改写）
+  b[0] = 0xA1; b[1] = 0xFD;
+  dumpb(b, 2, "raw down arrow    = ");
+  b[0] = 0xA1; b[1] = 0xFC;
+  dumpb(b, 2, "raw up arrow      = ");
+
+  int f = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\netfmt.txt", 0x40000000, 0, 0, 2, 0, 0);
+  if (f != 0 - 1) { WriteFile(f, out, gpos, &w, 0); CloseHandle(f); }
+  return 0;
+}

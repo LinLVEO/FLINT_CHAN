@@ -1,0 +1,38 @@
+// b2m1.fl — B2m：结构体指针字段直接下标（boot 与真 flint 差分对照；期望 42）
+// 覆盖：. 读 / -> 读 / -> 写穿透 / -> 复合赋值 / . 复合赋值 / . 自增
+struct S { int *arr; int n; }
+
+int f_get(struct S *p, int i) {
+  return p->arr[i];              // -> 形态读
+}
+
+int f_set(struct S *p, int i, int v) {
+  p->arr[i] = v;                 // -> 形态写
+  return 0;
+}
+
+int f_add(struct S *p, int i, int d) {
+  p->arr[i] += d;                // -> 形态复合赋值
+  return p->arr[i];
+}
+
+int main() {
+  int a[4];
+  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+  struct S s;
+  s.arr = a;
+  s.n = 4;
+
+  int r = 0;
+  if (s.arr[0] == 1) r |= 1;             // . 形态读
+  if (f_get(&s, 3) == 4) r |= 2;         // -> 形态读
+  f_set(&s, 1, 20);
+  if (a[1] == 20) r |= 4;                // -> 形态写穿透真实数组
+  if (f_add(&s, 2, 100) == 103) r |= 8;  // -> 形态复合赋值
+  s.arr[3] -= 1;                         // . 形态复合赋值
+  if (a[3] == 3) r |= 16;
+  s.arr[0]++;                            // . 形态自增
+  if (a[0] == 2) r |= 32;
+  if (r == 63) return 42;
+  return r;
+}

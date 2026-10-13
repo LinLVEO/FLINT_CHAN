@@ -1,0 +1,15 @@
+// rev3.fl — v1.0.12 评审清单【2】：内部函数调用点必须 16 字节对齐（字节层断言）
+// 修复前：g() + g() —— 第一次调用 rsp≡0，返回值 push 后第二次调用 rsp≡8（ABI 违例）；
+// 被调函数按「入口 rsp≡8」做序言，实到 ≡0 → 它内部的 FF15 API 调用落在 ≡8。
+// 现在不炸只因为 GetCurrentProcessId 不用 SSE；换成任何 movaps 类 API 即崩。
+// 断言方式：run-tests.js 在本样本产物里找「sub rsp,8 → E8 → add rsp,8」垫平序列（恰好 1 次）。
+api kernel32 int GetCurrentProcessId();
+
+int g() {
+  return GetCurrentProcessId();
+}
+
+int main() {
+  int x = g() + g();
+  return x - x;
+}

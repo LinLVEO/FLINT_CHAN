@@ -1,0 +1,8 @@
+// b4a1.fl — B4a for 语句（boot 侧差分）：基础形态 init/cond/inc 三段齐全
+// 语义对齐真 flint ND_FOR：init 一次 → cond 判 → body → inc → 回判。和为 21，+21 = 42
+int main() {
+  int s = 0;
+  for (int i = 0; i < 7; i++) { s = s + i; }
+  if (s != 21) return 1;
+  return 42;
+}

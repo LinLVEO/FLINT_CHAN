@@ -1,0 +1,35 @@
+// dir3.fl — 2026-09-21（卡 T-20260921-215305 第三刀）：**单实参 int 小函数内联**
+// 期望退出码 = 42（8 位全亮才 42）。覆盖三种体形态 + 四种出现位置：
+//   位 1  常量实参（`inl_inc(40)` = 43）
+//   位 2  **循环内**（k3 的那种形态：`s = inl_inc(s)` 走 5 轮 = 15）
+//   位 4  `形参 - 常量` 形态（`inl_dec(50)` = 45）
+//   位 8  `return x;` 形态（原值直通：inl_id(40) = 40）
+//   位 16 for 循环里反复用（3 - 5*4 = -17）—— 顺带钉负数方向
+//   位 32 **嵌套调用**（`inl_inc(inl_inc(5))` = 11，实参本身也是内联调用）
+//   位 64 表达式里的调用（`inl_inc(a) * 2` = 86，结果留在 eax 供外层继续叠）
+//   位 128 老路负对照：**两个形参**的函数（不在白名单 ⇒ 不许内联，值也必须对）
+int inl_inc(int x) { return x + 3; }
+int inl_dec(int x) { return x - 5; }
+int inl_id(int x) { return x; }
+int inl_add2(int x, int y) { return x + y; }
+
+int main() {
+  int r = 0;
+  int a = 40;
+  if (inl_inc(a) == 43) { r = r | 1; }
+  int i = 0;
+  int s = 0;
+  while (i < 5) { s = inl_inc(s); i = i + 1; }
+  if (s == 15) { r = r | 2; }
+  if (inl_dec(50) == 45) { r = r | 4; }
+  if (inl_id(a) == 40) { r = r | 8; }
+  int k = 0;
+  int t = 3;
+  for (k = 0; k < 4; k = k + 1) { t = inl_dec(t); }
+  if (t == -17) { r = r | 16; }
+  if (inl_inc(inl_inc(5)) == 11) { r = r | 32; }
+  if (inl_inc(a) * 2 == 86) { r = r | 64; }
+  if (inl_add2(a, 2) == 42) { r = r | 128; }
+  if (r == 255) { r = 42; }
+  return r;
+}

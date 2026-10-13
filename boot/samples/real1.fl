@@ -1,0 +1,9 @@
+// real1.fl — B2g：boot 编译真实库代码（include ../lib_token.fl，调用 tokenize）
+include "../lib_token.fl"
+int main() {
+  int kinds[16]; int poss[16]; int lens[16]; int vals[16];
+  struct TokOut to;
+  to.kinds = kinds; to.pos = poss; to.lens = lens; to.vals = vals; to.cap = 16;
+  int n = tokenize("int main", 8, &to);
+  return n * 12 + to.count + 3;
+}

@@ -1,0 +1,25 @@
+// audit9.fl — v1.0.6.2 盲区审计 A9：ptr 返回调用作 API 实参 / 丢弃语句
+// ① 自产 char* 返回（数据段地址 >4GB）作 API 实参：rcx 须 64 位完整（截断 → GetModuleHandleA
+//    收到垃圾 → 返回 0）——与字符串字面量直传同结果断言
+// ② ptr 返回调用作丢弃语句（mk()/GetModuleHandleA(0) 表达式语句）：不崩、后续堆分配/读写正常
+// 无新 bug（决策 17 参数装载按 TY_PTR 64 位 + ND_CALL 地址类语义已覆盖）
+api kernel32 ptr GetModuleHandleA(int);
+char *modname() { return "kernel32.dll"; }
+int *mk(int v) {
+  int *p = new int;
+  *p = v;
+  return p;
+}
+int main() {
+  int *h1 = GetModuleHandleA("kernel32.dll");
+  int *h2 = GetModuleHandleA(modname());      // API 实参 = 自产 char* 返回调用
+  if (h1 == 0) return 1;
+  if (h2 == 0) return 2;
+  if (h2 != h1) return 3;                     // 字面量 vs ptr 返回调用 → 同模块基址
+  mk(42);                                     // 丢弃语句（堆分配返回被丢）
+  mk(7);
+  GetModuleHandleA(0);                        // API ptr 返回丢弃语句
+  int *r = mk(123);                           // 丢弃后堆仍可用
+  if (*r != 123) return 4;
+  return 0;
+}

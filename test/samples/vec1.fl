@@ -1,0 +1,59 @@
+// vec1.fl -- lib\vec_lib.fl (generic vector, route V1) self-check.
+// Registered in test\run-tests.js: 10-item bitmask = 1023.
+//   bit0 int round trip            bit1 len == 3 after three pushes
+//   bit2 element 0 survived growth bit3 element 2 value
+//   bit4 double bit-exact          bit5 pointer round trip (MEM_TOP_DOWN, > 4GB)
+//   bit6 get(len) == 0             bit7 get(-1) == 0
+//   bit8 len == 5                  bit9 int slot byte audit (8 bytes must be clean)
+// Growth is forced: vec_new(1) then three pushes -> capacity 1 -> 2 -> 4, so the
+// handle MOVES twice and the old elements must be carried over byte-exactly.
+include "vec_lib.fl"
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+
+int main() {
+  int r = 0;
+  char *v = std::vec_new(1);
+  if (v == 0) { return 1; }
+
+  int a = -12345;
+  v = std::vec_push(v, &a);
+  int back = 0;
+  char *p0 = std::vec_get(v, 0);
+  std::memcpy(&back, p0, 8);
+  if (back == a) { r = r | 1; }
+  // -12345 = 0xFFFFCFC7 sign-extended -> little endian bytes C7 CF FF FF FF FF FF FF
+  if (p0[0] == 199) { r = r | 512; }
+  if (p0[7] == 255) { r = r | 512; }
+
+  int b = 777;
+  int c = -3;
+  v = std::vec_push(v, &b);
+  v = std::vec_push(v, &c);
+  if (std::vec_len(v) == 3) { r = r | 2; }
+  int b0 = 0;
+  std::memcpy(&b0, std::vec_get(v, 0), 8);
+  if (b0 == a) { r = r | 4; }
+  int b2 = 0;
+  std::memcpy(&b2, std::vec_get(v, 2), 8);
+  if (b2 == c) { r = r | 8; }
+
+  double d = -1.5;
+  v = std::vec_push(v, &d);
+  double dback = 0.0;
+  std::memcpy(&dback, std::vec_get(v, 3), 8);
+  if (dback == d) { r = r | 16; }
+
+  int *hp = VirtualAlloc(0, 4096, 0x103000, 4);
+  if (hp == 0) { return 2; }
+  v = std::vec_push(v, &hp);
+  int *hq = 0;
+  std::memcpy(&hq, std::vec_get(v, 4), 8);
+  if (hq == hp) { r = r | 32; }
+
+  if (std::vec_get(v, 5) == 0) { r = r | 64; }
+  if (std::vec_get(v, 0 - 1) == 0) { r = r | 128; }
+  if (std::vec_len(v) == 5) { r = r | 256; }
+
+  std::vec_free(v);
+  return r;
+}

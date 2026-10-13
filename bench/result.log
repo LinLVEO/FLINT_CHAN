@@ -1,0 +1,53 @@
+﻿[0] 写入 bench_flint.dat: n=2097152（4 字节小端）
+===== [1] 编译 =====
+flint  bench_flint.exe   exit=0
+gcc -O1 bench_c_O1.exe exit=0
+gcc -O2 bench_c_O2.exe exit=0
+
+===== [2] 运行（N=2097152, iters=10）=====
+flint  exit=27262976  out=cfg bytes=4 value=2097152 | impl=flint | qpf=10000000 qpcraw=0 | n=2097152 i=10 | k1=1048576 t1=544082 | k2=1572864 t2=1187795 | k3=1048576 t3=1529410
+O1     exit=0  out=impl=c | qpf=10000000 qpcraw=26 qpcns=2600 | n=2097152 i=10 | k1=1048576 t1=135900 | k2=1572864 t2=216483 | k3=1048576 t3=4
+O2     exit=0  out=impl=c | qpf=10000000 qpcraw=24 qpcns=2400 | n=2097152 i=10 | k1=1048576 t1=135735 | k2=1572864 t2=212255 | k3=1048576 t3=203780
+
+===== [3] 第三方裁定（node bench_runner.js 2097152）=====
+node   out=k1=1048576 k2=1572864 k3=1048576
+
+===== [4] 结果对账（k1 k2 k3 必须三方逐位相同）=====
+k1  第三方=1048576      O2=1048576 OK flint=1048576 OK O1=1048576 OK
+k2  第三方=1572864      O2=1572864 OK flint=1572864 OK O1=1572864 OK
+k3  第三方=1048576      O2=1048576 OK flint=1048576 OK O1=1048576 OK
+结果对账总体：一致
+逐侧结果可信：O2=OK flint=OK O1=OK
+
+===== [5] PE 回边自证（循环真的编进去了？）=====
+O2     段.text=10752 字节，向后跳转 75 条，首条 offset=291 op=7D rel=-14
+flint  段.text=7168 字节，向后跳转 27 条，首条 offset=374 op=E9 rel=-23
+O1     段.text=10752 字节，向后跳转 72 条，首条 offset=291 op=7D rel=-14
+
+===== 出表（ns/轮 = 累计 ticks ÷ iters ÷ n ÷ qpf × 1e9）=====
+O2     qpf=10000000（10 MHz）
+flint  qpf=10000000（10 MHz）
+O1     qpf=10000000（10 MHz）
+       k3: [!] 累计 ticks=4 < QPC 开销下界 25 -> 该侧被折掉（结果仍对，时间不可用）
+
+impl  kernel   ticks ns_per_iter reliable
+----  ------   ----- ----------- --------
+O2    k1      135735      6.4723     True
+O2    k2      212255     10.1211     True
+O2    k3      203780       9.717     True
+flint k1      544082     25.9439     True
+flint k2     1187795     56.6385     True
+flint k3     1529410      72.928     True
+O1    k1      135900      6.4802     True
+O1    k2      216483     10.3227     True
+
+
+
+
+===== 跨编译器倍数（同一把尺子：同机同刻同形状；口径 = flint ÷ gcc）=====
+k1: flint=25.9439 ns/轮  O0=不可测（结果不符⇒时间不可信）  O1=6.4802（flint÷O1=4.004×）  O2=6.4723（flint÷O2=4.008×）
+k2: flint=56.6385 ns/轮  O0=不可测（结果不符⇒时间不可信）  O1=10.3227（flint÷O1=5.487×）  O2=10.1211（flint÷O2=5.596×）
+k3: flint=72.928 ns/轮  O0=不可测（结果不符⇒时间不可信）  O1=不可测（结果不符⇒时间不可信）  O2=9.717（flint÷O2=7.505×）
+前提：结果对账=✅；回边自证=✅；⇒ 倍数可引用
+
+已落盘：E:\FLINT-lab\bench\result.json
