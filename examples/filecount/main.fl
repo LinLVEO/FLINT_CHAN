@@ -1,0 +1,78 @@
+// main.fl -- count the bytes and lines of a text file, then write a byte-identical copy.
+//
+// Build: flint.exe examples\filecount\main.fl -o examples\filecount\filecount.exe
+// Run:   examples\filecount\filecount.exe <in.txt>
+//          reads <in.txt>, writes <in.txt>.copy, prints the counts,
+//          exit code = line count (mod 256)   254 = cannot read   253 = cannot write
+//
+// File I/O is the first thing a real tool needs, and in FLINT it is one include away:
+//   include "io_lib.fl"  ->  std::file_read(path, buf, cap)  /  std::file_write(path, buf, len)
+//   The whole file goes through one call -- no streaming handle -- and the read result is
+//   NOT NUL-terminated (byte count only, so binary-safe).
+//
+// Three pits are baked in here on purpose (all three are in the README):
+//   1. FLINT has no argv: the path is pulled out of GetCommandLineA() by hand (see fc_arg).
+//   2. A relative path is resolved against the process CWD, NOT against the exe's directory.
+//   3. "Lines" here = count of 0x0A bytes, plus one if the file does not end with a newline.
+api kernel32 ptr GetCommandLineA();
+
+include "io_lib.fl"
+include "str_lib.fl"
+
+char fc_buf[256];      // argument buffer: global, because a local one dies when the function returns
+char fc_data[4096];    // the whole file, read in one shot (raise this and the read cap together)
+
+// n-th whitespace-separated token of the command line (0 = the exe path, 1 = the first argument).
+// No quote handling: a path containing a space arrives as two arguments.
+char *fc_arg(int want) {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  int idx = 0;
+  while (idx <= want) {
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+    if (cmd[i] == 0) { fc_buf[0] = 0; return fc_buf; }
+    int k = 0;
+    while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9 && k < 255) {
+      fc_buf[k] = cmd[i];
+      k = k + 1;
+      i = i + 1;
+    }
+    fc_buf[k] = 0;
+    if (idx == want) { return fc_buf; }
+    idx = idx + 1;
+  }
+  return fc_buf;
+}
+
+int main() {
+  char *in_path = fc_arg(1);
+  if (in_path[0] == 0) {
+    print(["usage: filecount.exe <in.txt>   (writes <in.txt>.copy)\n"]);
+    return 255;
+  }
+  char out_path[256];
+  std::strcpy(out_path, in_path);
+  std::strcat(out_path, ".copy");
+
+  int got = std::file_read(in_path, fc_data, 4096);
+  if (got < 0) {
+    print(["filecount: cannot read ", in_path, "\n"]);
+    return 254;
+  }
+
+  int lines = 0;
+  int k = 0;
+  while (k < got) {
+    if (fc_data[k] == 10) { lines = lines + 1; }
+    k = k + 1;
+  }
+  if (got > 0) { if (fc_data[got - 1] != 10) { lines = lines + 1; } }
+
+  int ok = std::file_write(out_path, fc_data, got);
+  if (ok != 1) {
+    print(["filecount: cannot write ", out_path, "\n"]);
+    return 253;
+  }
+  print(["in=", in_path, " bytes=", got, " lines=", lines, " out=", out_path, "\n"]);
+  return lines & 255;
+}

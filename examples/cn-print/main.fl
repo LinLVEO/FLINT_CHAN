@@ -1,0 +1,21 @@
+// main.fl -- print "??: 56 C" where the two leading characters are Chinese, from a byte table.
+//
+// Build: flint.exe examples\cn-print\main.fl
+// Run:   examples\cn-print\cn-print.exe
+//
+// Three honest facts about this language, all visible right here:
+//   1. This file AND cn_gen.fl must be PURE ASCII -- FLINT has no non-ASCII literal at all.
+//      (That is why this comment cannot show you the Chinese characters either.)
+//   2. There is no Str type: a "string" is a char* to NUL-terminated bytes, and Chinese text is
+//      simply GBK(936) bytes. cn_gen.fl spells them out: "\xCE\xC2\xB6\xC8" = the 2 characters.
+//   3. print() takes an ARRAY of items -- text, int, text -- not a C format string.
+//
+// Edit text.txt, then regenerate (build.ps1 does this for you, it is not automatic):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File examples\cn-print\gen-gbk.ps1
+include "cn_gen.fl"
+
+int main() {
+  int t = 56;                                 // the digits come from the runtime, not from the table
+  print([cn_temp_label(), ": ", t, " C\n"]);  // -> the two Chinese characters + ": 56 C"
+  return 0;                                   // exit code 0 = the assertion this example makes
+}

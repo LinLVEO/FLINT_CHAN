@@ -1,0 +1,1 @@
+cn_temp_label	温度

@@ -1,0 +1,54 @@
+// main.fl -- exit code AS output: a tool that needs no printf to be asserted.
+//
+// Build: flint.exe examples\exitcode\main.fl -o examples\exitcode\exitcode.exe
+// Run:   examples\exitcode\exitcode.exe <word>   -> exit code = (sum of the word's bytes) & 255
+//        examples\exitcode\exitcode.exe          -> usage line, exit 1
+//
+// Why this example exists: every gate in this repo asserts an EXIT CODE, because a produced exe
+// has no test harness behind it. This is that habit in its smallest form -- the result IS the
+// exit code, and a PowerShell script can check it without parsing any output at all.
+//
+// TWO PITS ARE BAKED IN HERE, both worth reading before writing a real tool:
+//   1. FLINT has NO argv. main() takes no parameters, so the parameters have to be pulled out of
+//      GetCommandLineA() by hand -- and the only way to hand a string back is a GLOBAL buffer
+//      (returning a pointer to a local array would hand back a dead stack frame).
+//   2. The split below is "on whitespace, no quote handling": a word or path containing a space
+//      arrives as two arguments. See README "Where the pits are".
+api kernel32 ptr GetCommandLineA();
+
+char ec_buf[256];   // the token buffer: global, because a local one dies when the function returns
+
+// n-th whitespace-separated token of the command line (0 = the exe path, 1 = the first argument).
+// No quote handling: a word containing a space arrives as two arguments.
+char *ec_arg(int want) {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  int idx = 0;
+  while (idx <= want) {
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+    if (cmd[i] == 0) { ec_buf[0] = 0; return ec_buf; }
+    int k = 0;
+    while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9 && k < 255) {
+      ec_buf[k] = cmd[i];
+      k = k + 1;
+      i = i + 1;
+    }
+    ec_buf[k] = 0;
+    if (idx == want) { return ec_buf; }
+    idx = idx + 1;
+  }
+  return ec_buf;
+}
+
+int main() {
+  char *w = ec_arg(1);
+  int n = 0;
+  int sum = 0;
+  while (w[n] != 0) { sum = sum + w[n]; n = n + 1; }
+  if (n == 0) {
+    print(["usage: exitcode.exe <word>   (exit code = sum of the word's bytes, mod 256)\n"]);
+    return 1;
+  }
+  print(["word=", w, " len=", n, " sum=", sum, " exit=", sum & 255, "\n"]);
+  return sum & 255;
+}

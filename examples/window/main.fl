@@ -1,0 +1,80 @@
+// main.fl -- the smallest FLGUI window: open a window, draw one line of text, close it.
+// Build: flint.exe examples\window\main.fl -o examples\window\window.exe
+// Run:   window.exe            real window; click the X (or the "close" button) to quit
+//        window.exe autoclose  real window that closes itself after 90 frames
+//        window.exe headless   NO window: one synthetic frame + gui_dump, exit 42
+// A real window blocks until a human closes it, so it can never gate an automated suite:
+// "headless" feeds synthetic input through the SAME frame path, "autoclose" is the real window
+// on a timer. Mode words come from the command line (FLINT has no argv -- see examples\exitcode).
+// Frame protocol (FLGUI.md 0): gui_init once -> per frame gui_begin -> widgets -> gui_end ->
+// gui_win_render + gui_win_show (+ gui_win_frame_wait, the library's only frame limiter).
+api kernel32 ptr GetCommandLineA();
+include "flgui_win32.fl"    // the platform layer pulls in the kernel layer and the widget layer
+
+// does the command line contain this ASCII word?
+int w_has(char *needle) {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  while (cmd[i] != 0) {
+    int k = 0;
+    while (needle[k] != 0 && cmd[i + k] == needle[k]) { k = k + 1; }
+    if (needle[k] == 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct Surf sf;
+  int *hf = 0;
+  char *w_title = "FLINT window example";
+  int r = 0; int frames = 0;
+
+  // ---- headless: no window, no desktop, deterministic --
+  if (w_has("headless") == 1) {
+    gui_init(&c);
+    c.lay_w = 200; c.lay_h = 60;
+    in.mx = 0; in.my = 0; in.down = 0; in.pressed = 0; in.released = 0;
+    in.wheel = 0; in.key = 0; in.ms = 0;
+    gui_begin(&c, &in);
+    gui_label(&c, w_title);
+    gui_end(&c);
+    int n = 0;
+    while (w_title[n] != 0) { n = n + 1; }
+    if (c.frame == 1) { r = r | 1; }             // bit 0: this is frame 1
+    if (gui_cmd_n == 1) { r = r | 2; }           // bit 1: exactly one command was emitted
+    if (gui_cmd_kind[0] == 5) { r = r | 4; }     // bit 2: kind 5 = text
+    if (gui_cmd_tlen[0] == n) { r = r | 8; }     // bit 3: the command carries the whole label
+    gui_dump(&c);                                // stdout: FRAME / CMD / POOLSUM lines
+    if (r == 15) { return 42; }                  // all four bits lit -> the magic exit code
+    return r & 255;                              // otherwise the bad bits ARE the report
+  }
+
+  // ---- real window ----
+  int auto_close = w_has("autoclose");
+  gui_init(&c);
+  c.lay_w = 200; c.lay_h = 60;
+  g.cls = "FLINTEXWINDOW";      // one class name per process: never reuse it in a second window
+  g.x = 420; g.y = 180; g.w = 300; g.h = 120; g.alpha = 240;
+  if (!gui_win_make(&g)) { return 90; }
+  if (!gui_win_surf(&sf, &g, 6)) { return 91; }
+  hf = gui_win_font_init(14);   // KEEP the handle: dropping it gives a proportional stock font
+  gui_win_dpi_apply(&c);        // read the real DPI back into the context
+
+  while (1) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }   // WM_QUIT: the X button or Alt+F4
+    gui_win_input(&g, &in);                         // cursor + left button, per frame
+    gui_begin(&c, &in);
+    gui_label(&c, w_title);
+    if (gui_button(&c, "close") == 1) { return 0; }
+    gui_end(&c);
+    gui_win_render(&sf, &c, hf);                    // command table -> surface (ULW pixels)
+    gui_win_show(&sf);                              // put the surface on screen
+    gui_win_frame_wait(&c);                         // the only frame limiter (60fps default)
+    frames = frames + 1;
+    if (auto_close == 1 && frames >= 90) { return 0; }
+  }
+  return 0;
+}
