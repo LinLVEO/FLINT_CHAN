@@ -584,9 +584,11 @@ static void emit_cmp64(Buf *b)                { const uint8_t x[] = {0x48, 0x39,
 static void emit_test64(Buf *b)               { const uint8_t x[] = {0x48, 0x85, 0xC0}; buf_bytes(b, x, 3); } // test rax,rax
 
 // ===== v1.7.0 int_64：64 位值算术语义的全套发射器 =====
-// 口径（§2.9）：溢出 = 2^64 回绕（补码，不饱和/不陷阱，与 int 的 32 位回绕同一条纪律）；
+// 口径（§2.9；P1 由 test\facts\f038_i64_wrap.fl 钉住）：
+//   溢出 = 2^64 回绕（补码，不饱和/不陷阱，与 int 的 32 位回绕同一条纪律）；
 //   除零 / INT64_MIN ÷ -1 = 硬件 #DE（与 int 的 INT32_MIN ÷ -1 完全对称，不做守卫）；
-//   移位量 ≥ 64 由硬件掩码（mod 64），与 32 位侧的 mod 32 一致。
+//   移位量 = **count & 63**（x86 `shl/sar rax,cl` 只看 cl 的低 6 位）：>=64 **不报编译错**、
+//     也**不是 UB**，就是硬件掩码；与 32 位侧的 count & 31 同一口径（f037 钉 64/65/127/-1）。
 // ⚠️ 寄存器约定与 32 位档**逐条同形**：rax = 左/累加，rcx = 右（除法另用 rdx）。
 static void emit_imul64(Buf *b)               { const uint8_t x[] = {0x48, 0x0F, 0xAF, 0xC1}; buf_bytes(b, x, 4); } // imul rax,rcx
 static void emit_and64(Buf *b)                { const uint8_t x[] = {0x48, 0x21, 0xC8}; buf_bytes(b, x, 3); } // and rax,rcx
@@ -2677,6 +2679,23 @@ static void gen_expr(FuncCtx *c, Node *node) {
     // 间接目标（引用 r / *p / a[i]）：地址 → rdx，间接 inc/dec
     case ND_PRE_INC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
+      // v1.7.0 P1：int_64 的 ++ —— 64 位读改写，值 = **新值**（在 rax）。本档覆盖
+      //   局部槽（direct）/ 全局 / a[i] / *p / s.f（间接）。走 32 位档就是"只改低半槽"的
+      //   静默错值（0 → 4294967295 那一族），所以必须排在 lvchar/指针档之前。
+      if (node->lhs->ty == TY_INT64) {
+        if (direct) {
+          slot_load_rax64(b, node->lhs->offset);
+          emit_inc_rax(b);
+          slot_store_rax64(b, node->lhs->offset);
+          return;
+        }
+        gen_lvalue_addr(c, node->lhs);   // rax = 目标地址
+        emit_mov_rdx_rax(b);             // rdx = 地址
+        emit_load_rax_at_rdx(b);         // rax = 旧值（64 位）
+        emit_inc_rax(b);                 // rax = 新值
+        emit_store_rax_at_rdx(b);        // [rdx] = 新值
+        return;                          // 表达式值 = 新值（在 rax）
+      }
       // v1.0.6.1 审计 A1：指针变量 ++ = 64 位（值=新地址；原 32 位 inc/读 → 数据段指针截断崩）
       if (direct && node->lhs->ty == TY_PTR) {
         slot_load_rax64(b, node->lhs->offset);
@@ -2710,6 +2729,21 @@ static void gen_expr(FuncCtx *c, Node *node) {
     }
     case ND_PRE_DEC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
+      // v1.7.0 P1：int_64 的 -- —— 64 位读改写，值 = **新值**（同 ND_PRE_INC 的长度理由）
+      if (node->lhs->ty == TY_INT64) {
+        if (direct) {
+          slot_load_rax64(b, node->lhs->offset);
+          emit_dec_rax(b);
+          slot_store_rax64(b, node->lhs->offset);
+          return;
+        }
+        gen_lvalue_addr(c, node->lhs);
+        emit_mov_rdx_rax(b);
+        emit_load_rax_at_rdx(b);
+        emit_dec_rax(b);
+        emit_store_rax_at_rdx(b);
+        return;
+      }
       // v1.0.6.1 审计 A1：指针变量 -- = 64 位
       if (direct && node->lhs->ty == TY_PTR) {
         slot_load_rax64(b, node->lhs->offset);
@@ -2743,6 +2777,28 @@ static void gen_expr(FuncCtx *c, Node *node) {
     // 后缀 x++/x--：值(旧)先进 eax，再改内存（旧值保留的关键：先读后改）
     case ND_POST_INC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
+      // v1.7.0 P1：int_64 的 x++ —— 64 位读改写，值 = **旧值**（在 rax）。后缀特有的顺序：
+      //   旧值必须先保存住，再做内存自增（与指针 x++ 的 push/pop 同形）。局部槽没有 call
+      //   跨越，push/pop 安全；间接目标用 "load 旧值 → push → inc qword [rdx] → pop"，
+      //   不重算地址（重算会冲掉 rax 里的旧值）。
+      if (node->lhs->ty == TY_INT64) {
+        if (direct) {
+          slot_load_rax64(b, node->lhs->offset);   // rax = 旧值
+          emit_push_rax(b);
+          slot_load_rax64(b, node->lhs->offset);
+          emit_inc_rax(b);
+          slot_store_rax64(b, node->lhs->offset);
+          emit_pop_rax(b);                         // rax = 旧值（表达式值）
+          return;
+        }
+        gen_lvalue_addr(c, node->lhs);
+        emit_mov_rdx_rax(b);                       // rdx = 地址
+        emit_load_rax_at_rdx(b);                   // rax = 旧值
+        emit_push_rax(b);
+        emit_inc_rax_at_rdx(b);                    // [rdx]++（64 位）
+        emit_pop_rax(b);                           // rax = 旧值（表达式值）
+        return;
+      }
       // v1.0.6.1 审计 A1：指针变量 x++ = 64 位（值=旧地址，槽+1）
       if (direct && node->lhs->ty == TY_PTR) {
         slot_load_rax64(b, node->lhs->offset);  // rax = 旧地址
@@ -2782,6 +2838,25 @@ static void gen_expr(FuncCtx *c, Node *node) {
     }
     case ND_POST_DEC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
+      // v1.7.0 P1：int_64 的 x-- —— 64 位读改写，值 = **旧值**（同 ND_POST_INC 的顺序坑）
+      if (node->lhs->ty == TY_INT64) {
+        if (direct) {
+          slot_load_rax64(b, node->lhs->offset);
+          emit_push_rax(b);
+          slot_load_rax64(b, node->lhs->offset);
+          emit_dec_rax(b);
+          slot_store_rax64(b, node->lhs->offset);
+          emit_pop_rax(b);
+          return;
+        }
+        gen_lvalue_addr(c, node->lhs);
+        emit_mov_rdx_rax(b);
+        emit_load_rax_at_rdx(b);
+        emit_push_rax(b);
+        emit_dec_rax_at_rdx(b);
+        emit_pop_rax(b);
+        return;
+      }
       // v1.0.6.1 审计 A1：指针变量 x-- = 64 位
       if (direct && node->lhs->ty == TY_PTR) {
         slot_load_rax64(b, node->lhs->offset);

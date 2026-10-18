@@ -1,0 +1,78 @@
+// f037_i64_shift.fl -- int_64 P1 #2: << and >> (arithmetic/sign-propagating) at 64-bit width.
+//
+// WHAT IS UNDER TEST: `int_64 << n` / `int_64 >> n`. Three separate claims:
+//   (a) the instruction is 64-bit (`shl rax,cl` / `sar rax,cl`), not `eax` -- 1<<32 proves it;
+//   (b) `>>` is ARITHMETIC: the sign bit is replicated, so -8>>1 = -4 and MIN>>63 = -1;
+//   (c) the shift count is masked to 0..63 (x86 `count & 63`), so 1<<64 = 1, 1<<65 = 2,
+//       1<<127 = 1<<63, and a negative count -1 behaves as 63. THIS IS THE DOCUMENTED
+//       SEMANTICS OF THIS ROUND (same family as the int side's `count & 31`); it is NOT
+//       an error and NOT undefined behaviour -- see the P1 report's semantics section.
+//
+// SENTINEL: one bit per check; exit 42 only when the whole mask is 134217727.
+// The program prints every computed value first, so a failure shows the offending value.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed): Node.js BigInt, one shot:
+//   node -e "const M=(1n<<64n)-1n;const w=x=>{x&=M;return x>=(1n<<63n)?x-(1n<<64n):x};
+//            const MIN=-9223372036854775808n, MAX=9223372036854775807n;
+//            for (const s of [0,1,31,32,62,63,64,65,127,-1]) { const k=BigInt(s)&63n;
+//              console.log(s, w(1n<<k), w(-8n>>k), w(MIN>>k), w(MAX>>k)); }
+//            console.log(w(-8n<<1n), w(-1n<<63n), w(1n<<40n), w(MAX<<1n));"
+//   -> 1<<63 = -9223372036854775808, MIN>>32 = -2147483648, MAX>>32 = 2147483647,
+//      -8<<1 = -16, 1<<40 = 1099511627776, MAX<<1 = -2 (the full table is in the run log).
+//
+// REVIEW COMMAND (worktree: replace E:\FLINT-lab with E:\FLINT-lab\tmp\int64p1):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f037_i64_shift -Compiler flint -ExpectExit 42
+// criterion: program exit = 42, stdout contains "mask=134217727"
+//
+// ASCII only, no BOM. No includes. 42 = all bits set, 7 = at least one bit missing.
+int main() {
+  int_64 one = 1;
+  int_64 neg = 0 - 8;
+  int_64 minus1 = 0 - 1;
+  int_64 minv = 0 - 9223372036854775807 - 1;
+  int_64 maxv = 9223372036854775807;
+  int_64 cnt = 64;
+  int n = 40;
+  int negone = 0 - 1;
+  int mask = 0;
+
+  print(["1<<0=", one << 0, " 1<<1=", one << 1, " 1<<31=", one << 31, " 1<<32=", one << 32, "\n"]);
+  print(["1<<62=", one << 62, " 1<<63=", one << 63, " 1<<64=", one << 64, " 1<<65=", one << 65, "\n"]);
+  print(["1<<127=", one << 127, " 1<<-1=", one << negone, " 1<<cnt=", one << cnt, "\n"]);
+  print(["-8>>0=", neg >> 0, " -8>>1=", neg >> 1, " -8>>31=", neg >> 31, " -8>>32=", neg >> 32, "\n"]);
+  print(["-8>>63=", neg >> 63, " min>>1=", minv >> 1, " min>>32=", minv >> 32, " min>>63=", minv >> 63, "\n"]);
+  print(["max>>0=", maxv >> 0, " max>>32=", maxv >> 32, " max>>63=", maxv >> 63, " max<<1=", maxv << 1, "\n"]);
+  print(["dyn=", one << n, " -8<<1=", neg << 1, "\n"]);
+
+  if ((one << 0) == 1) { mask = mask + 1; }
+  if ((one << 1) == 2) { mask = mask + 2; }
+  if ((one << 31) == 2147483648) { mask = mask + 4; }
+  if ((one << 32) == 4294967296) { mask = mask + 8; }
+  if ((one << 62) == 4611686018427387904) { mask = mask + 16; }
+  if ((one << 63) == minv) { mask = mask + 32; }
+  if ((one << 64) == 1) { mask = mask + 64; }
+  if ((one << 65) == 2) { mask = mask + 128; }
+  if ((one << 127) == minv) { mask = mask + 256; }
+  if ((one << negone) == minv) { mask = mask + 512; }
+  if ((neg >> 0) == (0 - 8)) { mask = mask + 1024; }
+  if ((neg >> 1) == (0 - 4)) { mask = mask + 2048; }
+  if ((neg >> 31) == (0 - 1)) { mask = mask + 4096; }
+  if ((neg >> 32) == (0 - 1)) { mask = mask + 8192; }
+  if ((neg >> 63) == (0 - 1)) { mask = mask + 16384; }
+  if ((minv >> 0) == minv) { mask = mask + 32768; }
+  if ((minv >> 1) == (0 - 4611686018427387904)) { mask = mask + 65536; }
+  if ((minv >> 32) == (0 - 2147483648)) { mask = mask + 131072; }
+  if ((minv >> 63) == (0 - 1)) { mask = mask + 262144; }
+  if ((maxv >> 0) == maxv) { mask = mask + 524288; }
+  if ((maxv >> 32) == 2147483647) { mask = mask + 1048576; }
+  if ((maxv >> 63) == 0) { mask = mask + 2097152; }
+  if ((minus1 >> 63) == (0 - 1)) { mask = mask + 4194304; }
+  if ((neg << 1) == (0 - 16)) { mask = mask + 8388608; }
+  if ((one << n) == 1099511627776) { mask = mask + 16777216; }
+  if ((one << cnt) == 1) { mask = mask + 33554432; }
+  if ((maxv << 1) == (0 - 2)) { mask = mask + 67108864; }
+
+  print(["mask=", mask, " expect=134217727\n"]);
+  if (mask == 134217727) { return 42; }
+  return 7;
+}

@@ -1,0 +1,67 @@
+// f038_i64_wrap.fl -- int_64 P1 #3: two's-complement WRAP at the 64-bit boundaries + the
+// existing print / compare / to_int32 paths on boundary values.
+//
+// WHAT IS UNDER TEST: arithmetic on int_64 is **2^64 wraparound** (modulo, no saturating,
+// no trap, no undefined behaviour) -- the same discipline the int side already pins for
+// 32 bits (f031_int_arith_wrap.fl). MAX+1 must be MIN, MIN-1 must be MAX, MAX*2 must be -2,
+// MIN*-1 must stay MIN, and the SIGNED comparison predicates must still order the wrapped
+// values correctly (MAX+1 < 0 is TRUE after the wrap). Unary minus of MIN wraps to MIN.
+// Division is C-style truncation; MIN/2 and MIN%3 pin the 64-bit div path.
+// to_int32 is the ONLY legal narrowing and is checked on MAX / MIN / 4294967297.
+// INT64_MIN / -1 and x/0 are NOT here: they #DE-crash the process by design (same as the
+// int side's INT32_MIN / -1) and would hang an automated gate -- see report.
+//
+// SENTINEL: one bit per check; exit 42 only when the whole mask is 1048575.
+// The program prints the boundary values first, so a failure shows the offending number.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed): Node.js BigInt, one shot:
+//   node -e "const M=(1n<<64n)-1n;const w=x=>{x&=M;return x>=(1n<<63n)?x-(1n<<64n):x};
+//            const MAX=9223372036854775807n, MIN=-9223372036854775808n;
+//            console.log(w(MAX+1n),w(MIN-1n),w(MAX+MAX),w(MAX*2n),w(MIN*-1n),w(-MIN),
+//                        MAX/2n,MIN/2n,MIN%3n,w(MAX+MIN),w(MIN+MIN),
+//                        BigInt.asIntN(32,MAX),BigInt.asIntN(32,MIN),BigInt.asIntN(32,4294967297n));"
+//   -> -9223372036854775808 9223372036854775807 -2 -2 -9223372036854775808
+//      -9223372036854775808 4611686018427387903 -4611686018427387904 -2 -1 0 -1 0 1
+//
+// REVIEW COMMAND (worktree: replace E:\FLINT-lab with E:\FLINT-lab\tmp\int64p1):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f038_i64_wrap -Compiler flint -ExpectExit 42
+// criterion: program exit = 42, stdout contains "mask=1048575" and the exact MIN/MAX lines
+//
+// ASCII only, no BOM. No includes. 42 = all bits set, 7 = at least one bit missing.
+int main() {
+  int_64 maxv = 9223372036854775807;
+  int_64 minv = 0 - 9223372036854775807 - 1;
+  int mask = 0;
+
+  print(["max=", maxv, " min=", minv, "\n"]);
+  print(["max+1=", maxv + 1, " min-1=", minv - 1, "\n"]);
+  print(["max+max=", maxv + maxv, " max*2=", maxv * 2, "\n"]);
+  print(["min*-1=", minv * (0 - 1), " -min=", -minv, "\n"]);
+  print(["max/2=", maxv / 2, " min/2=", minv / 2, " min%3=", minv % 3, "\n"]);
+  print(["to32(max)=", to_int32(maxv), " to32(min)=", to_int32(minv), " to32(4294967297)=", to_int32(4294967297), "\n"]);
+
+  if ((maxv + 1) == minv) { mask = mask + 1; }
+  if ((minv - 1) == maxv) { mask = mask + 2; }
+  if ((maxv + maxv) == (0 - 2)) { mask = mask + 4; }
+  if ((maxv * 2) == (0 - 2)) { mask = mask + 8; }
+  if ((minv * (0 - 1)) == minv) { mask = mask + 16; }
+  if ((-minv) == minv) { mask = mask + 32; }
+  if (maxv > 0) { mask = mask + 64; }
+  if (minv < 0) { mask = mask + 128; }
+  if (minv < maxv) { mask = mask + 256; }
+  if ((maxv + 1) < 0) { mask = mask + 512; }
+  if ((minv - 1) > 0) { mask = mask + 1024; }
+  if (to_int32(maxv) == (0 - 1)) { mask = mask + 2048; }
+  if (to_int32(minv) == 0) { mask = mask + 4096; }
+  if (to_int32(4294967297) == 1) { mask = mask + 8192; }
+  if ((minv / 2) == (0 - 4611686018427387904)) { mask = mask + 16384; }
+  if ((minv % 3) == (0 - 2)) { mask = mask + 32768; }
+  if ((0 - maxv) == (minv + 1)) { mask = mask + 65536; }
+  if ((maxv / 2) == 4611686018427387903) { mask = mask + 131072; }
+  if ((maxv + minv) == (0 - 1)) { mask = mask + 262144; }
+  if ((minv + minv) == 0) { mask = mask + 524288; }
+
+  print(["mask=", mask, " expect=1048575\n"]);
+  if (mask == 1048575) { return 42; }
+  return 7;
+}

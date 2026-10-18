@@ -1,0 +1,114 @@
+// f039_i64_incdec.fl -- int_64 P1 #4: ++ / -- (prefix AND postfix) at 64-bit width across
+// every storage form: local, global, array element, int_64* dereference, pointer index,
+// struct int_64 field.
+//
+// WHAT IS UNDER TEST (the P0 code had a 32-bit inc/dec path and refused postfix outright):
+//   (a) the read-modify-write is 64-bit (`mov rax,[m]` / `inc rax` / `mov [m],rax`), not eax;
+//   (b) prefix yields the NEW value, postfix yields the OLD value, both as full 64-bit values
+//       (assigning the expression result to another int_64 must not sign-extend a 32-bit half);
+//   (c) crossing the sign bit (MAX -> MIN), crossing zero (0 -> -1), and negative operands work;
+//   (d) indirect targets (a[i], *p, q[i], s.f) take the same 64-bit path -- a 32-bit inc there
+//       would leave the high half untouched (0 -> 4294967295 style silent corruption).
+//
+// SENTINEL: one bit per check; exit 42 only when the whole mask is 268435455.
+// The program prints the observed values first.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed): Node.js BigInt, one shot:
+//   node -e "const M=(1n<<64n)-1n;const w=x=>{x&=M;return x>=(1n<<63n)?x-(1n<<64n):x};
+//            const MAX=9223372036854775807n, MIN=-9223372036854775808n;
+//            console.log(w(MAX+1n),w(MIN+1n),w(MIN-1n),w(0n-1n),w(1n-1n),w(-1n+1n));"
+//   -> -9223372036854775808 -9223372036854775807 9223372036854775807 -1 0 0
+//   (prefix MAX++ = MIN; MIN-- = MAX; 0-- = -1; -1++ = 0)
+//
+// REVIEW COMMAND (worktree: replace E:\FLINT-lab with E:\FLINT-lab\tmp\int64p1):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f039_i64_incdec -Compiler flint -ExpectExit 42
+// criterion: program exit = 42, stdout contains "mask=268435455"
+//
+// ASCII only, no BOM. No includes. 42 = all bits set, 7 = at least one bit missing.
+int_64 g = 0;
+
+struct S { int_64 f; }
+
+int main() {
+  int_64 maxv = 9223372036854775807;
+  int_64 minv = 0 - 9223372036854775807 - 1;
+  int mask = 0;
+
+  int_64 x = 5;
+  if ((++x) == 6 && x == 6) { mask = mask + 1; }
+  if ((x++) == 6 && x == 7) { mask = mask + 2; }
+  if ((--x) == 6 && x == 6) { mask = mask + 4; }
+  if ((x--) == 6 && x == 5) { mask = mask + 8; }
+
+  if ((++maxv) == minv && maxv == minv) { mask = mask + 16; }
+  if ((maxv--) == minv && maxv == 9223372036854775807) { mask = mask + 32; }
+
+  int_64 z = 0;
+  if ((--z) == (0 - 1) && z == (0 - 1)) { mask = mask + 64; }
+  if ((++z) == 0 && z == 0) { mask = mask + 128; }
+
+  int_64 w = 0 - 1;
+  if ((w++) == (0 - 1) && w == 0) { mask = mask + 256; }
+
+  int_64 pv = 0;
+  if ((pv--) == 0 && pv == (0 - 1)) { mask = mask + 512; }
+
+  int_64 a[3];
+  a[0] = 0;
+  a[1] = 0;
+  a[2] = 0;
+  a[1]--;
+  if (a[1] == (0 - 1)) { mask = mask + 1024; }
+  if ((a[1]++) == (0 - 1) && a[1] == 0) { mask = mask + 2048; }
+  if ((++a[2]) == 1 && a[2] == 1) { mask = mask + 4096; }
+  a[0] = maxv;
+  a[0]++;
+  if (a[0] == minv) { mask = mask + 8192; }
+  a[1] = maxv;
+  if ((++a[1]) == minv) { mask = mask + 16384; }
+  a[1] = minv;
+  if ((a[1]--) == minv && a[1] == maxv) { mask = mask + 32768; }
+
+  int_64 v = 0 - 1;
+  int_64 *p = &v;
+  if (((*p)++) == (0 - 1) && v == 0) { mask = mask + 65536; }
+  if ((++(*p)) == 1 && v == 1) { mask = mask + 131072; }
+  v = maxv;
+  (*p)++;
+  if (v == minv) { mask = mask + 262144; }
+
+  int_64 arr[2];
+  arr[0] = 10;
+  arr[1] = maxv;
+  int_64 *q = &arr[0];
+  if ((q[1]++) == maxv && arr[1] == minv) { mask = mask + 524288; }
+
+  struct S s;
+  s.f = maxv;
+  s.f++;
+  if (s.f == minv) { mask = mask + 1048576; }
+  if ((s.f++) == minv && s.f == (0 - 9223372036854775807)) { mask = mask + 2097152; }
+  s.f = 0;
+  s.f--;
+  if (s.f == (0 - 1)) { mask = mask + 4194304; }
+
+  g = 0 - 1;
+  g++;
+  if (g == 0) { mask = mask + 8388608; }
+  if ((++g) == 1 && g == 1) { mask = mask + 16777216; }
+
+  int_64 r = 0 - 1;
+  int_64 old = r++;
+  if (old == (0 - 1) && r == 0) { mask = mask + 33554432; }
+  int_64 nv = ++r;
+  if (nv == 1 && r == 1) { mask = mask + 67108864; }
+  int_64 big = minv;
+  int_64 ob = big--;
+  if (ob == minv && big == maxv) { mask = mask + 134217728; }
+
+  print(["x=", x, " maxv=", maxv, " z=", z, " v=", v, " g=", g, "\n"]);
+  print(["r=", r, " big=", big, " s.f=", s.f, " a[0]=", a[0], " a[1]=", a[1], "\n"]);
+  print(["mask=", mask, " expect=268435455\n"]);
+  if (mask == 268435455) { return 42; }
+  return 7;
+}

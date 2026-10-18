@@ -116,7 +116,7 @@
 | `记忆.md` 全文件表格行 | **404 行**（全文件） | `Select-String -Pattern '^\| '` 逐行统计 |
 | `记忆.md` 里 **FLINT 相关速查行** | **102 行**（当轮读数）→ 现 **<!--fact:memory-flint-rows-->123<!--/fact--> 行** | **真值源 = `E:\FLINT-lab\tools\边界覆盖.mjs`**（关键词集写在脚本里；早前一次粗算 116 行，口径更宽、**已作废**） |
 | 边界节的 dated 实测记录 | **36 条**，其中**自带"作废/订正"标记 10 条（≈28%）** | 同上工具 |
-| 已变成**机器可验**的探针用例 | **<!--fact:probe-cases-->43<!--/fact--> 条**（ok <!--fact:probe-ok-->20<!--/fact--> ／ wall <!--fact:probe-wall-->23<!--/fact--> ／ gap <!--fact:probe-gap-->0<!--/fact-->），**假检验 0、重名 0** | 同上工具 |
+| 已变成**机器可验**的探针用例 | **<!--fact:probe-cases-->44<!--/fact--> 条**（ok <!--fact:probe-ok-->21<!--/fact--> ／ wall <!--fact:probe-wall-->23<!--/fact--> ／ gap <!--fact:probe-gap-->0<!--/fact-->），**假检验 0、重名 0** | 同上工具 |
 | 疑似**没有探针覆盖**的边界记录 | **6 条**（当轮读数）→ 现 **<!--fact:boundary-suspect-uncovered-->1<!--/fact--> 条**（需人核） | 同上工具 |
 | 真 flint 版本号仍在动 | v<!--fact:version-->1.7.0<!--/fact--> | 取数器 `tools\文档事实.ps1 -Key version`（真值源 = `src\main.c` 用法文本里最高的 `vX.Y.Z`） |
 

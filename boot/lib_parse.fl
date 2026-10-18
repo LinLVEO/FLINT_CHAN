@@ -363,6 +363,21 @@ int set_addr_mark(struct Parse *p, int slot) {
   }
   return 1;
 }
+// ===== 2026-10-18（task 2b / rev4）：T1「装地址的 int」→ **节点**标记 =====
+//   真 flint 侧：codegen 的 ai_pass 定点算出「装过地址的 int 槽」（slot_marked），随后
+//     ① 这种槽的**读**一律 8 字节读；② 存一律 8 字节写（普通 int 值先 movsxd 再写满）。
+//   boot 侧解析期已有同一份粘性标记 vad[]（set_addr_mark 落的）⇒ 解析时顺手把标记落到**节点**上：
+//     · 变量读节点（k==6）+ 该槽已标记 → 8 字节读
+//     · 赋值/声明+初始化节点（k==7/8）+ 目标槽已标记 → 8 字节写
+//   发射端只查表（与第四刀提升计划同一分工：解析层算、发射层认）。
+//   ⚠️ 标记怎么活过 plan_regs：pmark 是「节点被引用」表（0/1），plan_regs 会**清一遍自己的区间**；
+//      T1 用**值 2**，plan_regs 的清区间循环与 mark_field 都**不动 2**（见那两处注释）⇒ 与提升计划零交叉。
+//   为什么要落在节点上而不是留在变量表：**函数体退出时 p->nvars 会被回退到 vbase**
+//      （见 parse_stmt_block 的 `p->nvars = fmark`）⇒ 解析末尾按变量表扫是**扫不到任何局部量**的。
+int t1_mark_store(struct Parse *p, int idx, int slot) {
+  if (slot_addr_mark(p, slot) == 1) { p->pmark[idx] = 2; }
+  return idx;
+}
 // 10=调用算不算「地址值」——自产函数与 API 调用**两套口径**（v1.4.28 第三刀；根因见下）：
 //   · 自产函数：`rt ∈ {1,2,3}`（int*/char*/struct* 返回）才算地址 —— 与真 flint 的
 //     `is_addr_value/is_addr_expr` 的 `ND_CALL: n->ty == TY_PTR` 逐条对应。
@@ -565,7 +580,7 @@ int preg_excl_vv(int k) {
 // "被引用"过近似标记：字段值落在本函数节点区间内就算引用过
 //   为什么是**过近似**：多标只会让候选少提升几个（安全方向），标少了才会提升错。
 int mark_field(int *mk, int n0, int nend, int v) {
-  if (v >= n0) { if (v <= nend) { mk[v] = 1; } }
+  if (v >= n0) { if (v <= nend) { if (mk[v] != 2) { mk[v] = 1; } } }   // 值 2 = T1 标记，不许被"被引用"覆盖
   return 0;
 }
 // 该槽是否被排斥：① **活的** kind 25（真取址）② 其它带槽形态（数组/指针/结构体/char）任一处
@@ -577,7 +592,23 @@ int preg_excluded(struct Parse *p, struct Ast *a, int slot) {
   int *ll = a->l;
   int *vv = a->val;
   int *mk = p->pmark;
+  // 2026-10-18（task 2b / rev4）：T1「装地址的 int」槽**不进寄存器** ——
+  //   它的语义是「槽里装完整 64 位地址、读一律 8 字节」；提升到 32 位寄存器（em_ld_reg/em_st_reg）
+  //   会把高 32 位砍掉 ⇒ `char *q = s;` 立刻崩（rev4 的原症状）。
+  // 真 flint 侧同一口径：SF_T1ADDR 槽不参与 slotmap 提升。
+  //   ⚠️ 判据必须走**节点标记**（pmark 值 2），不能走 slot_addr_mark：本函数在 plan_regs 时刻
+  //      已经过了函数体退出（`p->nvars` 回退到 vbase）⇒ 变量表里扫不到局部量。
   int i = p->pn0;
+  while (i <= p->pnend) {
+    int kt = kd[i];
+    if (kt == 6 || kt == 7 || kt == 8) {
+      int st = vv[i];
+      if (kt != 6) { st = ll[i]; }
+      if (st == slot) { if (mk[i] == 2) { return 1; } }
+    }
+    i = i + 1;
+  }
+  i = p->pn0;
   while (i <= p->pnend) {
     int k = kd[i];
     if (k == 25) {
@@ -610,7 +641,7 @@ int plan_regs(struct Parse *p, struct Ast *a, int fi, int nargs) {
   int cand[8];                                        // 候选槽（临时；去重后逐个过排斥表）
   int nc = 0;
   int i = p->pn0;
-  while (i <= p->pnend) { mk[i] = 0; i = i + 1; }     // 清标记（只清本函数区间）
+  while (i <= p->pnend) { if (mk[i] != 2) { mk[i] = 0; } i = i + 1; }   // 清标记（只清本函数区间；值 2 = T1 标记，留着）
   i = p->pn0;
   while (i <= p->pnend) {                             // 过近似"被引用"标记（三个字段都当节点下标试）
     mark_field(mk, p->pn0, p->pnend, ll[i]);
@@ -1918,7 +1949,23 @@ int parse_primary(struct Parse *p, struct Ast *a) {
         int ch = s0[spos + j];
         if (ch == '\\') {
           j = j + 1;
-          ch = esc_val(s0[spos + j]);
+          // 2026-10-18（task 2b / audit5）：**`\xNN` 转义解码**（1-2 位十六进制，大小写皆可）。
+          //   与真 flint 的 tokenize parse_escape 同口径：最多吃 2 位 hex，遇非 hex 立即停
+          //   （`"\x4Z"` = 0x04 后接 'Z'；`"\xAB"` 是单个字节 0xAB）。
+          //   病根：原实现把 '\' 后的 'x' 原样当普通转义（esc_val 返回 'x'）⇒ "\x41B\x43" 解成
+          //   'x','4','1','B','x','4','3'，audit5 第一个断言（s1[0]=='A'）就退 1。
+          if (s0[spos + j] == 'x' || s0[spos + j] == 'X') {
+            int hv = 0;
+            int hn = 0;
+            while (hn < 2 && j + 1 < slen && is_hex(s0[spos + j + 1]) != 0) {
+              j = j + 1;
+              hv = hv * 16 + hex_val(s0[spos + j]);
+              hn = hn + 1;
+            }
+            ch = hv;
+          } else {
+            ch = esc_val(s0[spos + j]);
+          }
         }
         if (p->spcur >= 262144) return -160;      // 池满
         pool[p->spcur] = ch;
@@ -2357,6 +2404,8 @@ int parse_primary(struct Parse *p, struct Ast *a) {
       }
       int idx = new_node(a, 6, 0, 0);
       vv[idx] = slot;
+      // 2026-10-18（task 2b / rev4）：T1 —— 该槽已标「装过地址」⇒ 读节点打标（发射端 8 字节读）
+      if (slot_addr_mark(p, slot) == 1) { p->pmark[idx] = 2; }
       return idx;
     }
   }
@@ -2610,6 +2659,8 @@ int make_simple_assign(struct Parse *p, struct Ast *a, int lhs, int rhs) {
   int *vv = a->val;
   vv[idx] = w * 100;
   if (w == 8) { set_ty(a, idx, aty); }
+  // 2026-10-18（task 2b / rev4）：T1 —— 目标是「装地址的 int」槽 ⇒ 8 字节写（发射端按此定宽）
+  if (w == 4) { if (a->kind[lhs] == 6) { t1_mark_store(p, idx, a->val[lhs]); } }
   return idx;
 }
 
@@ -3268,6 +3319,7 @@ int parse_decl_body(struct Parse *p, struct Ast *a, int spec) {
     if (ty == 2) { nk = 36; }
     if (ty == 5) { nk = 43; }                          // char 标量初始化（字节存）
     int idx = new_node(a, nk, slot, e);
+    if (ty == 0) { t1_mark_store(p, idx, slot); }      // 2026-10-18（task 2b / rev4）：T1 装地址的 int → 8 字节写
     if (tok_is(p, ',')) { return idx; }                // B4a：for 头多声明（`,` 交由 parse_decl_multi 继续）
     if (!tok_is(p, ';')) return -47;
     p->i = p->i + 1;
@@ -3938,6 +3990,7 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
     if (e2 < 0) return -55;
     if (rhs_addr_like(p, a, e2, 0) != 0) { set_addr_mark(p, slot); }   // v1.4.31：int ← 地址值 → 标记
     int idx2 = new_node(a, 7, slot, e2);
+    t1_mark_store(p, idx2, slot);                      // 2026-10-18（task 2b / rev4）：T1 装地址的 int → 8 字节写
     if (!tok_is(p, ';')) return -57;
     p->i = p->i + 1;
     return idx2;

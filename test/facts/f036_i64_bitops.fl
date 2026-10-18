@@ -1,0 +1,65 @@
+// f036_i64_bitops.fl -- int_64 P1 #1: BITWISE & | ^ ~ on 64-bit values, one mask bit each.
+//
+// WHAT IS UNDER TEST: `int_64` bitwise operators. The value domain is 64 bits, so `~a` must
+// flip bit 63 (an int would emit `not eax`, zero/sign-extending the wrong half), and a 32-bit
+// operand mixed with int_64 must be sign-extended to 64 bits before the op.
+//
+// SENTINEL: one bit per check (1, 2, 4, ...); exit 42 only when the whole mask is 65535.
+// The program prints every computed value first, so a failure shows the offending value.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed): Node.js BigInt, one shot:
+//   node -e "const M=(1n<<64n)-1n;const w=x=>{x&=M;return x>=(1n<<63n)?x-(1n<<64n):x};
+//            const a=123456789012345n,b=987654321n,d=-123456789012345n;
+//            console.log(w(a&b),w(a|b),w(a^b),w(~a),w(d&b),w(d|b),w(d^b),w(~d),
+//                        w(a&4294967295n),w(a|255n),w(a&0n),w(a^a),w(~0n),w(~(-1n)),w(BigInt.asIntN(32,a)))"
+//   -> 34359345 123457742307321 123457707947976 -123456789012346
+//      953294977 -123456754653001 -123457707947978 123456789012344
+//      2249056121 123456789012479 0 0 -1 0 -2045911175
+// (the last number is what a NON-promoted `int & int_64` would leave in the low half, i.e. the
+//  value check #15 would see if mixed promotion silently fell back to 32 bits.)
+//
+// REVIEW COMMAND (worktree: replace E:\FLINT-lab with E:\FLINT-lab\tmp\int64p1):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f036_i64_bitops -Compiler flint -ExpectExit 42
+// criterion: program exit = 42, stdout contains "mask=65535"
+//
+// WHY THE OPPOSITE END (boot) IS NOT COMPARED: boot has no int_64 yet (P2), so this probe is
+// flint-only by design -- it is NOT a boot divergence (see docs decision D10 / int64 research section 2.10).
+//
+// ASCII only, no BOM. No includes. 42 = all bits set, 7 = at least one bit missing.
+int main() {
+  int_64 a = 123456789012345;
+  int_64 b = 987654321;
+  int_64 d = 0 - 123456789012345;
+  int_64 z = 0;
+  int_64 minus1 = 0 - 1;
+  int n = 0 - 1;
+  int m = 255;
+  int mask = 0;
+
+  print(["a=", a, " b=", b, " d=", d, "\n"]);
+  print(["a&b=", a & b, " a|b=", a | b, " a^b=", a ^ b, " ~a=", ~a, "\n"]);
+  print(["d&b=", d & b, " d|b=", d | b, " d^b=", d ^ b, " ~d=", ~d, "\n"]);
+  print(["a&4294967295=", a & 4294967295, " a|255=", a | 255, "\n"]);
+  print(["mixed=", n & a, " ", m | a, "\n"]);
+
+  if ((a & b) == 34359345) { mask = mask + 1; }
+  if ((a | b) == 123457742307321) { mask = mask + 2; }
+  if ((a ^ b) == 123457707947976) { mask = mask + 4; }
+  if ((~a) == (0 - 123456789012346)) { mask = mask + 8; }
+  if ((d & b) == 953294977) { mask = mask + 16; }
+  if ((d | b) == (0 - 123456754653001)) { mask = mask + 32; }
+  if ((d ^ b) == (0 - 123457707947978)) { mask = mask + 64; }
+  if ((~d) == 123456789012344) { mask = mask + 128; }
+  if ((a & 4294967295) == 2249056121) { mask = mask + 256; }
+  if ((a | 255) == 123456789012479) { mask = mask + 512; }
+  if ((a & 0) == 0) { mask = mask + 1024; }
+  if ((a ^ a) == 0) { mask = mask + 2048; }
+  if ((~z) == (0 - 1)) { mask = mask + 4096; }
+  if ((~minus1) == 0) { mask = mask + 8192; }
+  if ((n & a) == a) { mask = mask + 16384; }
+  if ((m | a) == 123456789012479) { mask = mask + 32768; }
+
+  print(["mask=", mask, " expect=65535\n"]);
+  if (mask == 65535) { return 42; }
+  return 7;
+}

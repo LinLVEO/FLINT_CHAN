@@ -14,7 +14,7 @@
 | 编译器版本 | v<!--fact:version-->1.7.0<!--/fact--> |
 | 产物 | 纯自产机器码 PE，无 CRT / 无运行时；`hello`（含打印） = **<!--fact:product-hello-->3072<!--/fact--> B**，浮窗 app（`apps\m2_float\m2_float.exe`） = **<!--fact:product-m2float-->241664<!--/fact--> B**，真实工具 `winpanel.exe` = **<!--fact:product-winpanel-->353792<!--/fact--> B** |
 | 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己、产物与真 flint 逐字节一致） |
-| 门（可自己跑） | 总门 **<!--fact:gate-steps-->14<!--/fact--> 步**（`test\verify-all.ps1`）｜语言边界探针 **<!--fact:probe-cases-->43<!--/fact--> 条**（`test\边界探针.ps1`）｜FLGUI 门 **<!--fact:flgui-checks-->199/199<!--/fact-->** |
+| 门（可自己跑） | 总门 **<!--fact:gate-steps-->14<!--/fact--> 步**（`test\verify-all.ps1`）｜语言边界探针 **<!--fact:probe-cases-->44<!--/fact--> 条**（`test\边界探针.ps1`）｜FLGUI 门 **<!--fact:flgui-checks-->199/199<!--/fact-->** |
 | 平台 | Windows 10 x64（明确放弃 Win7）；单目标、单平台 |
 
 ---
@@ -24,7 +24,7 @@
 前置：`gcc`（MinGW-w64 即可）、PowerShell；跑总门还需要 `objdump`（MinGW-w64 自带）。**在仓库根目录**执行：
 
 ```cmd
-:: 1) 构建编译器（约 9 秒，产出 <!--fact:product-flint-->275902<!--/fact--> 字节的 flint.exe）
+:: 1) 构建编译器（约 9 秒，产出 <!--fact:product-flint-->276414<!--/fact--> 字节的 flint.exe）
 cmd /c "gcc -O2 src\*.c -o flint.exe"
 ```
 ```powershell
@@ -32,7 +32,7 @@ cmd /c "gcc -O2 src\*.c -o flint.exe"
 .\flint.exe examples\hello\hello.fl
 .\examples\hello\hello.exe
 
-# 3) 自己验一遍"说明书说的是真的"（<!--fact:probe-cases-->43<!--/fact--> 条语言边界用例，全绿 = 与边界表一致）
+# 3) 自己验一遍"说明书说的是真的"（<!--fact:probe-cases-->44<!--/fact--> 条语言边界用例，全绿 = 与边界表一致）
 powershell -NoProfile -ExecutionPolicy Bypass -File test\边界探针.ps1
 ```
 
@@ -67,12 +67,12 @@ int main() {
 
 | 路径 | 是什么 |
 |---|---|
-| `src\` | 编译器本体（C，**<!--fact:src-files-->9<!--/fact--> 个源文件（7 个 `.c` ＋ 2 个 `.h`）／<!--fact:src-loc-->11795<!--/fact--> 行**，英文注释）：词法/语法/代码生成/PE 写出 |
+| `src\` | 编译器本体（C，**<!--fact:src-files-->9<!--/fact--> 个源文件（7 个 `.c` ＋ 2 个 `.h`）／<!--fact:src-loc-->11937<!--/fact--> 行**，英文注释）：词法/语法/代码生成/PE 写出 |
 | `lib\` | FLINT 标准库（`.fl`）：`str/num/fmt/mem/vec/io/http/math/chr` ＋ **FLGUI**（`flgui*.fl`） |
 | `apps\` | 真实项目：`winpanel`（旗舰工具）/ `m2_float`（硬件浮窗）/ `ui_gallery`（控件画廊）/ `student`（最小示例） |
 | `examples\` | **五个能抄的示例**：hello / 中文打印 / 退出码当输出 / 文件 I/O / 最小窗口 —— 每个一条 `build.ps1`，`examples\run-all.ps1` = **<!--fact:examples-passed-->5/5<!--/fact--> passed** |
 | `boot\` | 自举编译器（用 FLINT 写的 FLINT）＋ `verify.ps1`（**<!--fact:boot-verify-->304/304<!--/fact-->**，含不动点） |
-| `test\` | 门与判据：`verify-all.ps1`（总门 <!--fact:gate-steps-->14<!--/fact--> 步）/ 各专项门 / **<!--fact:test-corpus-->299<!--/fact--> 个 `.fl` 语料** / **`边界探针.ps1`** |
+| `test\` | 门与判据：`verify-all.ps1`（总门 <!--fact:gate-steps-->14<!--/fact--> 步）/ 各专项门 / **<!--fact:test-corpus-->305<!--/fact--> 个 `.fl` 语料** / **`边界探针.ps1`** |
 | `tools\` | 仪器：边界覆盖对账 / 导入预算 / boot 余量 / 预算基线门 |
 | `docs\` | 对外文档（**协作协议从这里开始**） |
 | `SPEC.md` | 语言设计原则 1~<!--fact:spec-principles-->11<!--/fact--> 与长期目标（权威） |

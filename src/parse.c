@@ -285,6 +285,11 @@ bool expr_is_i64(Node *n) {
     case ND_DEREF: return n->ty == TY_INT64;       // *p / 数组元素 / 结构体字段
     case ND_ASSIGN: return expr_is_i64(n->rhs) || n->ty == TY_INT64;
     case ND_TERN: return n->ty == TY_INT64;
+    // v1.7.0 P1：++/-- 的值类型 = 操作数类型（前缀=新值、后缀=旧值，两者都是完整 64 位）。
+    //   ⚠️ 不补这一档 = `int_64 y = x++;` 会被 asgn_rhs 包成 ND_I2L（movsxd rax,eax），
+    //   把高 32 位抹掉 —— 编译过、值错。打印（seg_print_kind）也靠这一档选 _flint_out_i64。
+    case ND_PRE_INC: case ND_PRE_DEC: case ND_POST_INC: case ND_POST_DEC:
+      return expr_is_i64(n->lhs);
     case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD: case ND_NEG:
     case ND_BITAND: case ND_BITOR: case ND_BITXOR: case ND_SHL: case ND_SHR: case ND_BITNOT:
       // 混合提升：任一操作数是 int_64 就算 int_64（与 double 同一条 C 口径）
@@ -413,6 +418,8 @@ static Node *new_global_node(int gi, GlobalVar *g) {
 static Node *stmt(Parser *p);
 static Node *expr(Parser *p);
 static Node *assign(Parser *p);
+// v1.7.0 P2：int_64 复合赋值的源码层摊平（定义在 mkbin/mkintbin 之后 —— 二元提升口径的唯一出处）
+static Node *i64_compound(Parser *p, Node *lv, NodeKind bin_kind, Node *rhs, char *loc);
 static Node *ternary(Parser *p);   // v1.3.1 三元：cond ? a : b
 static Node *logor(Parser *p);
 static Node *logand(Parser *p);
@@ -1428,13 +1435,15 @@ static Node *ternary(Parser *p) {
 // assign = ternary (赋值运算符 assign)?   （右结合；左值必须变量或解引用）
 static Node *assign(Parser *p) {
   Node *node = ternary(p);
-  // 复合赋值表：符号 → 节点类型
-  struct { char *op; NodeKind kind; } compound[] = {
-    { "+=", ND_ADD_ASSIGN }, { "-=", ND_SUB_ASSIGN }, { "*=", ND_MUL_ASSIGN },
-    { "/=", ND_DIV_ASSIGN }, { "%=", ND_MOD_ASSIGN },
+  // 复合赋值表：符号 → 节点类型（kind）+ 对应的**二元**节点类型（bin：int_64 摊平时要用）
+  struct { char *op; NodeKind kind; NodeKind bin; } compound[] = {
+    { "+=", ND_ADD_ASSIGN, ND_ADD }, { "-=", ND_SUB_ASSIGN, ND_SUB },
+    { "*=", ND_MUL_ASSIGN, ND_MUL }, { "/=", ND_DIV_ASSIGN, ND_DIV },
+    { "%=", ND_MOD_ASSIGN, ND_MOD },
     // v0.7.2 位复合赋值
-    { "&=", ND_AND_ASSIGN }, { "|=", ND_OR_ASSIGN }, { "^=", ND_XOR_ASSIGN },
-    { "<<=", ND_SHL_ASSIGN }, { ">>=", ND_SHR_ASSIGN },
+    { "&=", ND_AND_ASSIGN, ND_BITAND }, { "|=", ND_OR_ASSIGN, ND_BITOR },
+    { "^=", ND_XOR_ASSIGN, ND_BITXOR },
+    { "<<=", ND_SHL_ASSIGN, ND_SHL }, { ">>=", ND_SHR_ASSIGN, ND_SHR },
   };
   for (int i = 0; i < 10; i++) {
     if (consume_str(p, compound[i].op)) {
@@ -1443,11 +1452,21 @@ static Node *assign(Parser *p) {
       if (node->kind == ND_VAR && (node->is_own || node->is_share))
         error_at(p->tok->loc, "own/share 指针不能复合赋值（所有权由声明初始化 + 出口自动释放管理）");
       check_field_incr(p, node);   // v0.9.2：指针字段禁复合赋值（32 位路径会截断）
-      // v1.7.0：int_64 的复合赋值暂不支持 —— 复合赋值通路是 32 位 alu（slot_load_eax / emit_add…），
-      //   直接放行就是"只写半个槽"的静默错值。P0 一律响亮报错。
-      if (expr_is_i64(node))
-        error_at(p->tok->loc, "int_64 的复合赋值（%s）暂不支持（v1.7.0 P0 边界：复合通路是 32 位）——"
-                              "请展开写 x = x <运算> y;", compound[i].op);
+      // ===== v1.7.0 P2：int_64 的复合赋值 = 源码层摊平（决策 D11），codegen 一行未加 =====
+      //   `LV op= RHS` ⇒ `t = &LV; *t = *t op RHS`（t = 本函数帧里一个**匿名** int_64* 槽）。
+      //   摊平后落到的全是**已有**通路：ND_ADDR / ND_ASSIGN（int_64 间接目标 = 64 位写）/
+      //   ND_DEREF（int_64 读 = 8 字节）/ 二元运算（P1 的 64 位发射器）——不新增 codegen 通路。
+      //   ⚠️ 为什么不是朴素地抄一遍左值（`LV = LV op RHS`）：那样 `a[i++] += 1` 会把 i 加两次、
+      //   `a[ix()] += 1` 会调两次 ix()。这里 &LV 在展开树里**只出现一次** ⇒ 左值恰好求值一次
+      //   （f041_i64_compound_evalonce.fl 用调用计数器把这条钉成判据）。
+      //   二元提升口径不在这里另写一份：算术走 mkbin、位/移位走 mkintbin（与 `x = x op y` 逐条一致，
+      //   含「int_64 与 double 不能混算」「位运算不收 double」两条硬错）。
+      //   帧槽是匿名的（不入符号表）：不与用户变量重名，-strict 的未初始化检查按 lv_by_offset
+      //   找不到它 ⇒ 放行（见 strict_read 的「不是局部量」分支）。
+      if (expr_is_i64(node)) {
+        Node *crhs = assign(p);   // 右结合：`x += (y += 2)` 照旧
+        return i64_compound(p, node, compound[i].bin, crhs, p->tok->loc);
+      }
       // v1.2.4 浮点：double 左值的复合赋值支持 += -= *= /=（值走 SSE，见 codegen 的同名分支）；
       //   %= 与位运算/移位对浮点无意义 → 编译期报错（绝不静默按整数位算）。反向（int 左值收 double
       //   右值）由下面的 asgn_rhs 拦（不能把 double 赋给 int）。
@@ -1529,6 +1548,44 @@ static Node *mkintbin(Parser *p, NodeKind kind, Node *lhs, Node *rhs) {
     rhs = widen_i64(rhs);
   }
   return new_node(kind, lhs, rhs);
+}
+
+// ===== v1.7.0 P2：`int_64 左值 op= RHS` 的源码层摊平（决策 D11 = 糖必须能在源码层摊平）=====
+// 产出形状（**只用已有节点**，src\codegen.c 一行未改）：
+//     t = &LV;            ND_ASSIGN(ND_VAR t, ND_ADDR LV)     —— 地址只算一次
+//     *t = *t op RHS      ND_ASSIGN(ND_DEREF t, binop(ND_DEREF t', RHS))
+// 为什么要 t 这个帧槽：朴素展开 `LV = LV op RHS` 把左值写了**两遍** ⇒ `a[i++] += 1` 会把 i 加两次、
+//   `a[ix()] += 1` 会调两次 ix()、`*p += f()` 会在 f() 之后**重算**目标地址（写到新 p 指的地方）。
+//   有了 t：左值恰好求值一次，写目标就是那一次算出来的地址（C 的复合赋值语义）。
+// 槽是**匿名**的（不进作用域/不查重名）：用户看不见，也不会和用户变量撞名；-strict 的未初始化
+//   检查按帧偏移反查 LVar，查不到 ⇒ 放行（strict_read 的"不是局部量"分支），不会假报。
+// 二元提升口径**不在这里另写一份**：算术走 mkbin、位/移位走 mkintbin（`x = x op y` 的同一条路，
+//   因此「int_64 与 double 不能混算」「位运算/移位不收 double」两张硬错自然一致）。
+static Node *i64_compound(Parser *p, Node *lv, NodeKind bin_kind, Node *rhs, char *loc) {
+  if (!p->scope)
+    error_at(loc, "int_64 的复合赋值只能出现在函数体内（v1.7.0 P2 边界）");
+  // 匿名帧槽：与 new_lvar 同一套账（next_offset 分配 / var_count 计入帧大小），只是不登记名字。
+  if ((long long)p->next_offset + 8LL > 0x7FFFFFFFLL)
+    error_at(loc, "变量/数组/结构体总长过大（帧槽累计超 2GB 上限）");
+  int slot = p->next_offset;
+  p->next_offset += 8;
+  p->var_count += 1;
+
+  // ① t = &LV —— 左值在这棵展开树里**只出现这一次**
+  Node *bind = new_node(ND_ASSIGN, new_var_node(slot, false, TY_PTR, -1, TY_INT64),
+                        new_node(ND_ADDR, lv, NULL));
+  // ② *t = *t op RHS —— 读旧值走 bind 的值（同一个地址），写回走另一次 t 读
+  Node *old = new_node(ND_DEREF, bind, NULL);
+  old->ty = TY_INT64;
+  bool bitlike = (bin_kind == ND_BITAND || bin_kind == ND_BITOR || bin_kind == ND_BITXOR
+               || bin_kind == ND_SHL || bin_kind == ND_SHR);
+  Node *bin = bitlike ? mkintbin(p, bin_kind, old, rhs) : mkbin(bin_kind, old, rhs);
+  Node *dst = new_node(ND_DEREF, new_var_node(slot, false, TY_PTR, -1, TY_INT64), NULL);
+  dst->ty = TY_INT64;
+  Node *out = new_node(ND_ASSIGN, dst, bin);
+  out->ty = TY_INT64;    // 表达式值 = 新值（ND_ASSIGN 的值语义），类型 = int_64
+  out->loc = loc;
+  return out;
 }
 
 // bitor = bitxor ("|" bitxor)*
@@ -1776,6 +1833,11 @@ static Node *unary(Parser *p) {
     //   → 目标类型 TY_DOUBLE ⇒ codegen 走 8 字节 SSE 读（movsd）与 SSE 写，绝不落 32 位整数路径
     else if (pe == TY_DOUBLE)
       d->ty = TY_DOUBLE;
+    // v1.7.0 P1：int_64* 的解引用读宽 = 8 字节。P0 漏了这一档 ⇒ `*p` 的节点类型掉回 TY_INT：
+    //   读只读低 32 位、写只写低半槽，而且 `int_64 x = *p;` 会被包上 movsxd（编译过、值错）。
+    //   `p[i]` 是另一条路（postfix 下标分支自己设 TY_INT64），两条都要对。
+    else if (pe == TY_INT64)
+      d->ty = TY_INT64;
     return d;
   }
   if (consume_str(p, "++")) {
@@ -1785,7 +1847,9 @@ static Node *unary(Parser *p) {
     // v0.9.2：指针字段禁 ++/--（+ 复合赋值，见 check_field_incr）
       check_field_incr(p, operand);
       check_dbl_incr(p, operand);
-      return new_node(ND_PRE_INC, operand, NULL);
+      Node *n = new_node(ND_PRE_INC, operand, NULL);
+      if (expr_is_i64(operand)) n->ty = TY_INT64;   // v1.7.0 P1：值 = 新的 64 位值
+      return n;
   }
   if (consume_str(p, "--")) {
     Node *operand = unary(p);
@@ -1793,7 +1857,9 @@ static Node *unary(Parser *p) {
       error_at(p->tok->loc, "-- 需要可修改的变量或 *p（左值）");
     check_field_incr(p, operand);
     check_dbl_incr(p, operand);
-    return new_node(ND_PRE_DEC, operand, NULL);
+    Node *n = new_node(ND_PRE_DEC, operand, NULL);
+    if (expr_is_i64(operand)) n->ty = TY_INT64;   // v1.7.0 P1：值 = 新的 64 位值
+    return n;
   }
   return pow_expr(p);
 }
@@ -2222,19 +2288,20 @@ static Node *postfix(Parser *p) {
         error_at(p->tok->loc, "++ 需要可修改的变量或 *p（左值）");
       check_field_incr(p, node);
       check_dbl_incr(p, node);
-      if (expr_is_i64(node))
-        error_at(p->tok->loc, "int_64 的 ++ 暂不支持（v1.7.0 P0 边界：自增通路是 32 位）——"
-                              "请写 x = x + 1;");
+      // v1.7.0 P1：int_64 的 ++ 已放开（P0 的 32 位通路会静默只改低半槽，所以当时拦下）。
+      //   值 = **旧的** 64 位值；codegen 的 ND_POST_INC 有专门的 int64 分支。
+      bool i64 = expr_is_i64(node);
       node = new_node(ND_POST_INC, node, NULL);
+      if (i64) node->ty = TY_INT64;
     } else if (consume_str(p, "--")) {
       if (!is_lvalue(node))
         error_at(p->tok->loc, "-- 需要可修改的变量或 *p（左值）");
       check_field_incr(p, node);
       check_dbl_incr(p, node);
-      if (expr_is_i64(node))
-        error_at(p->tok->loc, "int_64 的 -- 暂不支持（v1.7.0 P0 边界：自减通路是 32 位）——"
-                              "请写 x = x - 1;");
+      // v1.7.0 P1：int_64 的 -- 同 ND_POST_INC
+      bool i64 = expr_is_i64(node);
       node = new_node(ND_POST_DEC, node, NULL);
+      if (i64) node->ty = TY_INT64;
     } else {
       return node;
     }

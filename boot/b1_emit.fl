@@ -99,6 +99,7 @@ struct Emit {
   // ===== 2026-09-21（卡 T-20260921-232138 第四刀 A1）：局部 int 标量进寄存器 =====
   //   计划在解析层定死（lib_parse.fl plan_regs），这里只保存「本函数的那一小段表」供查。
   int *preg_slot;      // 提升计划**总表**（Parse 扁平表；本函数的段 = preg_base 起）
+  int *pmark;          // 2026-10-18（task 2b / rev4）：节点标记表（值 2 = T1「装地址的 int」节点）
   int preg_base;       // 本函数在总表里的起点下标（fi*4）——⚠️ 别用指针加法：FLINT 的 `ptr+n` 按 8 字节槽缩放
   int npreg;           // 提升个数（0 = 本函数全走老路，一个字节都不变）
   int preg_frame;      // 保存区基址 = 原帧大小（保存区在 [rbp-(frame+8) .. rbp-(frame+8*npreg)]）
@@ -124,6 +125,26 @@ struct Emit {
   //   1 = 见过越界的 for 体/自增下标（解析端与发射端版本不配对）⇒ compile_one 响亮失败，
   //   绝不产出坏 .exe（旧写法 `vv % 100000` 完全无守卫、负商照过 = 静默错码）。
   int badfor;
+  // ===== 2026-10-18（task 2b / align2_probe）：call 时 rsp 对齐记账 =====
+  //   0 = 当前 rsp ≡ 0 (mod 16)｜1 = rsp ≡ 8 —— **只记奇偶**（push/pop 各 8 字节）。
+  //   病根：表达式求值用 push 暂存左值；左值压栈后求右值（右值里是 API 调用时 rsp≡8）
+  //   ⇒ call 落在 rsp≡8，movaps 类 API（RegisterClassW / CreateWindowExA 内部）直接 0xC0000005。
+  //   修法同真 flint 的 rsp_assert 家族：本文件所有 push/pop 一律走 push_rax/pop_reg 记账，
+  //   k==10 发 call 前按它垫 8 字节。
+  int rspoff;
+}
+
+// 每来一次 push/pop 就翻一次「rsp 奇偶」——**不许直接写 w8(w,0x50/0x58..) 绕过它们**
+//   （绕过 = 记账漂移 = 对齐悄悄错，且只在特定表达式形状下崩，最难查）。
+int push_rax(struct W *w, struct Emit *em) {
+  w8(w, 0x50);                       // push rax（本行必须裸字节写：写成 push_rax(...) = 递归 = 栈溢出）
+  em->rspoff = 1 - em->rspoff;
+  return 0;
+}
+int pop_reg(struct W *w, struct Emit *em, int r) {   // r：0=rax 1=rcx 2=rdx
+  w8(w, 0x58 + r);                   // pop r64
+  em->rspoff = 1 - em->rspoff;
+  return 0;
 }
 
 // 回填 32 位小端（跳转/调用/ExitProcess 统一走它）
@@ -506,6 +527,30 @@ int is_addr_val(struct Ast *a, int n) {
   return 0;
 }
 
+// —— 2026-10-18（task 2b / rev4）：T1「装地址的 int」节点查询 ——
+//   解析层 mark_t1_nodes 把标记落在 pmark（值 2）：**读**节点 = 8 字节读、**存**节点 = 8 字节写。
+//   ⚠️ 与 is_addr_val 的分工（对应真 flint 的 is_addr_value vs is_addr_expr）：
+//     本判据只用于「存宽 / 实参整搬 / int→指针零扩展」这三处消费；
+//     **算术与比较的宽度仍按 is_addr_val** —— 真 flint 侧 T1 的算术**仍是 32 位语义**
+//     （src\codegen.c 的 is_addr_expr 对 T1 槽返回 false），boot 别自作聪明改成 64 位。
+int is_t1(struct Emit *em, int n) {
+  if (n < 0) { return 0; }
+  if (em->pmark[n] == 2) { return 1; }
+  return 0;
+}
+// —— 2026-10-18（task 2b / ptr64a）：API 调用结果 = **完整 64 位**（句柄/地址兼容，SPEC 决策 17）——
+//   真 flint 侧：`check_ptr_target` 对任何 API 返回值放行，随后指针目标一律 `slot_store_rax64`
+//   （**从不按声明返回类型截断**）⇒ `int *p = VirtualAlloc(...)`（样本里把 API 声明成 `int`）拿到的是
+//   完整 64 位地址。boot 侧 k35/k36 原先「非地址类 → mov eax,eax 零扩展」把高 32 位砍掉：
+//   MEM_TOP_DOWN 分到的 >4GB 地址随即被截断 ⇒ 解引用即 0xC0000005（ptr64a 的原症状）。
+int is_api_call(struct Ast *a, struct Emit *em, int n) {
+  int *kd = a->kind;
+  int *vv = a->val;
+  if (n < 0) { return 0; }
+  if (kd[n] != 10) { return 0; }
+  if (fn_api(em->fpty[vv[n]]) == 1) { return 1; }
+  return 0;
+}
 // —— 2026-09-21（卡 T-20260921-215305 第二刀）：比较 → 标志位的共用 helper ——
 // 老路：比较**总是**算成 0/1 的值（cmp + setcc + movzx），控制流处再 test + jz ⇒ 条件处白付 3 条。
 // 本刀把"发 cmp、把结果留在标志位"抽出来给两处共用：值路径接 setcc / 条件路径接 jcc（反面条件）。
@@ -518,16 +563,16 @@ int gen_cmp_flags(struct Ast *a, int idx, struct W *w, struct Emit *em) {
   int k = kd[idx];
   if (k < 11 || k > 16) { return 0; }
   gen_expr(a, ll[idx], w, em);
-  w8(w, 0x50);                                    // push rax（lv）
+  push_rax(w, em);                                    // push rax（lv）
   gen_expr(a, rr[idx], w, em);
   if (is_addr_val(a, ll[idx]) == 1 || is_addr_val(a, rr[idx]) == 1) {   // B2j：地址类比较走 64 位 cmp（v1.4.15：判据统一走 is_addr_val）
     w8(w, 0x48); w8(w, 0x89); w8(w, 0xC1);        // mov rcx, rax（rv）
     if (is_addr_val(a, rr[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC8); }  // movsxd rcx, eax
-    w8(w, 0x58);                                  // pop rax（lv）
+    pop_reg(w, em, 0);                                  // pop rax（lv）
     if (is_addr_val(a, ll[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0); }  // movsxd rax, eax
     w8(w, 0x48); w8(w, 0x39); w8(w, 0xC8);        // cmp rax, rcx（lv - rv）
   } else {
-    w8(w, 0x59);                                  // pop rcx（lv）→ eax=rv, ecx=lv
+    pop_reg(w, em, 1);                                  // pop rcx（lv）→ eax=rv, ecx=lv
     w8(w, 0x87); w8(w, 0xC8);                     // xchg eax, ecx → eax=lv, ecx=rv
     w8(w, 0x39); w8(w, 0xC8);                     // cmp eax, ecx（lv - rv）
   }
@@ -1122,15 +1167,18 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
   } else if (k == 6) {                // 变量读：mov eax, [rbp-off]（off=(相对槽+1)*8）
     int pr6 = preg_of(em, vv[idx]);                // 第四刀：已提升的槽 → mov eax, rXd
     if (pr6 > 0) { em_ld_reg(w, pr6); }
+    else if (em->pmark[idx] == 2) { em_ld64(w, 0, (vv[idx] + 1) * 8); }   // T1：装地址的 int → 8 字节读（高半完整）
     else { em_ld32(w, (vv[idx] + 1) * 8); }
   } else if (k == 23) {               // B2i 本地 int 数组下标读（升序：元素 i 在基址 +8i）
     int sib23 = sib_ok(a, rr[idx]);                // 第五刀 A1：资格判据**在发射任何字节之前**判完
     gen_expr(a, rr[idx], w, em);                   // 下标 → eax（两种口径都先算下标）
     if (sib23 == 1) {
+      w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);         // movsxd rax, eax（负下标：32 位写零扩展会把 -1 变 4G）
       int sb23 = sib_of(0, 2, 5);                    // rax ×4 ＋ rbp（2026-10-17 int 元素 4 字节）
       w8(w, 0x8B); em_sib_rbp(w, 0, sb23, (ll[idx] + 1) * 8);   // mov eax, [rbp + rax*4 - off]
     } else {
       w8(w, 0xC1); w8(w, 0xE0); w8(w, 0x02);         // shl eax, 2（下标 ×4 字节）
+      w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);         // movsxd rax, eax（同上；顺序同真 flint 老路 imul+movsxd）
       em_lea(w, 1, (ll[idx] + 1) * 8);               // lea rcx, [rbp-off]（基址 = 最低槽）
       w8(w, 0x8B); w8(w, 0x04); w8(w, 0x01);         // mov eax, [rcx + rax*1]
     }
@@ -1142,11 +1190,13 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     int sib28 = sib_ok(a, rr[idx]);                // 第五刀 A1（判据先判完）
     gen_expr(a, rr[idx], w, em);                   // 下标 → eax（两种口径都先算下标）
     if (sib28 == 1) {
+      w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);         // movsxd rax, eax（负下标符号扩展；`q[-1]` = 上一槽）
       int sb28 = sib_of(0, 2, 1);                    // rax ×4 ＋ rcx（2026-10-17 int* 元素 4 字节）
       em_ld64(w, 1, (ll[idx] + 1) * 8);              // mov rcx, [rbp-off]（指针）
       w8(w, 0x8B); em_sib_rcx(w, 0, sb28);           // mov eax, [rcx + rax*4]
     } else {
       w8(w, 0xC1); w8(w, 0xE0); w8(w, 0x02);         // shl eax, 2（下标 ×4 字节）
+      w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);         // movsxd rax, eax（同上）
       em_ld64(w, 1, (ll[idx] + 1) * 8);              // mov rcx, [rbp-off]
       w8(w, 0x8B); w8(w, 0x04); w8(w, 0x01);         // mov eax, [rcx + rax*1]
     }
@@ -1187,26 +1237,26 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     int wd = code / 100 - op * 10;                 // 宽度：1 字节 / 4 / 8
     int post = code - code / 100 * 100;            // 1 = 后缀（表达式值 = 旧值）
     gen_expr(a, ll[idx], w, em);                   // rax = 目标地址
-    w8(w, 0x50);                                   // push rax（地址）
+    push_rax(w, em);                                   // push rax（地址）
     if (wd == 1) { w8(w, 0x0F); w8(w, 0xB6); w8(w, 0x00); }          // movzx eax, byte [rax]
     else if (wd == 8) { w8(w, 0x48); w8(w, 0x8B); w8(w, 0x00); }     // mov rax, [rax]
     else { w8(w, 0x8B); w8(w, 0x00); }                               // mov eax, [rax]
-    w8(w, 0x50);                                   // push rax（旧值 = 运算左值）
-    if (post == 1) { w8(w, 0x50); }                // 后缀：再留一份旧值
+    push_rax(w, em);                                   // push rax（旧值 = 运算左值）
+    if (post == 1) { push_rax(w, em); }                // 后缀：再留一份旧值
     gen_expr(a, rr[idx], w, em);                   // rax = 右值
     w8(w, 0x48); w8(w, 0x89); w8(w, 0xC1);         // mov rcx, rax
     if (wd == 8 && is_addr_val(a, rr[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC8); }  // movsxd rcx, ecx（v1.4.15：右值本身是地址类就不动）
-    w8(w, 0x58);                                   // pop rax（左值）
+    pop_reg(w, em, 0);                                   // pop rax（左值）
     if (wd == 8) { em_apply(w, op, 1); } else { em_apply(w, op, 0); }
     if (post == 1) {
-      w8(w, 0x5A);                                 // pop rdx（旧值）
-      w8(w, 0x59);                                 // pop rcx（地址）
+      pop_reg(w, em, 2);                                 // pop rdx（旧值）
+      pop_reg(w, em, 1);                                 // pop rcx（地址）
       if (wd == 1) { w8(w, 0x88); w8(w, 0x01); }
       else if (wd == 8) { w8(w, 0x48); w8(w, 0x89); w8(w, 0x01); }
       else { w8(w, 0x89); w8(w, 0x01); }
       w8(w, 0x48); w8(w, 0x89); w8(w, 0xD0);       // mov rax, rdx（后缀值 = 旧值）
     } else {
-      w8(w, 0x59);                                 // pop rcx（地址）
+      pop_reg(w, em, 1);                                 // pop rcx（地址）
       if (wd == 1) { w8(w, 0x88); w8(w, 0x01); w8(w, 0x0F); w8(w, 0xB6); w8(w, 0xC0); }
       else if (wd == 8) { w8(w, 0x48); w8(w, 0x89); w8(w, 0x01); }
       else { w8(w, 0x89); w8(w, 0x01); }
@@ -1217,10 +1267,10 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     //   求值次序照 gen_expr 的惯例：先右值（push 保命）→ 再地址。
     int wd66 = vv[idx] / 100;
     gen_expr(a, rr[idx], w, em);                   // rax = 右值
-    w8(w, 0x50);                                   // push rax（值）
+    push_rax(w, em);                                   // push rax（值）
     gen_expr(a, ll[idx], w, em);                   // rax = 目标地址
     w8(w, 0x48); w8(w, 0x89); w8(w, 0xC1);         // mov rcx, rax
-    w8(w, 0x58);                                   // pop rax（值）
+    pop_reg(w, em, 0);                                   // pop rax（值）
     if (wd66 == 1) { w8(w, 0x88); w8(w, 0x01); }                              // mov [rcx], al
     else if (wd66 == 8) { w8(w, 0x48); w8(w, 0x89); w8(w, 0x01); }            // mov [rcx], rax
     else { w8(w, 0x89); w8(w, 0x01); }                                        // mov [rcx], eax
@@ -1285,12 +1335,20 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     if (argc > 4) { extra = argc - 4; }
     int total = 32 + extra * 8;
     if (total - total / 16 * 16 != 0) { total = total + 8; }
+    // 2026-10-18（task 2b / align2_probe）：**call 时 rsp 必须 ≡0**
+    //   进入本节点时若 rsp≡8（左值已 push，见 k1/k2 与比较的 push 暂存），total 再加 8 字节垫片；
+    //   垫片与参数区、影子空间一起 sub/add，多出来的 8 字节落在参数区**下面**（地址相对 rsp 算），
+    //   不影响 [rsp+8k] 的实参落位。实参求值期间 rsp≡0（所以嵌套调用不需要再垫），
+    //   求值完再把记账恢复成"进入时"的值。
+    int rsp_in = em->rspoff;
+    if (rsp_in == 1) { total = total + 8; }
     // v1.4.26：32 参时 total 可达 256 ⇒ `sub rsp,imm8` 装不下（imm8 只到 127），必须走 imm32 形态
     if (total < 128) {
       w8(w, 0x48); w8(w, 0x83); w8(w, 0xEC); w8(w, total);      // sub rsp, total（imm8）
     } else {
       w8(w, 0x48); w8(w, 0x81); w8(w, 0xEC); w32(w, total);     // sub rsp, total（imm32）
     }
+    em->rspoff = 0;                                             // 参数区已降到 16 对齐位置
     int kk = argc - 1;
     while (kk >= 0) {
       gen_expr(a, ar[base + kk], w, em);                      // 实参 → rax
@@ -1318,19 +1376,19 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     //      `mov ecx/edx/r8d/r9d,[rsp+off]` ＋ `movsxd r64,eax` = 源寄存器配对错 ⇒ 寄存器里
     //      留下的是**上一步的陈旧 eax**（不是刚取的实参）⇒ 所有非地址实参静默换值。
     if (argc > 0) {
-      if (is_addr_val(a, ar[base + 0]) == 1) { w8(w, 0x48); w8(w, 0x8B); w8(w, 0x4C); w8(w, 0x24); w8(w, 0); }   // mov rcx,[rsp]
+      if (is_addr_val(a, ar[base + 0]) == 1 || is_t1(em, ar[base + 0]) == 1) { w8(w, 0x48); w8(w, 0x8B); w8(w, 0x4C); w8(w, 0x24); w8(w, 0); }   // mov rcx,[rsp]
       else { w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 0); w8(w, 0x48); w8(w, 0x63); w8(w, 0xC8); }          // mov eax,[rsp] + movsxd rcx,eax
     }
     if (argc > 1) {
-      if (is_addr_val(a, ar[base + 1]) == 1) { w8(w, 0x48); w8(w, 0x8B); w8(w, 0x54); w8(w, 0x24); w8(w, 8); }   // mov rdx,[rsp+8]
+      if (is_addr_val(a, ar[base + 1]) == 1 || is_t1(em, ar[base + 1]) == 1) { w8(w, 0x48); w8(w, 0x8B); w8(w, 0x54); w8(w, 0x24); w8(w, 8); }   // mov rdx,[rsp+8]
       else { w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 8); w8(w, 0x48); w8(w, 0x63); w8(w, 0xD0); }          // mov eax,[rsp+8] + movsxd rdx,eax
     }
     if (argc > 2) {
-      if (is_addr_val(a, ar[base + 2]) == 1) { w8(w, 0x4C); w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 16); }  // mov r8,[rsp+16]
+      if (is_addr_val(a, ar[base + 2]) == 1 || is_t1(em, ar[base + 2]) == 1) { w8(w, 0x4C); w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 16); }  // mov r8,[rsp+16]
       else { w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 16); w8(w, 0x4C); w8(w, 0x63); w8(w, 0xC0); }          // mov eax,[rsp+16] + movsxd r8,eax
     }
     if (argc > 3) {
-      if (is_addr_val(a, ar[base + 3]) == 1) { w8(w, 0x4C); w8(w, 0x8B); w8(w, 0x4C); w8(w, 0x24); w8(w, 24); }  // mov r9,[rsp+24]
+      if (is_addr_val(a, ar[base + 3]) == 1 || is_t1(em, ar[base + 3]) == 1) { w8(w, 0x4C); w8(w, 0x8B); w8(w, 0x4C); w8(w, 0x24); w8(w, 24); }  // mov r9,[rsp+24]
       else { w8(w, 0x8B); w8(w, 0x44); w8(w, 0x24); w8(w, 24); w8(w, 0x4C); w8(w, 0x63); w8(w, 0xC8); }          // mov eax,[rsp+24] + movsxd r9,eax
     }
     int *pp = em->patch_pos;
@@ -1351,6 +1409,7 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
       w32(w, 0);
     }
     w8(w, 0x48); w8(w, 0x81); w8(w, 0xC4); w32(w, total);     // add rsp, total
+    em->rspoff = rsp_in;                                       // 记账恢复到进入本节点时的值（垫片已随 add 撤掉）
   } else if (k == 20) {               // B2d 逻辑非：!(x) = (x == 0)
     gen_expr(a, ll[idx], w, em);
     w8(w, 0x85); w8(w, 0xC0);                       // test eax, eax
@@ -1400,11 +1459,11 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     // B2j：地址链 p±n 真 64 位（对齐真 flint gen_binop wide；int 侧 movsxd 符号扩展）
     // v1.4.15：判据统一走 is_addr_val —— 节点 60 的结果若本身是地址类，绝不会被当成 int 处理
     gen_expr(a, ll[idx], w, em);
-    w8(w, 0x50);                                    // push rax（lv）
+    push_rax(w, em);                                    // push rax（lv）
     gen_expr(a, rr[idx], w, em);                    // rax = rv
     w8(w, 0x48); w8(w, 0x89); w8(w, 0xC1);          // mov rcx, rax
     if (is_addr_val(a, rr[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC8); }   // movsxd rcx, eax
-    w8(w, 0x58);                                    // pop rax（lv，全 64 位）
+    pop_reg(w, em, 0);                                    // pop rax（lv，全 64 位）
     if (is_addr_val(a, ll[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0); }   // movsxd rax, eax
     if (k == 1) { w8(w, 0x48); w8(w, 0x01); w8(w, 0xC8); }   // add rax, rcx
     else { w8(w, 0x48); w8(w, 0x29); w8(w, 0xC8); }          // sub rax, rcx
@@ -1428,9 +1487,9 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     //    且短路求值保证"前一档接管后、后一档连判据都不会跑"（判据里有 preg_of / 带界检查，跑了也只是白跑）。
     // 二元算术 / 位运算（老路 —— 一字未改）
     gen_expr(a, ll[idx], w, em);
-    w8(w, 0x50);                      // push rax（lv）
+    push_rax(w, em);                      // push rax（lv）
     gen_expr(a, rr[idx], w, em);
-    w8(w, 0x59);                      // pop rcx（lv）
+    pop_reg(w, em, 1);                      // pop rcx（lv）
     if (k == 1) {                     // lv + rv
       w8(w, 0x01); w8(w, 0xC8);       // add eax, ecx
     } else if (k == 2) {              // lv - rv
@@ -1607,6 +1666,10 @@ int emit_stmt(struct Ast *a, int idx, struct W *w, struct Emit *em) {
       if (fused == 0) {                       // 老路 —— 一字未改
         gen_expr(a, rr[idx], w, em);
         if (pr7 > 0) { em_st_reg(w, pr7); }
+        else if (em->pmark[idx] == 2) {       // T1：装地址的 int 槽 → 8 字节写（高半永远确定）
+          if (is_addr_val(a, rr[idx]) == 0 && is_t1(em, rr[idx]) == 0) { w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0); }  // movsxd rax, eax（普通 int 值符号扩展）
+          em_st64_rax(w, (ll[idx] + 1) * 8);  // mov [rbp-off], rax
+        }
         else { em_st32(w, (ll[idx] + 1) * 8); } // mov [rbp-off], eax
       }
     }
@@ -1615,9 +1678,10 @@ int emit_stmt(struct Ast *a, int idx, struct W *w, struct Emit *em) {
       int sib24 = sib_ok(a, rr[idx]);         // 第五刀 A1（判据先判完）
       gen_expr(a, rr[idx], w, em);            // 下标 → eax
       if (sib24 == 0) { w8(w, 0xC1); w8(w, 0xE0); w8(w, 0x02); }   // 老路：先按 **32 位**缩放（×4 字节）
-      w8(w, 0x50);                            // push rax（新档 = 未缩放索引 ／ 老路 = 缩放偏移）
+      w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);  // movsxd rax, eax（负下标符号扩展：否则 push 进栈的是 4G 偏移）
+      push_rax(w, em);                            // push rax（新档 = 未缩放索引 ／ 老路 = 缩放偏移）
       gen_expr(a, vv[idx], w, em);            // 值 → eax
-      w8(w, 0x5A);                            // pop rdx
+      pop_reg(w, em, 2);                            // pop rdx
       if (sib24 == 1) {
         int sb24 = sib_of(2, 2, 5);                   // rdx ×4 ＋ rbp（int 元素 4 字节）
         w8(w, 0x89); em_sib_rbp(w, 0, sb24, (ll[idx] + 1) * 8);    // mov [rbp + rdx*4 - off], eax
@@ -1630,9 +1694,10 @@ int emit_stmt(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     int sib29 = sib_ok(a, rr[idx]);           // 第五刀 A1（判据先判完）
     gen_expr(a, rr[idx], w, em);              // 下标 → eax
     if (sib29 == 0) { w8(w, 0xC1); w8(w, 0xE0); w8(w, 0x02); }   // 老路：先按 32 位缩放（×4 字节）
-    w8(w, 0x50);                              // push rax（索引）
+    w8(w, 0x48); w8(w, 0x63); w8(w, 0xC0);    // movsxd rax, eax（负下标符号扩展）
+    push_rax(w, em);                              // push rax（索引）
     gen_expr(a, vv[idx], w, em);              // 值 → eax
-    w8(w, 0x5A);                              // pop rdx
+    pop_reg(w, em, 2);                              // pop rdx
     em_ld64(w, 1, (ll[idx] + 1) * 8);         // mov rcx, [rbp-off]（指针，两种口径同一条）
     if (sib29 == 1) {
       int sb29 = sib_of(2, 2, 1);               // rdx ×4 ＋ rcx（int* 元素 4 字节）
@@ -1659,27 +1724,27 @@ int emit_stmt(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     else { w8(w, 0x88); w8(w, 0x85); w32(w, 0 - cw2); }
   } else if (k == 35 || k == 36) {            // B2f 指针变量赋值 / 指针声明+初始化
     gen_expr(a, rr[idx], w, em);
-    if (is_addr_val(a, rr[idx]) == 0) { w8(w, 0x89); w8(w, 0xC0); }   // int → 指针：零扩展（v1.4.15：地址类不再被抹高 32 位）
+    if (is_addr_val(a, rr[idx]) == 0 && is_t1(em, rr[idx]) == 0 && is_api_call(a, em, rr[idx]) == 0) { w8(w, 0x89); w8(w, 0xC0); }   // int → 指针：零扩展（v1.4.15：地址类不再被抹高 32 位；T1 标记槽与 API 返回值同为完整 64 位）
     em_st64_rax(w, (ll[idx] + 1) * 8);        // mov [rbp-off], rax
   } else if (k == 38) {                       // B2f char* 下标写（字节，升序）
     gen_expr(a, rr[idx], w, em);              // 下标 → eax
-    w8(w, 0x50);                              // push rax
+    push_rax(w, em);                              // push rax
     gen_expr(a, vv[idx], w, em);              // 值 → eax
-    w8(w, 0x5A);                              // pop rdx
+    pop_reg(w, em, 2);                              // pop rdx
     em_ld64(w, 1, (ll[idx] + 1) * 8);         // mov rcx, [rbp-off]
     w8(w, 0x88); w8(w, 0x04); w8(w, 0x11);    // mov [rcx + rdx], al
   } else if (k == 40) {                       // B2f 本地 char 数组下标写（字节，升序）
     int sb40 = sib_of(2, 0, 5);               // 第五刀 A1：rdx ×1 ＋ rbp（char 无缩放 ⇒ 无条件进本档）
     gen_expr(a, rr[idx], w, em);              // 下标 → eax
-    w8(w, 0x50);                              // push rax（索引）
+    push_rax(w, em);                              // push rax（索引）
     gen_expr(a, vv[idx], w, em);              // 值 → eax
-    w8(w, 0x5A);                              // pop rdx
+    pop_reg(w, em, 2);                              // pop rdx
     w8(w, 0x88); em_sib_rbp(w, 0, sb40, (ll[idx] + 1) * 8);   // mov [rbp + rdx*1 - off], al
   } else if (k == 54) {                       // B2j：*q = expr（宽度随被指对象类型）
     gen_expr(a, rr[idx], w, em);              // rax = 值
-    w8(w, 0x50);                              // push rax
+    push_rax(w, em);                              // push rax
     gen_expr(a, ll[idx], w, em);              // rax = 地址
-    w8(w, 0x5A);                              // pop rdx（值）
+    pop_reg(w, em, 2);                              // pop rdx（值）
     if (ty[ll[idx]] == 2) { w8(w, 0x88); w8(w, 0x10); }                    // mov [rax], dl
     else if (ty[ll[idx]] == 3) { w8(w, 0x48); w8(w, 0x89); w8(w, 0x10); }  // mov [rax], rdx
     else { w8(w, 0x89); w8(w, 0x10); }                                     // mov [rax], edx
@@ -1702,11 +1767,13 @@ int emit_stmt(struct Ast *a, int idx, struct W *w, struct Emit *em) {
   } else if (k == 9) {                        // return
     gen_expr(a, ll[idx], w, em);
     if (em->has_mg == 1) {                    // B2l：托管变量函数 → 存返回值 → 清理 → 取回
-      w8(w, 0x50);                            // push rax（返回值）
+      push_rax(w, em);                            // push rax（返回值）
       w8(w, 0x48); w8(w, 0x83); w8(w, 0xEC); w8(w, 8);   // sub rsp, 8（push 后 ≡8 → 清理内 call 需 ≡0）
+      em->rspoff = 0;                                  // 2026-10-18：sub 8 后重新回到 16 对齐（记账同步）
       em_cleanup(w, em);
       w8(w, 0x48); w8(w, 0x83); w8(w, 0xC4); w8(w, 8);   // add rsp, 8
-      w8(w, 0x58);                            // pop rax
+      em->rspoff = 1;
+      pop_reg(w, em, 0);                            // pop rax
     }
     // B4b（2026-09-09 用户拍板）：char 值返回函数 → 返回处 movzx 截断到 0..255（对齐真 flint 与 SPEC 第 165 行）
     if (em->is_main == 0 && fn_retptr(em->fpty[em->mgfi]) == 4) {
@@ -1863,6 +1930,7 @@ int emit_all(struct Ast *a, struct Parse *p, struct W *cw, struct Emit *em) {
   int *pp = em->patch_pos;
   int *pf = em->patch_fn;
   em->main_idx = p->main_idx;
+  em->pmark = p->pmark;                        // T1 标记表（解析层写、发射层只读）
   em->npatch = 0;
   em->nexit = 0;
   em->blk = p->blk;
@@ -1899,6 +1967,7 @@ int emit_all(struct Ast *a, struct Parse *p, struct W *cw, struct Emit *em) {
       w8(cw, 0x48); w8(cw, 0x81); w8(cw, 0xEC); w32(cw, rem);    // sub rsp, rem
     }
     int pj = 0;                                // 保存入口寄存器（npreg==0 → 这段一条不发）
+    em->rspoff = 0;                            // 2026-10-18：序言之后 rsp 恒 16 对齐（记账起点）
     while (pj < em->npreg) {
       em_preg_save(cw, pj + 1, frame + (pj + 1) * 8);
       pj = pj + 1;
@@ -2393,6 +2462,8 @@ struct Env {
   int *sflat;          // B2f：struct 表
   int *aflat;          // B2g：api 表
   int *spool;          // B2g：字符串池
+  int *stmp;           // 2026-10-18（str5）：字符串池重排的暂存区（与池同尺寸；字节缓冲用 int* 承载）
+  int *sseen;          // 2026-10-18（str5）：池项**边界链**表（按字节偏移；同池尺寸）
   // 2026-09-21（卡 T-20260921-194703）：全局变量表（`.data`）
   int *gpos; int *glen; int *gty; int *gn; int *gval; int *ghas; int *gdoff;
   int *gp_pos; int *gp_gi;
@@ -2817,7 +2888,82 @@ int splice_file(char *name, char *out, int outcap, struct IncSt *st) {
   out[o] = 0;
   return o;
 }
-// 编译单个程序并写盘：0=成功；1=tokenize 空 2=parse 失败 4=CreateFileA(写)失败
+// ===== 2026-10-18（task 2b / str5）：字符串池按 **ctx 序**重排（对齐真 flint）=====
+//   真 flint（src\codegen.c）：函数**生成顺序 = main 最先、其余按源序**，字符串区按 ctx 序紧凑排布
+//   ⇒ 「main 的字面量在前」。boot 解析期按**源序**入池（main 不一定最先被解析）⇒ 跨函数字符串
+//   地址差的符号反过来：str5（main 的 "M" 与 foo 的 "N"）真 flint 给 2、boot 原给 -2。
+//   做法（只重排**已解析完**的池，不碰解析过程）：
+//     ① 池项边界靠**节点**定，不靠 NUL 扫描 —— 字面量里有内嵌 `\0`（audit5 的 "A\0B"），
+//        `while (pool[off] != 0)` 会在第一个内嵌 \0 处截断，把一条串劈成两条。正解：
+//        把每个字符串节点（k41）的偏移标进 nxt[]，再**从池尾往前**串成「下一条的起点」链，长度 = nxt[off]-off。
+//     ② 按 [main] 再 [其余源序] 遍历函数：本函数节点区间 = (上一个非 api 函数体的 fbody, 本函数 fbody]；
+//        区间里的字符串节点按节点序搬进新池并**同步改写节点 val**（池与节点永远成对）。
+//     ③ 没有任何节点引用的池项（解析回退留下的孤儿条目）**自然被丢弃** —— 它们进不了产物，
+//        而真 flint 的池里本来就没有它们。
+//   ⚠️ 只改**排布**、不改内容；同一函数内相邻两条串的距离逐字节保持不变（长度由邻居边界算出）。
+int reorder_pool(struct Parse *p, struct Ast *a, int *tpi, int *nxt) {
+  char *tmp = tpi;                              // 字节缓冲：字段/形参只能是 int*，下标前先局部化（本文件纪律）
+  int *kd = a->kind;
+  int *vv = a->val;
+  int *fbd = p->fbody;
+  int *fpty = p->fpty;
+  char *pool = p->spool;
+  int spcur = p->spcur;
+  int nf = p->nfuncs;
+  int z = 0;
+  while (z < spcur) { nxt[z] = 0; z = z + 1; }   // 0 = 本字节不是池项起点
+  int n0 = 0;
+  int ncnt = a->cnt;
+  while (n0 < ncnt) {                            // ① 标出所有池项起点
+    if (kd[n0] == 41) { nxt[vv[n0]] = 1; }
+    n0 = n0 + 1;
+  }
+  int next = spcur;
+  int i9 = spcur - 1;
+  while (i9 >= 0) {                              // 从池尾往前串边界链（含最后一条 = 到 spcur）
+    if (nxt[i9] == 1) { nxt[i9] = next; next = i9; }
+    i9 = i9 - 1;
+  }
+  int cur = 0;
+  int pass = 0;
+  while (pass < 2) {                             // ② 按 ctx 序搬池
+    int fi = 0;
+    while (fi < nf) {
+      int take = 0;
+      if (pass == 0) { if (fi == p->main_idx) { take = 1; } }
+      else { if (fi != p->main_idx) { take = 1; } }
+      if (take == 1 && fn_api(fpty[fi]) == 0) {
+        int lo = 0;
+        int fj = fi - 1;
+        int done = 0;
+        while (fj >= 0 && done == 0) {
+          if (fn_api(fpty[fj]) == 0) { lo = fbd[fj] + 1; done = 1; }
+          fj = fj - 1;
+        }
+        int n = lo;
+        while (n <= fbd[fi]) {
+          if (kd[n] == 41) {
+            int off = vv[n];
+            int len = nxt[off] - off;
+            if (len > 0) {
+              int k = 0;
+              while (k < len) { tmp[cur + k] = pool[off + k]; k = k + 1; }
+              vv[n] = cur;
+              cur = cur + len;
+            }
+          }
+          n = n + 1;
+        }
+      }
+      fi = fi + 1;
+    }
+    pass = pass + 1;
+  }
+  int i3 = 0;
+  while (i3 < cur) { pool[i3] = tmp[i3]; i3 = i3 + 1; }
+  p->spcur = cur;
+  return 0;
+}
 // 5=WriteFile 失败 6=written 不符 7=帧超限（B2b 读盘；B2c 多函数；B2d 控制流）
 int compile_one(char *src, int n, char *name, struct Env *e) {
   struct TokOut to;
@@ -2923,6 +3069,9 @@ int compile_one(char *src, int n, char *name, struct Env *e) {
   struct W cw;
   cw.p = e->code;
   cw.cur = 0;
+  // 2026-10-18（task 2b / str5）：字符串池按 ctx 序重排（main 先、其余源序）—— 必须**在 emit_all 之前**
+  //   （发射层的 sp_off 回填读的就是节点 val；重排把池与节点 val 一起改，两者永远成对）。
+  reorder_pool(&pa, &a, e->stmp, e->sseen);   // 边界链走 sseen（按字节偏移的 int 表）
   struct Emit em;
   em.len = 0;
   em.entry_off = 0;
@@ -3022,6 +3171,8 @@ int main() {
   int *preg_n = VirtualAlloc(0, 4096, 0x3000, 4);
   int *preg_slot = VirtualAlloc(0, 16384, 0x3000, 4);
   int *pmark = VirtualAlloc(0, 1048576, 0x3000, 4);      // 第四刀：节点引用标记（与 AST 表同尺寸）
+  char *stmp = VirtualAlloc(0, 262144, 0x3000, 4);       // 2026-10-18（str5）：字符串池重排暂存
+  int *sseen = VirtualAlloc(0, 1048576, 0x3000, 4);      // 2026-10-18（str5）：池项认领标记
   int *fstart = VirtualAlloc(0, 4096, 0x3000, 4);
   int *args = VirtualAlloc(0, 524288, 0x3000, 4);         // **65536** 实参（2026-09-21：8192 → 65536）
   int *patch_pos = VirtualAlloc(0, 65536, 0x3000, 4);    // 8192 调用点
@@ -3079,6 +3230,8 @@ int main() {
   e.preg_n = preg_n;
   e.preg_slot = preg_slot;
   e.pmark = pmark;
+  e.stmp = stmp;
+  e.sseen = sseen;
   e.fstart = fstart;
   e.args = args;
   e.patch_pos = patch_pos;

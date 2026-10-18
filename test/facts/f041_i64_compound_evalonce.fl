@@ -1,0 +1,120 @@
+// f041_i64_compound_evalonce.fl -- int_64 P2: the left value of a compound assignment is
+// evaluated EXACTLY ONCE (side effects in the left value must not run twice).
+//
+// WHY THIS PROBE EXISTS: the natural way to write the sugar is `a op= b  =>  a = a op b`,
+// but that spells the left value twice -- `a[i++] += 1` would then bump `i` twice and write
+// the wrong element, and `a[ix()] += 1` would call ix() twice. This probe pins the opposite:
+// every call-counter below must end on the value a single-evaluation implementation produces.
+//
+// HOW IT IS IMPLEMENTED (design decision D11: sugar flattens at source level, codegen untouched):
+// parse.c rewrites `LV op= RHS` into
+//     t = &LV;   *t = *t op RHS      (t = one anonymous int_64* frame slot per site)
+// `&LV` appears exactly once in the rewritten tree, and the frame slot is written before it is
+// read, so: the index/pointer expression runs once, and the store target is the address that
+// was computed once (not recomputed after the right value's side effects).
+//
+// SENTINEL: one bit per check; exit 42 only when the whole mask is 4095.
+// The program prints the observed values and the call counter first.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed): Node.js BigInt simulation of the
+// pinned int_64 semantics plus an explicit call counter, one shot
+// (E:\FLINT-lab\tmp\int64p2\tmp\i64calc.js):
+//   node tmp\i64calc.js
+//   -> a[ix()]+=1 -> 1 / calls 1 / a[ix()]|=16 -> 17 / calls 2 /
+//      (*pick())+=1 -> 1000000000001 / calls 3 / (*pick())<<=40 -> 1099511627776 / calls 4 /
+//      (*pick())>>=40 -> 1 / calls 5 / a[i++]+=1 -> a[2] 1, i 3 / a[i++]|=2 -> a[3] 2, i 4 /
+//      rv=(a[i++]+=10) 10, i 1, a[0] 10 / y+=2 then x+=y 302, y 202 / s.f+=ix() -> 1099511627777,
+//      calls 6 / a[ix()]+=ix() -> 1, calls 8 / garr[ix()]+=1 -> 1099511627777, calls 9
+//   (**the call counters are the deliverable here**: a `LV = LV op RHS` expansion would print
+//     calls 2/4/6/... and i=5 after two `a[i++]` statements, i.e. mask 0.)
+//
+// REVIEW COMMAND (worktree: replace E:\FLINT-lab with E:\FLINT-lab\tmp\int64p2):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f041_i64_compound_evalonce -Compiler flint -ExpectExit 42
+// criterion: program exit = 42, stdout contains "mask=4095"
+//
+// WHY THE OPPOSITE END (boot) IS NOT COMPARED: boot has no int_64 yet (P2), so this probe is
+// flint-only by design -- it is NOT a boot divergence (see docs decision D10 / int64 research 2.10).
+//
+// ASCII only, no BOM. No includes. 42 = all bits set, 7 = at least one bit missing.
+int calls = 0;
+int_64 garr[4];
+
+struct S { int_64 f; }
+
+// Bumps the counter and returns index 1 -- used in the LEFT value of a compound assignment.
+int ix() {
+  calls = calls + 1;
+  return 1;
+}
+
+// Bumps the counter and returns the address of the global int_64 array -- used as `*pick()`.
+int_64 *pick() {
+  calls = calls + 1;
+  return garr;
+}
+
+int main() {
+  int mask = 0;
+  int_64 a[4];
+  a[0] = 0;
+  a[1] = 0;
+  a[2] = 0;
+  a[3] = 0;
+
+  // ---- left value contains a call: it must run once, not twice ----
+  a[ix()] += 1;
+  if (calls == 1 && a[1] == 1) { mask = mask + 1; }
+  a[ix()] |= 16;
+  if (calls == 2 && a[1] == 17) { mask = mask + 2; }
+
+  // ---- left value is `*call()`: the call yields the address, once ----
+  garr[0] = 1000000000000;
+  (*pick()) += 1;
+  if (calls == 3 && garr[0] == 1000000000001) { mask = mask + 4; }
+  garr[0] = 1;
+  (*pick()) <<= 40;
+  if (calls == 4 && garr[0] == 1099511627776) { mask = mask + 8; }
+  (*pick()) >>= 40;
+  if (calls == 5 && garr[0] == 1) { mask = mask + 16; }
+
+  // ---- the required `a[i++] +=` form: i advances exactly once ----
+  int i = 2;
+  a[i++] += 1;
+  if (i == 3 && a[2] == 1) { mask = mask + 32; }
+  a[i++] |= 2;
+  if (i == 4 && a[3] == 2) { mask = mask + 64; }
+
+  // ---- expression value of `a[i++] += v` is the new value; i still advances once ----
+  i = 0;
+  int_64 rv = (a[i++] += 10);
+  if (i == 1 && a[0] == 10 && rv == 10) { mask = mask + 128; }
+
+  // ---- nested compound assignments each own their scratch slot ----
+  int_64 nx = 100;
+  int_64 ny = 200;
+  nx += (ny += 2);
+  if (nx == 302 && ny == 202) { mask = mask + 256; }
+
+  // ---- struct field, right value is a call (only the right value runs) ----
+  struct S s;
+  s.f = 1099511627776;
+  s.f += ix();
+  if (calls == 6 && s.f == 1099511627777) { mask = mask + 512; }
+
+  // ---- call in the index AND in the right value: one each ----
+  a[1] = 0;
+  a[ix()] += ix();
+  if (calls == 8 && a[1] == 1) { mask = mask + 1024; }
+
+  // ---- global int_64 array element with a call index ----
+  garr[1] = 1099511627776;
+  garr[ix()] += 1;
+  if (calls == 9 && garr[1] == 1099511627777) { mask = mask + 2048; }
+
+  print(["calls=", calls, " i=", i, "\n"]);
+  print(["a0=", a[0], " a1=", a[1], " a2=", a[2], " a3=", a[3], "\n"]);
+  print(["garr0=", garr[0], " garr1=", garr[1], " rv=", rv, " s.f=", s.f, "\n"]);
+  print(["nx=", nx, " ny=", ny, " mask=", mask, " expect=4095\n"]);
+  if (mask == 4095) { return 42; }
+  return 7;
+}

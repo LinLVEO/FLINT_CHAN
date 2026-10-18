@@ -208,24 +208,40 @@ function Get-LimitFact {
 }
 
 # ------------------------------------------------------------------ 文件集合 / 计数
+# ExcludeRx  : 按**文件名**排除（正则）。
+# ExcludeDir : 按**目录名**排除，任意深度命中即跳过该子树（相对 $Dir 的路径按段比较）。
+#   为什么要它（2026-10-16，任务 4/4）：`test\tmp` 是本仓库 .gitignore 掉的临时产物目录，
+#   `test\边界探针.ps1` 每跑一次就往 `test\tmp\边界探针\` 里写一批 .fl。语料计数若把它算进去，
+#   文档门会因为「刚跑过探针」而假红（293 -> 342）—— 而探针本身就是门的一步，等于门自己污染
+#   自己的真值源。排除规则属于**计数口径**，所以必须写在取数器里（唯一真值源），不许在文档里
+#   写死"少算 43 个"这种数字：目录清空后计数不变，才说明口径对。
 function Get-FileSet {
-  param([string]$Dir, [string]$NameRx, [switch]$Recurse, [string]$ExcludeRx = '')
+  param([string]$Dir, [string]$NameRx, [switch]$Recurse, [string]$ExcludeRx = '', [string[]]$ExcludeDir = @())
   $full = Join-Path $rootFull $Dir
   if (-not (Test-Path -LiteralPath $full)) { throw ('missing directory: ' + $Dir) }
   $items = @()
   if ($Recurse) { $items = @(Get-ChildItem -LiteralPath $full -Recurse -File -ErrorAction SilentlyContinue) }
   else { $items = @(Get-ChildItem -LiteralPath $full -File -ErrorAction SilentlyContinue) }
+  $base = $full.TrimEnd([char[]]('\', '/'))
   $sel = New-Object System.Collections.ArrayList
   foreach ($it in $items) {
     if ($NameRx -ne '' -and ($it.Name -notmatch $NameRx)) { continue }
     if ($ExcludeRx -ne '' -and ($it.Name -match $ExcludeRx)) { continue }
+    if ($ExcludeDir.Count -gt 0 -and $it.DirectoryName.Length -gt $base.Length) {
+      $relDir = $it.DirectoryName.Substring($base.Length)
+      $skip = $false
+      foreach ($seg in ($relDir -split '[\\/]')) {
+        if ($seg -ne '' -and ($ExcludeDir -contains $seg)) { $skip = $true; break }
+      }
+      if ($skip) { continue }
+    }
     [void]$sel.Add($it)
   }
   return @($sel)
 }
 function Get-CountFact {
-  param([string]$K, [string]$Dir, [string]$NameRx, [string]$Cmd, [switch]$Recurse, [string]$ExcludeRx = '', [switch]$SumLf, [switch]$SumBytes)
-  $set = Get-FileSet -Dir $Dir -NameRx $NameRx -Recurse:$Recurse -ExcludeRx $ExcludeRx
+  param([string]$K, [string]$Dir, [string]$NameRx, [string]$Cmd, [switch]$Recurse, [string]$ExcludeRx = '', [string[]]$ExcludeDir = @(), [switch]$SumLf, [switch]$SumBytes)
+  $set = Get-FileSet -Dir $Dir -NameRx $NameRx -Recurse:$Recurse -ExcludeRx $ExcludeRx -ExcludeDir $ExcludeDir
   if ($set.Count -eq 0) { throw ('no file matched ' + $NameRx + ' under ' + $Dir) }
   $val = 0
   if ($SumLf) {
@@ -241,10 +257,12 @@ function Get-CountFact {
   }
   $scopeNote = ', top level'
   if ($Recurse) { $scopeNote = ', recursive' }
+  $exNote = ''
+  if ($ExcludeDir.Count -gt 0) { $exNote = ', excluding dir(s): ' + ($ExcludeDir -join ',') }
   $unit = 'files'
   if ($SumLf) { $unit = 'lines (LF 0x0A)' }
   elseif ($SumBytes) { $unit = 'bytes (sum of file length)' }
-  $src = $Dir + ' (' + $NameRx + $scopeNote + ', ' + $set.Count + ' files; unit: ' + $unit + ')'
+  $src = $Dir + ' (' + $NameRx + $scopeNote + ', ' + $set.Count + ' files' + $exNote + '; unit: ' + $unit + ')'
   return New-Fact $K ([string]$val) $src $Cmd (Get-MaxMTimeFrom $set)
 }
 
@@ -918,7 +936,7 @@ function Get-Fact([string]$k) {
     $f = Get-CountFact -K $k -Dir 'src' -NameRx '\.h$' -ExcludeRx '\.bak' -SumBytes -Cmd 'sum of (Get-Item src\*.h).Length'
   }
   elseif ($k -eq 'test-samples') { $f = Get-CountFact -K $k -Dir 'test\samples' -NameRx '\.fl$' -Cmd 'Get-ChildItem test\samples\*.fl' }
-  elseif ($k -eq 'test-corpus') { $f = Get-CountFact -K $k -Dir 'test' -NameRx '\.fl$' -Recurse -Cmd 'Get-ChildItem test -Recurse -Filter *.fl' }
+  elseif ($k -eq 'test-corpus') { $f = Get-CountFact -K $k -Dir 'test' -NameRx '\.fl$' -Recurse -ExcludeDir 'tmp' -Cmd 'Get-ChildItem test -Recurse -Filter *.fl (excluding test\tmp\)' }
   elseif ($k -eq 'facts-probes') { $f = Get-CountFact -K $k -Dir 'test\facts' -NameRx '\.fl$' -Cmd 'Get-ChildItem test\facts\*.fl' }
   elseif ($k -eq 'probe-cases' -or $k -eq 'probe-ok' -or $k -eq 'probe-wall' -or $k -eq 'probe-gap') {
     $pc = Get-ProbeCounts
