@@ -1,0 +1,308 @@
+// map_lib.fl — FLINT 标准库（新增批）：开放寻址哈希表（键 = 0 结尾字节串，值 = 8 字节槽）
+//
+// 为什么有它：仓库里没有哈希表 —— JSON / 配置 / 日志 / 去重统计都需要"按名字取值"，
+//   vec_lib 只能按下标取。本库补这一格，并且刻意沿用 vec_lib 的既定路线
+//   "8 字节槽 + 传地址拷贝"：值不是 int，而是任意 8 字节量（int / double / 指针 /
+//   函数指针），map_put 从你给的地址原样拷 8 字节进去，map_get 把槽地址还给你。
+//
+// 为什么是"传地址"而不是 int 传值：FLINT 的 int 变量虽然占 8 字节槽，但算术按 32 位
+//   截断（实测：0x40000000*4 == 0、0x80000000/2 == -1073741824，见 tmp\buflib\
+//   lang_H_width.fl），地址/大整数一旦流经 int 变量就掉高位。所以 8 字节量只能靠
+//   "把地址交给库、由库 memcpy 8 字节"来搬运（与 vec_lib 文件头同一条纪律）。
+//
+// 用法（典型）：
+//   struct Map m2;
+//   m2.tab = 0; m2.cap = 0; m2.count = 0; m2.used = 0;   // 未初始化态：tab == 0
+//   if (std::map_init(&m2, 0) < 0) { ... }               // cap 非正 = 默认 8；否则向上取 2 的幂
+//   int v = 42;
+//   std::map_put(&m2, "answer", &v);                     // 0 = 新增，1 = 覆盖同名键
+//   int *slot = std::map_get(&m2, "answer");             // 没有则 0
+//   int got = 0;
+//   std::memcpy(&got, slot, 8);                          // 取满 8 字节请按地址拷贝！
+//   std::map_del(&m2, "answer");                         // 0 = 删掉，1 = 本来没有
+//   std::map_count(&m2);                                 // 存活的键数
+//   std::map_free(&m2);                                  // 幂等：再调一次仍返回 0
+//
+// 关键陷阱（实测口径，探针 tmp\buflib\probe_map.fl 复现）：
+//   * map_get 返回的是 int*，但 p[0] 只读低 4 字节（`p[i]` = 8 字节槽距 / 4 字节写宽，
+//     见 lang_D_ptrwidth.fl）。要拿满 8 字节必须按地址拷 8 字节，别用 p[0]。
+//     这也是为什么签名给 int*：它只是"这个 8 字节槽的地址"，不是"一个 int 的值"。
+//
+// 结构 / 布局：
+//   struct Map { int *tab; int cap; int count; int used; }
+//     tab   = 表块起始（内部件，不要直接动）；0 = 未初始化
+//     cap   = 槽数，恒为 2 的幂（hash & (cap-1) 取 home 槽）
+//     count = 存活键数（= map_count 的返回值）
+//     used  = 存活 + 墓碑数（装载因子的分子）
+//   表块 = cap 个 16 字节槽：槽 i 的 [0..7) = 键指针，[8..16) = 值的 8 字节槽
+//     键指针 0 = 空槽；键指针 1 = 墓碑（删过的槽，探测链不能断）；其余 = 本库自己
+//     分配并拥有的键副本（0 结尾字节串）
+//
+// 设计约定：
+//   * 哈希 = FNV-1a 32 位（offset basis 0x811C9DC5，prime 16777619），逐字节
+//     `h = (h ^ (byte & 255)) * prime`，每步 & 0xFFFFFFFF 保 32 位。判据里拿
+//     PowerShell + BigInteger 独立算过一组期望值（含 > 2^31 的）对齐。
+//   * 冲突 = 线性探测（+1 环绕），删除 = 墓碑（不清探测链）。
+//   * 扩容判据 = used * 4 >= cap * 3（装载因子 >= 3/4，含墓碑）→ 槽数翻倍重建，
+//     重建会顺手把墓碑清掉（这是墓碑被回收的唯一时机）。
+//   * 键是"拷贝"进来的：map_put 立刻把键字节复制到本库自己分配的块里，所以调用方
+//     的临时缓冲（局部 char 数组、Buf 内部指针）之后怎么变/怎么 free 都不影响表。
+//   * 上限：int 算术 32 位 ⇒ 槽数 * 16 不能越过 2^31，所以本库显式设槽数上限
+//     2^27 = 0x08000000（表块 2 GiB）。map_init 请求更大直接返回 -1；cap 非正 = 默认 8。
+//     这既是 32 位算术的安全线，也让"超大 → 负值"这条失败路径可确定触发。
+//   * 自包含：不 include 任何库（FLINT 的 include 无守卫，重复 include 会撞重复定义）。
+//     map_* 里除 std::map_* 之外的函数都是内部件，不是公开 API。
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+struct Map { int *tab; int cap; int count; int used; }
+
+// --- 内部：逐字节复制 ---
+int map_icopy(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return n;
+}
+
+// --- 内部：把"srca 地址处的 8 字节"写到 base + off ---
+// 注意：srca 是"8 字节量的地址"，不是 8 字节量本身（与 vec_lib 的 vec_iset 同一纪律：
+// 指针值/大整数只能按地址搬，不能经 int 参数或指针参数本身传值）
+int map_izput(char *base, int off, char *srca) {
+  map_icopy(base + off, srca, 8);
+  return 0;
+}
+
+// --- 内部：开一张 ncap 槽的空表（全 0 = 全空槽）；0 = 失败 ---
+char *map_inewtab(int ncap) {
+  char *t = VirtualAlloc(0, ncap * 16, 0x3000, 4);
+  if (t == 0) { return 0; }
+  int i = 0;
+  while (i < ncap * 16) { t[i] = 0; i = i + 1; }
+  return t;
+}
+
+// --- 内部：FNV-1a 32 位 ---
+int map_hash(char *k) {
+  int h = 0x811C9DC5;
+  int i = 0;
+  while (k[i] != 0) {
+    h = h ^ (k[i] & 255);
+    h = (h * 16777619) & 0xFFFFFFFF;
+    i = i + 1;
+  }
+  return h;
+}
+
+// --- 内部：0 结尾字节串相等 → 1 ---
+int map_keq(char *a, char *b) {
+  int i = 0;
+  int r = 2;
+  while (r == 2) {
+    if (a[i] != b[i]) { r = 0; }
+    else if (a[i] == 0) { r = 1; }
+    else { i = i + 1; }
+  }
+  return r;
+}
+
+// --- 内部：读槽 i 的键指针（0 = 空，1 = 墓碑，其余 = 键副本地址）---
+char *map_keyat(char *tab, int i) {
+  char *kp = 0;
+  map_icopy(&kp, tab + i * 16, 8);
+  return kp;
+}
+
+// --- 内部：找 key 所在槽下标；没有 → -1（墓碑继续探，空槽停）---
+int map_islot(struct Map *m, char *key) {
+  char *tab = m->tab;
+  int mask = m->cap - 1;
+  int i = map_hash(key) & mask;
+  int step = 0;
+  int r = -1;
+  while (step < m->cap) {
+    char *kp = map_keyat(tab, i);
+    if (kp == 0) { step = m->cap; }                 // 空槽：探测链到此为止
+    else {
+      if (kp != 1) {
+        if (map_keq(kp, key) == 1) { r = i; step = m->cap; }
+      }
+      if (step < m->cap) { i = (i + 1) & mask; step = step + 1; }
+    }
+  }
+  return r;
+}
+
+// --- 内部：新键该插的槽（优先复用第一个墓碑）；表满 → -1 ---
+int map_ifree_slot(struct Map *m, char *key) {
+  char *tab = m->tab;
+  int mask = m->cap - 1;
+  int i = map_hash(key) & mask;
+  int step = 0;
+  int empty = -1;
+  int tomb = -1;
+  while (step < m->cap) {
+    char *kp = map_keyat(tab, i);
+    if (kp == 0) {
+      if (empty < 0) { empty = i; }
+      step = m->cap;
+    } else {
+      if (kp == 1) {
+        if (tomb < 0) { tomb = i; }
+      }
+      if (step < m->cap) { i = (i + 1) & mask; step = step + 1; }
+    }
+  }
+  if (tomb >= 0) { return tomb; }
+  return empty;
+}
+
+// --- 内部：把 key 复制一份存进槽 idx，并写入 8 字节值；0 = 好，-1 = 失败 ---
+// 前置条件：key 尚不在表里（map_put 先查过）
+int map_iplace(struct Map *m, int idx, char *key, int *valptr) {
+  int klen = 0;
+  while (key[klen] != 0) { klen = klen + 1; }
+  char *kc = VirtualAlloc(0, klen + 1, 0x3000, 4);
+  if (kc == 0) { return -1; }
+  int j = 0;
+  while (j <= klen) { kc[j] = key[j]; j = j + 1; }   // 含结尾 0
+  char *tab = m->tab;
+  int *kp = kc;
+  map_izput(tab, idx * 16, &kp);
+  map_izput(tab, idx * 16 + 8, valptr);
+  return 0;
+}
+
+// --- 内部：重建到 ncap 槽（只搬存活键，墓碑就此回收）；0 = 好，-1 = 失败（原表不动）---
+int map_irehash(struct Map *m, int ncap) {
+  if (ncap > 0x08000000) { return -1; }              // 槽数上限 2^27（与 map_init 同一口径；也挡住 ncap*16 的 32 位溢出）
+  char *otab = m->tab;
+  int ocap = m->cap;
+  char *ntab = map_inewtab(ncap);
+  if (ntab == 0) { return -1; }
+  int nmask = ncap - 1;
+  int i = 0;
+  while (i < ocap) {
+    char *kp = map_keyat(otab, i);
+    if (kp != 0 && kp != 1) {                        // 存活键
+      int j = map_hash(kp) & nmask;
+      int busy = 1;
+      while (busy == 1) {
+        if (map_keyat(ntab, j) == 0) { busy = 0; }
+        else { j = (j + 1) & nmask; }
+      }
+      int *npx = kp;
+      map_izput(ntab, j * 16, &npx);                 // 键块所有权跟着搬，不重新分配
+      map_icopy(ntab + j * 16 + 8, otab + i * 16 + 8, 8);
+    }
+    i = i + 1;
+  }
+  VirtualFree(otab, 0, 0x8000);
+  m->tab = ntab;
+  m->cap = ncap;
+  m->used = m->count;                                // 墓碑清零
+  return 0;
+}
+
+// 建表：cap 非正 = 默认 8；否则向上取 2 的幂（槽数上限 2^27）。0 = 成功，-1 = 失败（含重复 init）
+int std::map_init(struct Map *m, int cap) {
+  if (m == 0) { return -1; }
+  if (m->tab != 0) { return -1; }
+  if (cap < 1) { cap = 8; }
+  if (cap > 0x08000000) { return -1; }               // 槽数上限 2^27（见文件头"上限"）
+  int n = 1;
+  while (n < cap) {
+    n = n * 2;
+    if (n < 1) { return -1; }                        // 32 位算术溢出保护
+  }
+  char *t = map_inewtab(n);
+  if (t == 0) { return -1; }
+  m->tab = t;
+  m->cap = n;
+  m->count = 0;
+  m->used = 0;
+  return 0;
+}
+
+// 写入：从 valptr 拷 8 字节。0 = 新增，1 = 覆盖同名键，-1 = 失败
+int std::map_put(struct Map *m, char *key, int *valptr) {
+  if (m == 0) { return -1; }
+  if (m->tab == 0) { return -1; }
+  if (key == 0) { return -1; }
+  if (valptr == 0) { return -1; }
+  char *tab = m->tab;
+  int hit = map_islot(m, key);
+  if (hit >= 0) {
+    map_izput(tab, hit * 16 + 8, valptr);
+    return 1;
+  }
+  int slot = map_ifree_slot(m, key);
+  if (slot < 0) {                                    // 理论上装载因子挡住；兜底再翻倍
+    if (map_irehash(m, m->cap * 2) < 0) { return -1; }
+    slot = map_ifree_slot(m, key);
+    if (slot < 0) { return -1; }
+  }
+  tab = m->tab;                                      // rehash 后表块可能换了
+  char *before = map_keyat(tab, slot);               // 空槽才涨 used，复用墓碑不涨
+  if (map_iplace(m, slot, key, valptr) < 0) { return -1; }
+  m->count = m->count + 1;
+  if (before == 0) { m->used = m->used + 1; }
+  if (m->used * 4 >= m->cap * 3) {                   // 装载因子 >= 3/4 → 翻倍重建
+    map_irehash(m, m->cap * 2);                      // 失败不回滚：条目已写入，成功优先
+  }
+  return 0;
+}
+
+// 查值槽地址；没有 → 0。取满 8 字节请按地址拷（p[0] 只有低 4 字节）
+int *std::map_get(struct Map *m, char *key) {
+  if (m == 0) { return 0; }
+  if (m->tab == 0) { return 0; }
+  if (key == 0) { return 0; }
+  int hit = map_islot(m, key);
+  if (hit < 0) { return 0; }
+  char *tab = m->tab;
+  char *vp = tab + hit * 16 + 8;
+  return vp;
+}
+
+// 删键：0 = 删掉了，1 = 本来没有，-1 = 失败。删掉的槽留墓碑，键副本释放
+int std::map_del(struct Map *m, char *key) {
+  if (m == 0) { return -1; }
+  if (m->tab == 0) { return -1; }
+  if (key == 0) { return -1; }
+  int hit = map_islot(m, key);
+  if (hit < 0) { return 1; }
+  char *tab = m->tab;
+  char *kp = map_keyat(tab, hit);
+  if (kp != 0 && kp != 1) { VirtualFree(kp, 0, 0x8000); }
+  int *tomb = 1;
+  map_izput(tab, hit * 16, &tomb);
+  m->count = m->count - 1;
+  return 0;
+}
+
+// 存活键数；未初始化 → 0
+int std::map_count(struct Map *m) {
+  if (m == 0) { return 0; }
+  if (m->tab == 0) { return 0; }
+  return m->count;
+}
+
+// 释放全部键副本 + 表块，结构清零（可重复调用）；返回 0
+int std::map_free(struct Map *m) {
+  if (m == 0) { return 0; }
+  char *tab = m->tab;
+  if (tab != 0) {
+    int i = 0;
+    while (i < m->cap) {
+      char *kp = map_keyat(tab, i);
+      if (kp != 0 && kp != 1) { VirtualFree(kp, 0, 0x8000); }
+      i = i + 1;
+    }
+    VirtualFree(tab, 0, 0x8000);
+  }
+  m->tab = 0;
+  m->cap = 0;
+  m->count = 0;
+  m->used = 0;
+  return 0;
+}

@@ -1,0 +1,21 @@
+// pos-ptrstep-char.fl -- v1.6.4 `-strict` 第五类正例（本该**不报**）。
+// 1 字节元素指针上的裸 ± 就是**正解**：char 元素宽 1 字节 ⇒ 字节步进 == 元素步进，
+// 所以 `doc + 4` 就等于 &doc[4]（决策 40 之所以把裸 ± 定成字节，正是为了字符串/字节缓冲）。
+// 两个来源都覆盖：字符串字面量（ND_STR，本身就是 char*）与 char 数组名（char[] 退化）。
+// 期望值由 test\strict-verify.ps1 的 PowerShell 侧**现算**（不手打）：
+//   doc = "0123456789" ⇒ c4 = doc[4] = '4'、c9 = doc[9] = '9'、d = 9 - 4 = 5
+//   buf[i] = 65 + i ⇒ cb = buf[3] = 68 = 'D'、e = (buf+3) - buf = 3
+//   （char 读出来按**字符**打印——f025 的 ch1=1 / ch6=6 就是这个口径）
+int main() {
+  char *doc = "0123456789";
+  char *c4 = doc + 4;
+  char *c9 = doc + 9;
+  char buf[8];
+  int i = 0;
+  while (i < 8) { buf[i] = 65 + i; i = i + 1; }
+  char *cb = buf + 3;
+  int d = c9 - c4;                        // 地址 − 地址 = 标量差值（不报）
+  print(["ptrstep_char c4=", c4[0], " c9=", c9[0], " d=", d,
+         " cb=", cb[0], " e=", (buf + 3) - buf, "\n"]);
+  return 0;
+}

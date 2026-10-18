@@ -1,0 +1,12 @@
+// f004_str.fl -- ASSERTION F-004: the builtin str([seg, ...]) composes byte-for-byte the
+// same text that print([seg, ...]) would emit for the same segment list.
+// Segments here: "ab" (char*) 12 (int) "c" (char*) (0 - 7) (int).
+// Expected composed text (written independently in the ledger):  ab12c-7
+// The probe wraps the result in [ ] so the judge can anchor with "contains:[ab12c-7]".
+// exit 0 on both ends.
+
+int main() {
+  char *s = str(["ab", 12, "c", 0 - 7]);
+  print(["[", s, "]\n"]);
+  return 0;
+}

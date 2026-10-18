@@ -1,0 +1,131 @@
+// cn_lib.fl — FLINT 标准库：UTF-8 → ANSI(本机 GBK/936) 文本通路
+//
+// ============================ 为什么有它 ============================
+// FLINT 的「字符串」是 char*（以 0 结尾的字节串）。源码里直写的非 ASCII 文本，编译器把它的
+// **UTF-8 字节原样装进产物**（双端实测：tmp\cnlib\probe0.fl 位0，真 flint 与 boot 都 exit 42）。
+// 但 Windows 的 *A 家族 API（TextOutA / MessageBoxA / 菜单 / 标题栏 / CreateFileA 的路径…）
+// 吃的是**本机 ANSI**。本机（中文 Windows）ANSI = GBK(936) ⇒ UTF-8 字节直接喂过去 = 乱码。
+// 本库补的就是这一环：用 Win32 官方两步转码 UTF-8 → UTF-16 → ANSI(CP_ACP)。
+//
+// 蓝本：apps\enginesnap\main.fl 第 22~40 行的 utf8_to_ansi（已在实际程序里每 2 秒跑一次）。
+// 本库相对蓝本的改动只有三处：① 加 cap 预检（见「边界 4」）② 抽出长度受限版 cn_to_ansi_n
+// ③ 补一个库内静态缓冲入口 cn_ansi。
+//
+// ============================== 用法 ==============================
+//   include "cn_lib.fl"                       // 自包含：不 include 别的库（FLINT 的 include 无守卫，
+//                                             // 重复 include 会撞重复定义，所以本库不拉别人）
+//   // ① 调用方自己出缓冲（推荐：无隐藏状态、可重入）：
+//   char buf[256];
+//   int n = std::cn_to_ansi("温度: 56 C", buf, 256);   // n = 写出字节数（**含结尾 0**），<0 = 失败
+//   print([buf, "\n"]);
+//
+//   // ② 库内静态缓冲（省事，直接喂 *A API）：
+//   char *s = std::cn_ansi("温度: 56 C");              // 0 = 超长/失败
+//   if (s != 0) { MessageBoxA(0, s, s, 0); }
+//
+// ============================== 边界 ==============================
+// 1. 返回的字节数**含结尾 0**（对齐蓝本 enginesnap 的口径；「温度」= 4 个 GBK 字节 ⇒ 返回 5）。
+// 2. CP_ACP 是**本机** ANSI：中文 Windows = GBK(936)；换到非 936 语言的机器上转出来是那台机器的
+//    ANSI，不是 GBK。要钉死 GBK 就把本文件里的 codepage 实参 0 改成 936（两处）。
+// 3. **非法 UTF-8 不报错**：MultiByteToWideChar 在 flags=0 下把坏序列替换成 U+FFFD（Win32 口径），
+//    本库不额外检查，也不会因此返回 <0。
+// 4. 失败是**响亮**的，不静默截断：任何 dst 装不下的情况都在**写 dst 之前**判掉并返回 -6
+//    （预检 = 先问一次「转出来要多少字节」）。所以失败时 dst 内容不被改动（已验证，见 probe2 位5）。
+//    返回码分工：-1 入参为空/长度查询失败；-2 中转缓冲分配失败；-3 UTF-8→宽 转换失败；
+//                -4 宽→ANSI 长度查询失败；-5 宽→ANSI 转换失败；-6 dst/cap 不够。
+// 5. std::cn_ansi 用的是**库内全局静态缓冲** cn_sbuf，容量 **4096 字节（含结尾 0 ⇒ 内容上限 4095）**，
+//    上限用 std::cn_ansi_cap() 取，别硬记。语义 = **覆盖**：下一次调用立刻盖掉上一次，
+//    要留住结果必须自己先拷走（同 vec_lib 的「传进去的地址不能留」纪律）。超长返回 0，不截断。
+// 6. 中转宽字符缓冲**每次调用 VirtualAlloc / 立刻 VirtualFree**，不留常驻。取舍：
+//    每次转换多两次内核调用，换「库不持有堆内存、不会漏、不需要全局指针（FLINT 全局不支持指针）」。
+//    未做：短串走栈上快路径（那要引入局部大数组，量过再上）。
+// 7. 线程安全：cn_to_ansi / cn_to_ansi_n 无隐藏状态，可重入；cn_ansi 共用静态缓冲，不安全。
+//
+// 双端：本库只用 MultiByteToWideChar / WideCharToMultiByte / VirtualAlloc / VirtualFree 四条 api，
+//      真 flint 与 boot 都编过（证据见 tmp\cnlib\ 的探针与报告）。
+//
+// 自测（双端都过、全亮返回 42，否则返回未亮的位掩码）：
+//   tmp\cnlib\probe1.fl  转码正确性 6 例
+//   tmp\cnlib\probe2.fl  静态缓冲覆盖语义
+//   tmp\cnlib\probe3.fl  真实文件（apps\student\students.txt / apps\m2_float\config.json）
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+api kernel32 int MultiByteToWideChar(int, int, int, int, int, int);
+api kernel32 int WideCharToMultiByte(int, int, int, int, int, int, int, int);
+
+// 库内静态缓冲。⚠️ 4096 这个数在**三处**出现，必须同步：
+//   ① 本行数组长度 ② std::cn_ansi 里的 cap 实参 ③ std::cn_ansi_cap() 的返回值
+// FLINT 没有 #define / const（见 SPEC 关键字表），所以只能三处写死 + 这条注释。
+// 唯一一个全局变量：FLINT 的全局只支持 char/int/double 标量与数组，且不支持指针 ⇒ 缓冲只能是数组本体。
+char cn_sbuf[4096];
+
+// —— 内部函数（不是公开 API）：UTF-8 → ANSI。n < 0 = 入参以 0 结尾；n >= 0 = 只转前 n 字节 ——
+// 返回写出的字节数（**含结尾 0**），<0 = 失败（分工见文件头「边界 4」）。
+int cn_conv(char *src, int n, char *dst, int cap) {
+  int needw = 0;      // 需要多少个宽字符
+  int needa = 0;      // 需要多少个 ANSI 字节
+  int needc = 0;      // 加上结尾 0 之后要占多少字节
+  int gotw = 0;
+  int gota = 0;
+  int *w = 0;         // 中转宽字符缓冲（VirtualAlloc 出来的，函数出口必还）
+
+  if (src == 0) { return 0 - 1; }
+  if (dst == 0) { return 0 - 1; }
+  if (cap <= 0) { return 0 - 6; }
+
+  // ① 先问宽字符数（不写出来）；n = -1 时含结尾 0
+  needw = MultiByteToWideChar(65001, 0, src, n, 0, 0);
+  if (needw <= 0) { return 0 - 1; }
+
+  // ② 开中转缓冲（+16 是蓝本的余量，留够奇数长度/对齐的余地）
+  w = VirtualAlloc(0, needw * 2 + 16, 0x3000, 4);
+  if (w == 0) { return 0 - 2; }
+
+  // ③ UTF-8 → 宽字符
+  gotw = MultiByteToWideChar(65001, 0, src, n, w, needw);
+  if (gotw <= 0) { VirtualFree(w, 0, 0x8000); return 0 - 3; }
+
+  // ④ 问 ANSI 要多少字节（这一步让失败发生在写 dst 之前）
+  needa = WideCharToMultiByte(0, 0, w, gotw, 0, 0, 0, 0);
+  if (needa <= 0) { VirtualFree(w, 0, 0x8000); return 0 - 4; }
+  needc = needa;
+  if (n >= 0) { needc = needa + 1; }          // 定长入参没有结尾 0 ⇒ 出参要自己补一位
+  if (needc > cap) { VirtualFree(w, 0, 0x8000); return 0 - 6; }
+
+  // ⑤ 宽字符 → ANSI(CP_ACP)
+  gota = WideCharToMultiByte(0, 0, w, gotw, dst, cap, 0, 0);
+  VirtualFree(w, 0, 0x8000);
+  if (gota <= 0) { return 0 - 5; }
+  if (n >= 0) { dst[gota] = 0; return gota + 1; }
+  return gota;
+}
+
+// ============================ 公开 API ============================
+
+// UTF-8 串（以 0 结尾）→ ANSI 写进调用方缓冲 dst（cap 字节）；
+// 返回写出的字节数（**含结尾 0**），<0 = 失败（-6 = cap 不够，且 dst 不被改动）
+int std::cn_to_ansi(char *utf8, char *dst, int cap) {
+  return cn_conv(utf8, 0 - 1, dst, cap);
+}
+
+// 同上，但只转前 n 字节（给「从文件读进来、没有结尾 0」的缓冲用）。
+// n < 0 等价于 std::cn_to_ansi；返回口径相同（也补结尾 0、也含它）
+int std::cn_to_ansi_n(char *utf8, int n, char *dst, int cap) {
+  return cn_conv(utf8, n, dst, cap);
+}
+
+// UTF-8 → ANSI，用**库内静态缓冲** cn_sbuf；
+// 成功 = 指向 cn_sbuf 的 char*（可直接喂给 ui_text / print / MessageBoxA）；失败/超长 = 0（不截断）
+// ⚠️ 覆盖语义：下一次调用盖掉上一次，返回的指针永远是同一个（同一个缓冲）
+char *std::cn_ansi(char *utf8) {
+  int n = 0;
+  if (utf8 == 0) { return 0; }
+  n = std::cn_to_ansi(utf8, cn_sbuf, 4096);   // ⚠️ 4096 与 cn_sbuf 数组长度、cn_ansi_cap() 三处同步
+  if (n < 0) { return 0; }
+  return cn_sbuf;
+}
+
+// 库内静态缓冲上限（字节，**含结尾 0**）⇒ 能装下的最长 ANSI 文本 = 返回值 - 1
+int std::cn_ansi_cap() {
+  return 4096;
+}

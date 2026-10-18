@@ -1,0 +1,174 @@
+// slice_lib.fl — FLINT 标准库（JSON 批）：字符串切片 view（指针 + 长度，**不改原串、不拷贝**）
+//
+// 为什么有它（需求勘定-JSON解析器.md 的 A4）：JSON 解析是"在一段字节里反复切"的活 —— 找 key 的
+//   引号、找分隔符 ':'、找 ','、把两段合起来比。str_lib 只有定长 dst 上的 strcpy/strcat（先算好
+//   缓冲），dstr_lib 是"会自己长"的 Str；两件都要求**先把字节搬走**。切片要的是相反的那一格：
+//   只记"基址 + 偏移 + 长度"，一个字节都不搬，也不碰原串 ⇒ 找分隔符、比两端、再按需落成 Str。
+//
+// 用法（典型）：
+//   char *doc = "  \"k\": \"v\"  ";
+//   struct Slice k;                       // 先声明，再 mk（mk 会写 v->p / v->len）
+//   if (std::slc_mk(&k, doc, 3, 3) < 0) { ... }     // doc 的第 3 字节起 3 字节
+//   std::slc_len(&k);                     // 3
+//   std::slc_at(&k, 0);                   // 第 0 字节（0..255）；越界 → -1
+//   std::slc_eq(&k, "key");               // 1 = 与 0 结尾串相等，0 = 不等，-1 = t == 0
+//   char *q = std::slc_find(&k, "x");     // 切片内首次出现的**基址指针**（不搬字节），找不到 → 0
+//   char buf[8];
+//   std::slc_copy(buf, 8, &k);            // 拷进调用方缓冲并补结尾 0；cap 不够 → -1（不静默截断）
+//   struct Str s;                         // 「落成 Str」由调用方完成（本库不 include dstr_lib）：
+//   s.p = 0; s.len = 0; s.cap = 0;
+//   std::str_init(&s, 0);
+//   std::str_addn(&s, doc + 3, 3);        // str_addn 的 n 就是给切片预留的入口
+//
+// 边界（本机实测口径：真编译器 flint.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
+// 或「未测」—— 探针 test\facts\f019_slice.fl 全程可复现，两端 stdout 逐字节相同）：
+//   * struct 字段不支持 char*：真 flint **实测**报错（dstr_lib/buf_lib 文件头记的是
+//     "char 指针字段暂不支持（v1.0.5）"，boot 端放行 —— 两端分叉）⇒ 本库的基址字段是 `int *p`；
+//     取用处 `char *b = v->p;` 跨指针类型赋值（**实测**可用，承 buf_lib / dstr_lib 先例）。
+//   * int 宽度四处分岔（**实测**：变量/数组元素 = 8 字节槽、struct 字段 = 4 字节、`p[i]` = 4 字节
+//     元素 ＋ 8 字节步长）⇒ 本库**一律**先 `char *b = v->p;` 落到 char* 局部变量上再逐字节存取，
+//     **绝不**写 `v->p[i]`（违反 = 静默错位）。
+//   * 算术按 32 位截断（**实测**）⇒ base + off 的寻址按 32 位口径算；本库不分配内存，没有容量上限
+//     常量（那一条归 dstr_lib / buf_lib）。
+//   * ⚠️ **本库内的 `base + off` 是安全的，调用方手写的指针算术不一定是**（**双端实测**，最小复现
+//     `%TEMP%\repro-addr\test\facts\r.fl`）：`char *p0 = a; p0[i]` 与 `&a[k]` 正确；但数组名/指针
+//     变量做 `+ 常量` 再下标会**静默读到错位的槽** ——
+//       `int ia[8]; int *q3 = ia + 3; q3[0]` → 0（期望 103）；`ia+1/2/3` → 0、`ia+5` → 1694498816
+//     两端输出**逐字节相同**（所以差分门看不见它，是"双端一致地错"）。已实测正确、本库与探针都
+//     只用的写法：`p[i]`（p 是 char* 变量）、`&a[k]`、以及**函数内**的 `base + off`。
+//     ⇒ 建议调用方**不要在切片外面自己做 `doc + off`**：把 base 与 off 一起交给 slc_mk（本库内部
+//     的 `base + off` 实测正确），或先用 slc_mk 建切片再 slc_at / slc_copy 取字节。
+//     **未测**：这条的完整触发条件（推测与数组名在调用点被当成值而非地址有关，未定论）。
+//   * **长度 0 的切片合法**：slc_len → 0、slc_eq(空切片, "") → 1、slc_copy(cap 1) → 0
+//     ⇒ **slc_copy 在 len 0 时仍要求 cap >= 1**（恒补一个结尾 0）—— cap 0 一律 -1。
+//   * slc_find 的返回值是**切片内首次出现的基址指针**（= v->p + i，i 是切片内偏移，**不搬字节**），
+//     找不到 → 0；空 needle（""）→ 返回 v->p（0 长度 needle 在任何位置都匹配，**实测**）。
+//     ⚠️ 0 是"没找到"的哨兵，**不是**"出错"的哨兵：v == 0 / needle == 0 也返回 0（本库不报错）。
+//   * 参数非法一律**响亮返回 -1**，绝不静默：slc_mk 的 v==0 / base==0 / off<0 / n<0；
+//     slc_len / slc_at 的 v==0；slc_eq 的 v==0 / t==0；slc_eqs 的 a==0 / b==0；
+//     slc_copy 的 dst==0 / v==0 / cap<1 / cap <= len。
+//   * slc_at 越界（i<0 或 i>=len）→ -1；否则返回该字节（0..255）。**内嵌 0 字节照原样返回 0**
+//     （切片是长度语义，不是 NUL 语义）—— 注意调用方别把这个 0 当成"越界"（**实测**：返回 0 与
+//     返回 -1 是两件事，探针按 `status == 0 && value == 0` 两段判定）。
+//   * slc_eq 是**长度语义 vs NUL 语义**的桥：逐个比 t 的字节，比到 t 的结尾 0 ⇒ 相等；若切片更长
+//     ⇒ 不等（**实测**）。切片里的内嵌 0 会与 t 的结尾 0 撞上 ⇒ 认为"这一段到此为止"。
+//   * slc_eqs 先比长度（不等直接 0），长度相同再逐字节比；**两个空切片相等**（1），
+//     两个基址不同的空切片**也**相等（**实测**：长度 0 不看基址）。
+//   * slc_copy 的 cap 是**含结尾 0** 的总字节数：成功时写入 len 字节 ＋ 1 个 0，返回 len；
+//     `cap <= len` ⇒ -1 且**一个字节都不写**（先检查后动手，不留半格状态）（**实测**：
+//     cap 恰好够 = len+1 时成功、cap 差 1 字节 = len 时 -1 且 dst 一字未动）。
+//   * **不改原串、不拷贝**：本库**不分配内存、不释放内存**、不 include 任何库（FLINT 的 include
+//     无守卫，重复 include 会撞重复定义）⇒ 切片没有所有权问题，随原串生死；原串被改写或被释放后
+//     切片立即失效（这与 str_s 的"扩容即失效"是同一类约定，本库**未测**越界/悬空读 —— 那是
+//     调用方的责任，没有安全网）。
+//   * slc_mk 不做任何越界检查（它拿不到原串的真实长度 —— 这是切片 view 的**固有**代价）：它只
+//     挡 off<0 / n<0 这类明显非法值。⚠️ **未测**：base 非空但 off/n 越过原串尾部 —— 行为由调用方
+//     负责（读越界就是读越界，本库不掩盖）。
+//   * 自包含：不 include 任何库。本文件内只有内部件 slc_ihex（十六进制数字）—— 其余全是公开 API。
+//   * **与 dstr_lib 解耦**：切片"落成 Str"由调用方用 std::str_addn(&s, base + off, n) 完成
+//     （**实测**：探针里真跑通，且与 slc_copy 的结果逐字节一致）。本库刻意不知道 Str 的存在。
+
+struct Slice { int *p; int len; }
+
+// --- 内部：十六进制数字 → 0..15；非法 → -1 ---
+int slc_ihex(int c) {
+  if (c >= '0' && c <= '9') { return c - '0'; }
+  if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+  if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+  return -1;
+}
+
+// 从 base 的第 off 字节起取 n 字节（**不拷贝、不改原串**）；v==0 / base==0 / off<0 / n<0 → -1
+int std::slc_mk(struct Slice *v, char *base, int off, int n) {
+  if (v == 0) { return -1; }
+  if (base == 0) { return -1; }
+  if (off < 0) { return -1; }
+  if (n < 0) { return -1; }
+  v->p = base + off;
+  v->len = n;
+  return 0;
+}
+
+// 切片长度；v==0 → -1（未 mk 过的结构体是垃圾值，**不猜**）
+int std::slc_len(struct Slice *v) {
+  if (v == 0) { return -1; }
+  return v->len;
+}
+
+// 第 i 字节（0..255）；i<0 / i>=len → -1；内嵌 0 字节**照原样返回 0**
+int std::slc_at(struct Slice *v, int i) {
+  if (v == 0) { return -1; }
+  if (i < 0) { return -1; }
+  if (i >= v->len) { return -1; }
+  char *b = v->p;                     // 必须落到 char* 局部变量（见文件头 int 宽度）
+  return b[i] & 255;
+}
+
+// 与 0 结尾串 t 比：相等 1 / 不等 0；v==0 或 t==0 → -1
+int std::slc_eq(struct Slice *v, char *t) {
+  if (v == 0) { return -1; }
+  if (t == 0) { return -1; }
+  char *b = v->p;
+  int i = 0;
+  while (i < v->len && t[i] != 0) {
+    if (b[i] != t[i]) { return 0; }
+    i = i + 1;
+  }
+  if (i != v->len) { return 0; }      // 切片比 t 长
+  if (t[i] != 0) { return 0; }        // 切片比 t 短
+  return 1;
+}
+
+// 两切片比：相等 1 / 不等 0；a==0 或 b==0 → -1；两个空切片**相等**
+int std::slc_eqs(struct Slice *a, struct Slice *b) {
+  if (a == 0) { return -1; }
+  if (b == 0) { return -1; }
+  if (a->len != b->len) { return 0; }
+  char *pa = a->p;
+  char *pb = b->p;
+  int i = 0;
+  while (i < a->len) {
+    if (pa[i] != pb[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 切片内首次出现 needle 的**基址指针**（= v->p + 偏移，不搬字节）；找不到 / v==0 / needle==0 → 0
+// 返回类型必须是 char*（见文件头）；返回的指针归原串所有，不新分配任何内存
+char *std::slc_find(struct Slice *v, char *needle) {
+  if (v == 0) { return 0; }
+  if (needle == 0) { return 0; }
+  int m = 0;
+  while (needle[m] != 0) { m = m + 1; }
+  char *b = v->p;
+  if (m == 0) { return b; }           // 空 needle：在切片起点匹配
+  if (m > v->len) { return 0; }
+  if (b == 0) { return 0; }
+  int last = v->len - m;
+  int i = 0;
+  while (i <= last) {
+    int k = 0;
+    int hit = 1;
+    while (k < m) {
+      if (b[i + k] != needle[k]) { hit = 0; }
+      k = k + 1;
+    }
+    if (hit == 1) { return b + i; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 拷进调用方缓冲并补结尾 0；成功返回 len，cap 不够（cap <= len）→ -1 **且一个字节都不写**
+int std::slc_copy(char *dst, int cap, struct Slice *v) {
+  if (dst == 0) { return -1; }
+  if (v == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (v->len > cap - 1) { return -1; }   // 先检查后动手（响亮失败，绝不静默截断）
+  char *b = v->p;
+  int i = 0;
+  while (i < v->len) { dst[i] = b[i]; i = i + 1; }
+  dst[v->len] = 0;
+  return v->len;
+}

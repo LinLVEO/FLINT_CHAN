@@ -13,7 +13,6 @@ include "num_lib.fl"
 
 // —— api 声明（user32/gdi32/kernel32 窗口基础集，全单元共用）——
 api kernel32 ptr GetModuleHandleA(int);
-api kernel32 void Sleep(int);
 api user32 int RegisterClassA(int);
 api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
 api user32 int ShowWindow(int, int);
@@ -42,7 +41,6 @@ api gdi32 int GetTextExtentPoint32A(int, int, int, int);   // v1.0.4：精确量
 //   正是它逼着 API 实参上限从 12 提到 16（REG 747/747 含 apifont1.fl 逐参读回验证）。
 api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, int);
 api gdi32 ptr SelectObject(int, int);
-api gdi32 int GetTextFaceA(int, int, int);                 // 自检用：读回 DC 当前字体名
 
 // —— Win32 / UI 结构体（真实 C 布局）——
 struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
@@ -205,7 +203,6 @@ api user32 int UpdateLayeredWindow(int, int, int, int, int, int, int, int, int);
 api gdi32 ptr CreateCompatibleDC(int);
 api gdi32 ptr CreateDIBSection(int, int, int, int, int, int);
 api gdi32 ptr CreateSolidBrush(int);
-api gdi32 int GetPixel(int, int, int);     // v1.4.1：屏幕取色（图层/透明自检用）
 
 struct BMIH { int size; int w; int h; char p1; char p2; char bc1; char bc2;
               int comp; int szimg; int xppm; int yppm; int clrused; int clrimp; }

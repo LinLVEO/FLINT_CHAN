@@ -1,0 +1,31 @@
+// f013_fwdsugar.fl -- pins method sugar whose target function is defined AFTER the call site.
+//
+// WHY: real flint used to REJECT exactly this shape. The pre-scan (collect_funcs) recorded a
+// `struct X *self` parameter as TY_INT (only double/pointer-modifier cases were distinguished),
+// while method_call() requires param_ty[0] == TY_PTR -- so a FORWARD sugar call hit
+// "首参不是接收者指针/引用（收的是值形参）" and failed to compile, while boot compiled the very
+// same file fine (dual-end divergence; flint was the wrong end). Fixed 2026-10-15 in the pre-scan:
+// `(pdbl && !pdir) ? TY_DOUBLE : (pdir ? TY_PTR : TY_INT)`, matching the definition path.
+//
+// This is the ordinary C style (call it, define it later), which the v1.6.0 probes f009/f010
+// did NOT cover -- they defined every method above main. Same lesson as the boot for-overflow:
+// a sample shape that never exercises the real usage shape proves nothing.
+//
+// Bits: 1 = forward pointer receiver, 2 = forward zero-arg, 4 = backward still works; all => 42.
+struct P { int v; }
+
+int P_sub(struct P *self, int k) { self->v = self->v - k; return self->v; }  // defined ABOVE (backward)
+
+int main() {
+  struct P p; p.v = 30;
+  int bits = 0;
+  if (p.add(10) == 40) bits = bits + 1;   // target defined BELOW (forward, pointer receiver)
+  if (p.get() == 40) bits = bits + 2;     // forward, zero args
+  if (p.sub(1) == 39) bits = bits + 4;    // backward, same call syntax
+  if (bits == 7) { return 42; }
+  print(["bits=", bits, "\n"]);
+  return bits;
+}
+
+int P_add(struct P *self, int k) { self->v = self->v + k; return self->v; }
+int P_get(struct P *self) { return self->v; }

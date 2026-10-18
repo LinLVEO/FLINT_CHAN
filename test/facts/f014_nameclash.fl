@@ -1,0 +1,40 @@
+// f014_nameclash.fl -- pins the flat-sugar-name AMBIGUITY that is still open (2026-10-15).
+//
+// The sugar resolves by NAME ONLY: `recv.m(x)` looks up the function literally named
+// `<Struct>_m`. Names are built by joining struct name and method name with '_', so the
+// encoding is NOT injective:
+//     (struct A,   method b_c)  ->  "A_b_c"
+//     (struct A_b, method c)    ->  "A_b_c"      <-- same string, two readings
+//
+// MEASURED TODAY (both compilers): this file COMPILES (exit 0) and the program returns 45,
+// i.e. `ab.c(10)` silently bound to `A_b_c` -- the function written for `struct A` -- and
+// reinterpreted &ab as struct A*. Nothing is reported. The reachability reason is that FLINT's
+// argument checking only goes as far as the COARSE class (test\边界探针.ps1 case 36/37 rejects
+// int<->pointer), and never distinguishes WHICH struct a pointer points to: a plain call
+// `A_b_c(&ab, 10)` without any sugar is accepted too and returns 12.
+//
+// EXPECTED (target) BEHAVIOUR: a loud compile error, because the receiver's struct does not
+// match the function's declared first parameter. Closing it needs per-parameter STRUCT IDENTITY:
+// on flint that is one new field on FuncDef (param_ty[] only records TY_PTR, no struct index);
+// on boot it needs a new per-function record -- and it must NOT be done by repacking boot's
+// `fpty` (ret*100 + pointer-mask + 16), which is the exact class of change that caused the
+// for-overflow bug. Alternative rule-level closure (owner decision): forbid '_' in struct names,
+// which makes the join injective and kills this whole family on both ends for ~no code.
+//
+// Ledger: when this is fixed, the row MUST be re-recorded to expect a compile failure --
+// facts-run.ps1 then exits 1 instead of 0, so the ledger turns red until it is updated.
+// Expected exit today = 45 (11 from a.b_c, 12 from the silent rebind, 22 from ab.d).
+struct A { int v; }
+struct A_b { int w; }
+
+int A_b_c(struct A *self, int k) { return self->v + k; }
+int A_b_d(struct A_b *self, int k) { return self->w + k; }
+
+int main() {
+  struct A a; a.v = 1;
+  struct A_b ab; ab.w = 2;
+  int r1 = a.b_c(10);      // intended reading: (A, b_c)   -> 11
+  int r2 = ab.c(10);       // other reading:    (A_b, c)  -> silently the SAME function -> 12
+  int r3 = ab.d(20);       // (A_b, d) -> 22
+  return r1 + r2 + r3;
+}

@@ -14,6 +14,7 @@ api kernel32 int VirtualFree(int, int, int);   // ⚠️ 每 2 秒转码一次 �
 api kernel32 int GetTickCount();          // 2 秒刷新节拍（ui_lib 未声明，本 app 自己声明）
 api kernel32 int MultiByteToWideChar(int, int, int, int, int, int);
 api kernel32 int WideCharToMultiByte(int, int, int, int, int, int, int, int);
+api kernel32 void Sleep(int);              // 主循环节拍（本 app 自己声明；ui_lib 不再带这条）
 
 // ⚠️ 语言边界（v1.4.8 实测）：**全局变量不支持指针类型**（int*/char*/double* 全局都编不过）
 //   → 路径不做全局常量，直接在调用点用字符串字面量（只读、无副作用）

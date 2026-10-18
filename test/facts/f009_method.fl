@@ -1,0 +1,47 @@
+// f009_method.fl -- fact probe: the method-call sugar recv.name(args) is Byte-for-byte the
+// same thing as the free function Type_name(&recv, args) (M22 section 7 candidate 1, v1.6.0).
+// Definition side is UNCHANGED: a method is a plain free function whose first parameter is the
+// receiver pointer:  int M_add(struct M *self, int x).  Name convention = Structname_methodname.
+// Receiver forms pinned here (both ends must accept them):
+//   value receiver     m.add(4)      => M_add(&m, 4)
+//   pointer receiver   p.add(4)      => M_add(p, 4)      (dot on a struct pointer variable)
+//   pointer receiver   p->add(1)     => M_add(p, 1)      (arrow form)
+// Bit mask, one bit per case; all seven lit => exit 42.  On failure it prints the mask and
+// returns it, so a red run says exactly which case broke.
+struct M { int v; int w; }
+
+int g_seq = 0;
+int tag(int id) { g_seq = g_seq * 10 + id; return id; }
+
+int M_add(struct M *self, int x) { self->v = self->v + x; return self->v; }
+int M_get(struct M *self) { return self->v; }
+int M_set2(struct M *self, int a, int b) { self->v = a; self->w = b; return a * 100 + b; }
+int M_p2(struct M *self, int a, int b) { self->v = a * 10 + b + self->w; return self->v; }
+
+// pointer receiver inside a function that owns a struct pointer parameter
+int chk_dot_ptr(struct M *p, int want) {
+  if (p.add(4) == want) return 1;
+  return 0;
+}
+int chk_arrow(struct M *p, int want) {
+  if (p->add(1) == want) return 1;
+  return 0;
+}
+
+int main() {
+  struct M m;
+  int bits = 0;
+  m.v = 1; m.w = 2;
+  if (m.add(4) == 5) bits = bits + 1;                           // 1 value receiver
+  if (chk_dot_ptr(&m, 9) == 1) bits = bits + 2;                 // 2 pointer receiver (dot)
+  if (chk_arrow(&m, 10) == 1) bits = bits + 4;                  // 3 pointer receiver (arrow)
+  if (m.get() == 10) bits = bits + 8;                           // 4 zero arguments
+  if (m.set2(7, 8) == 708) bits = bits + 16;                    // 5 several args + value used
+  m.add(1);
+  if (m.v == 8) bits = bits + 32;                               // 6 self mutation is visible
+  // 7: arguments are still evaluated RIGHT-TO-LEFT (ledger F-008): tag(2) runs before tag(1)
+  if (m.p2(tag(1), tag(2)) == 20 && g_seq == 21) bits = bits + 64;
+  if (bits == 127) { return 42; }
+  print(["bits=", bits, "\n"]);
+  return bits;
+}

@@ -1,0 +1,27 @@
+// f010_method_ci.fl -- pins the NAME-CONVENTION FALLBACK that the repo's existing libraries need:
+// the sugar name is <Struct>_<method>; when the exact spelling is absent, the compiler accepts a
+// UNIQUE candidate whose struct-name segment differs only in ASCII case (struct Seg <-> seg_mk,
+// struct Db <-> db_list). That is what lets apps\student\student.fl call db.find(id) for db_find.
+// More than one candidate = loud compile error (-224 / ambiguity), never a guess.
+// Bits: 1 value receiver, 2 zero args, 4 pointer receiver; all lit => exit 42.
+struct Seg { int n; int k; }
+
+int seg_mk(struct Seg *s, int n, int k) { s->n = n; s->k = k; return n + k; }
+int seg_get(struct Seg *s) { return s->n; }
+
+int chk_ptr(struct Seg *p, int want) {
+  if (p.mk(want, 1) == want + 1) return 1;
+  return 0;
+}
+
+int main() {
+  struct Seg s;
+  int bits = 0;
+  s.n = 0; s.k = 0;
+  if (s.mk(7, 5) == 12) bits = bits + 1;     // seg_mk(&s, 7, 5)
+  if (s.get() == 7) bits = bits + 2;         // seg_get(&s)
+  if (chk_ptr(&s, 7) == 1) bits = bits + 4;  // pointer receiver, same fallback
+  if (bits == 7) { return 42; }
+  print(["bits=", bits, "\n"]);
+  return bits;
+}

@@ -13,7 +13,7 @@ int main() {
   i = 0;
   while (i < 5) {
     sum = sum + *p;
-    p = p + 8;
+    p = p + 4;
     i = i + 1;
   }
   return sum;

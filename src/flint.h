@@ -29,6 +29,10 @@ typedef enum {
   TK_PUNCT, // 运算符/分隔符
   TK_EOF,   // 文件结束
   TK_DBL,   // v1.1.0：浮点字面量（dval=已解析的 double 值）——与 TK_NUM 分开，不放宽整数规则
+  TK_NUM64, // v1.7.0：64 位整数字面量（lval=已解析的 long long）——**追加在末尾**，
+            //   与 TK_NUM 分开：TK_NUM 仍是 32 位值（0xFFFFFFFF = -1 的位型语义一个字节不动）。
+            //   词法规则（tokenize.c）：十进制 > INT32_MAX 自动升级 ｜ 十六进制 > 0xFFFFFFFF 或
+            //   9 位以上按 64 位位型 ｜ `L` 后缀强制 64 位。
 } TokenKind;
 
 typedef struct Token Token;
@@ -42,6 +46,7 @@ struct Token {
   char *sval;     // TK_STR：解码后内容（malloc，含内部字节，不含末尾 \0）
   int slen;       // TK_STR：内容字节数
   double dval;    // v1.1.0：TK_DBL 的已解析值（词法层就转成 double，后续各层只认值）
+  long long lval; // v1.7.0：TK_NUM64 的已解析值（不经 double，2^53 以上不丢位）
 };
 
 Token *tokenize(char *p, char *filename);   // v0.9.1：filename 用于报错头（可 NULL）
@@ -116,6 +121,10 @@ typedef enum {
                 //   （不是子树！case 段的内容就是链上它后面的兄弟语句——这样 fallthrough 天然成立）
   ND_CASE,      // case 常量 / default 段标记（只出现在 ND_SWITCH 的 rhs 链上）：
                 //   val=case 常量值；is_default=default 段；label_id=生成期分配的标签号
+  // —— v1.7.0 int_64（64 位有符号整数）——
+  ND_NUM64,     // 64 位字面量：lval = 值（codegen: mov rax,imm64）
+  ND_I2L,       // int → int_64 拓宽（符号扩展：movsxd rax,eax）——隐式提升用
+  ND_L2I,       // int_64 → int 显式收窄（to_int32；取低 32 位）
 } NodeKind;
 
 // 变量类型（v0.7 起；v0.7.x 加结构体）
@@ -132,6 +141,14 @@ typedef enum {
              //   与 TY_PTR 同族：判真/比较/赋值走 64 位通路）；签名信息在 Program.sigs[fn_sig]。
              //   ⚠️ 与 TY_PTR 的区别：TY_PTR 是**数据**指针（可变宽度解引用），TY_FUNCPTR 只能被调用
              //   （`fp(args)` → FF D0 间接调用），不能解引用、不能算术、不能下标——这些一律编译期报错。
+  TY_INT64,  // v1.7.0：int_64 = 64 位有符号整数。
+             //   ⚠️ 与 TY_INT 的区别不是"更宽"，而是**值宽 = 槽宽 = 元素步长**三者相等
+             //   （8 / 8 / 8）⇒ 不存在"半槽读写"，`p[i] == *(p + i*8)`。
+             //   不进 T1「装地址的 int」标记机制（它本来就是 8 字节）；
+             //   不进寄存器分配（slotmap.c 的类型门 `s->ty != TY_INT` 自动排除）。
+             //   **必须**是独立枚举值（不做 TY_INT 的位标志）：parse 83 处 / codegen 27 处
+             //   `TY_INT` 判据靠"不匹配"落到安全侧，位标志会让它们静默变宽。
+             //   末尾追加 ⇒ TY_INT 仍是 0（slotmap.c:48/:201 拿 0 当默认）。
 } Type;
 
 // —— v0.7.x 结构体 ——
@@ -167,6 +184,7 @@ struct Node {
   Node *inc;     // ND_FOR 增量（表达式）
   Node *next;    // 语句链（块内按序串行）/ ND_CALL 的参数链
   int val;       // ND_NUM：值
+  long long lval;// v1.7.0：ND_NUM64 的值（64 位；不经过 double ⇒ 2^53 以上不丢位）
   double dval;   // v1.1.0：ND_DBL 的值（按位型进数据区，movsd 加载）
   char *str;     // ND_STR：字符串内容（token 的 sval，同生命周期）
   int str_len;   // ND_STR：内容字节数
@@ -207,6 +225,22 @@ struct Node {
 bool expr_is_dbl(Node *n);
 Node *expr_widen_dbl(Node *n);              // 需要 double 时，把 int 侧包一层 ND_I2D
 
+// ===== v1.7.0 int_64：与 expr_is_dbl 同族的**单一判据** =====
+// ⚠️ 必须 parse 与 codegen **共用**（`flint.h` 这一处）：浮点首版就是 codegen 自己另判，
+//   导致「幂/widen 后的节点」判据不一致（见上一条注释的教训原文）。
+bool expr_is_i64(Node *n);                  // 这个表达式的值是不是 int_64（含混合运算的提升结果）
+Node *expr_widen_i64(Node *n);              // 需要 64 位时把 32 位侧包一层 ND_I2L（符号扩展）
+// ===== D3：宽度口径的**单点表**（值宽 / 元素步长两列）=====
+// 病根：本仓已有 4 处各抄一份元素宽（parse.c 的 new_lvar 槽数、postfix 的下标缩放、
+//   ptr_step_elem_width 的 -strict 诊断、collect_globals 的 .data 布局），而
+//   parse.c:2915-2918 记着这条 bug 的真实事故：`.data` 按 4 摆、下标按 8 缩放 ⇒ 静默写坏下一个
+//   全局变量。第 5 个类型（int_64）若再手抄一份就是第 5 次分裂 —— 六处调用点一律走下面两个函数。
+//   今天两列**数值相同**（char 1 / int 4 / int_64 8 / double 8 / 指针 8），但两列分开命名：
+//   "值宽"回答「一次读写几个字节」，"元素步长"回答「a[i] 的 i 缩放几倍」——混成一个数
+//   在下一轮改宽度时一定出错（`int` 的元素步长 4 / 全局标量 8 就是现成的反例）。
+int ty_value_bytes(int ty);                 // 值宽：char 1 / int 4 / int_64 8 / double 8 / 指针 8
+int ty_arr_stride(int ty);                  // 元素步长（下标缩放）：同上（int_64 = 8，无半槽）
+
 // ========== v1.3.0 全局变量（PE 第二节 .data）==========
 // 设计要点（2026-09-13；2026-09-15 更正）：全局变量不需要重定位表，是因为**产物里没有任何绝对地址**
 //   （代码用 `[rip+disp32]` 指到 .data，只有 disp 差值）——**与是否 ASLR 无关**。
@@ -235,7 +269,7 @@ uint32_t pe_headers_size(int nsec_all);
 typedef struct {
   char *name;
   int len;
-  int ty;          // Type：TY_INT / TY_CHAR / TY_DOUBLE（标量）｜ TY_ARR（数组）
+  int ty;          // Type：TY_INT / TY_CHAR / TY_DOUBLE / TY_INT64（标量）｜ TY_ARR（数组）
   int elem_ty;     // TY_ARR 的元素类型 / TY_PTR 的指向类型
   int arr_len;     // TY_ARR：元素个数（非数组 = 1）
   int size;        // 本变量占的字节数
@@ -263,6 +297,14 @@ typedef struct {
 //   ⚠️ boot（自举侧）**没有全局变量** ⇒ 那边只能写字面量 32，必须靠 `test\边界探针.ps1` 复核
 //      （纪律：boot 写死的上限一律拿探针复核 ——「当年对齐过」≠「现在还齐」）。
 #define FUNC_MAX_ARGS 32
+
+// —— v1.5.0 str 内建（str([段, ...]) → char*）的静态缓冲上限：**单点定义在这里** ——
+//   注入库（src/main.c 的 LIB_* 分块）里数组声明与超限判定都用 FLINT_STRBUF_CAP_S（"4096" 的字面量形式），
+//   parse.c 的全字面量编译期核算用 FLINT_STRBUF_CAP ⇒ 两处**必须同步**；
+//   main() 启动时有一条自检（atoi(FLINT_STRBUF_CAP_S) != FLINT_STRBUF_CAP → 直接报错退出）防漂移。
+//   语义：可用内容 = CAP-1 字节（末字节固定留给结尾 0）；超过 ⇒ str() 整个返回 0（响亮失败，不静默截断）。
+#define FLINT_STRBUF_CAP 4096
+#define FLINT_STRBUF_CAP_S "4096"
 typedef struct {
   char *name;          // 函数名
   bool is_main;        // 是否 main（入口，须 int 返回、无参）

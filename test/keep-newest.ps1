@@ -1,4 +1,4 @@
-# keep-newest.ps1 -- move the OLDEST blocks of a marker-delimited list into an archive file, verbatim.
+﻿# keep-newest.ps1 -- move the OLDEST blocks of a marker-delimited list into an archive file, verbatim.
 # Why: PROGRESS.md "handover blocks" (keep newest 5) and 记忆.md update-log entries (keep newest 3)
 #   were hand-moved 7 times; every hand-move risked eating a line (see memory: new_string ate the anchor).
 # Safety rails: read/write with explicit UTF8 (no BOM -- .md files never carry one), byte-level backup

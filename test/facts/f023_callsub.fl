@@ -1,0 +1,58 @@
+// f023_callsub.fl -- RUNTIME FORK #3: a CALL RESULT USED DIRECTLY AS A SEGMENT SUBSCRIPT, `f()[0]`.
+//   real flint : the segment is a CHAR value  -> prints the character 'A'
+//   boot       : the segment is an INT value   -> prints the decimal number 65
+// BOTH ENDS COMPILE AND RUN (both exit 0), so the criterion is `differs` on the two ends' raw stdout
+// bytes -- the same shape as f003_xesc.fl and f007_charnul.fl.
+//
+// MEASURED 2026-10-15 (raw bytes, straight out of the runner; the two files live at
+// %TEMP%\dsh-assert\stdout-f023_callsub-<end>.bin):
+//   flint : 17 bytes  callsub=A ref=65
+//           hex  63 61 6c 6c 73 75 62 3d 41 20 72 65 66 3d 36 35 0a
+//   boot  : 18 bytes  callsub=65 ref=65
+//           hex  63 61 6c 6c 73 75 62 3d 36 35 20 72 65 66 3d 36 35 0a
+//   first differing byte = offset 8: 0x41 'A' (flint) vs 0x36 '6' (boot).  boot's line is one byte
+//   longer, so 9 offsets differ in total (computed 2026-10-15 by comparing the two .bin files).
+//   NOTE: the runner's -Compare prints `first_diff_byte=17` here -- for unequal lengths it reports
+//   min(len_a, len_b), which is NOT the true first difference.  That is one more reason the ledger
+//   row uses the two-leg `differs` form instead of -Compare (the other: -Compare also turns red when
+//   one end fails to compile, which must never be allowed to masquerade as a divergence).
+//
+// THE `ref=65` SEGMENT IS THE BUILT-IN SELF-CHECK: it is the plain char literal 'A', which is a
+// NUMBER literal on both ends (kind "int value"), and it prints `65` on BOTH ends.  So the divergence
+// is the TYPE DISPATCH of `f()[0]` -- it is NOT "one end cannot print 65".
+//
+// WHICH END IS THE ODD ONE: boot.  Authority = SPEC.md:157, which fixes the print segment dispatch as
+//   "char* -> whole string / char -> one character / int -> decimal" (Chinese in the SPEC).
+//   `f()` returns `char *`, so `f()[0]` is a char VALUE and the correct segment is ONE BYTE, 0x41.
+//   HOW THE EXPECTED BYTE WAS COMPUTED: [int][char]'A' -> 65 (run 2026-10-15), and the value read is
+//   the first byte of the "AB" literal, so 0x41 is the correct output byte.
+//
+// ROOT CAUSE (read, not guessed -- and it is one node-kind short in boot's dispatcher):
+//   flint : the postfix path types the call-result subscript TY_CHAR (the char* return's element
+//           type), so seg_print_kind() src\parse.c:2204-2208 returns 1 (char) -> _flint_out_char.
+//   boot  : boot\lib_parse.fl:1858-1876 lowers `f()[i]` to the GENERIC deref node **53** (`*q`)
+//           instead of the char-typed subscript node 37; boot\lib_parse.fl:2901-2904 classifies a
+//           segment as char by kind 42 / 37 / 39 or by ty == 2 only -- node 53 over a char element
+//           is NOT in that list, so the dispatch falls through to kind 2 (int) -> _flint_out_int.
+//   SCOPE (measured 2026-10-15 with a scratch file OUTSIDE the repo, same root cause, NOT pinned by
+//   this probe): with `char *p = "AB";` -- `print([*p])` is `A` on flint but `65` on boot, while
+//   `print([p[0]])` is `A` on BOTH (that one uses node 37).  So the fix owner should look at the
+//   kind-53 char dispatch, and a follow-up probe could pin the `*p` instance separately.
+//
+// REVIEW COMMAND (one `||` chain, two legs -- both must exit 0 and their stdout bytes must differ):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f023_callsub -Compiler flint || powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f023_callsub -Compiler boot
+//   criterion: differs
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f023_callsub.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\boot\lib_parse.fl
+//
+// ASCII only, no BOM; prints no pointer value (only the first byte of a string literal and a constant).
+char *f() {
+  return "AB";
+}
+
+int main() {
+  print(["callsub=", f()[0], " ref=", 'A', "\n"]);
+  return 0;
+}

@@ -1,0 +1,52 @@
+// f029_int_lit32_wall.fl -- WIDTH FAMILY #1: the DECIMAL literal 3000000000 (2.79 * 2^31).
+//
+// WHAT IS UNDER TEST: `int i = 3000000000;` -- a decimal literal above INT32_MAX. This is the
+// literal half of "int is 32-bit wide"; the arithmetic half is f031, the storage half is
+// f032/f033, the C-layout half is f034.
+//
+// EXPECTED -- PER END (two ledger rows, one per end; same split as f022/f025):
+//   row A  real flint = MUST REFUSE. MEASURED 2026-10-17 (this round): the compiler prints a
+//          FLINT compile error at line 46 col 11 reading, in Chinese,
+//            "integer literal out of 32-bit range (decimal <= 2147483647, hexadecimal <= 0xFFFFFFFF)"
+//          = the string contains "32 bit" (32 位) and "out of range" (超出), and the compiler
+//          process exits 1 => facts-run.ps1 -Compiler flint exits 1 => criterion `exit=1`.
+//   row B  boot = MUST COMPILE -- and this is the FORK, not an accident: boot has no range check
+//          anywhere, so it takes the literal and the emitted program sees the 32-bit bit pattern
+//          3000000000 & 0xFFFFFFFF = 0xB2D05E00 = -1294967296 (sign-extended into the 8-byte slot).
+//          MEASURED 2026-10-17 (this round): boot compiles it (exit 0) and the program prints
+//          `lit32=negative value=-1294967296` => criterion
+//          `contains:lit32=negative value=-1294967296`.
+//
+// WHICH END IS THE ODD ONE: boot -- exactly the same class as f022 (2147483648) and f025, but a
+// different literal value, so the "hex is allowed up to 0xFFFFFFFF, decimal only up to INT32_MAX"
+// rule in src\tokenize.c:261-262 is pinned at both ends of the decimal range.
+// SPEC authority: SPEC.md:575-576 says out-of-range numeric literals are a COMPILE ERROR and
+// never a silent saturation.
+//
+// HOW THE EXPECTED VALUE WAS COMPUTED (now, never hand-typed):
+//   [int64]3000000000 - 4294967296  -> -1294967296
+//   [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]3000000000), 0) -> -1294967296
+//   => the wrapped value is NEGATIVE, and it is NOT -2147483648 (that is f022's value), so the
+//   pinned text also distinguishes the two literals.
+//
+// WHY THE PRINT OF THE VALUE IS SAFE HERE: printing INT_MIN used to be broken on both ends
+// (ledger F-027, fixed in v1.6.3); -1294967296 is an ordinary negative int, and the same printer
+// path is exercised on both ends, so a failure here is a real finding, not the old INT_MIN bug.
+//
+// REVIEW COMMANDS:
+//   row A: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f029_int_lit32_wall -Compiler flint
+//   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f029_int_lit32_wall -Compiler boot
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f029_int_lit32_wall.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl
+//
+// ASCII only, no BOM. The only out-of-range literal in this file is the one under test.
+int main() {
+  int i = 3000000000;
+  int zero = 0;
+  if (i < zero) { print(["lit32=negative value=", i, "\n"]); }
+  if (i > zero) { print(["lit32=positive value=", i, "\n"]); }
+  if (i == zero) { print(["lit32=zero\n"]); }
+  return 0;
+}

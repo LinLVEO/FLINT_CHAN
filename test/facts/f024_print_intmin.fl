@@ -1,0 +1,76 @@
+// f024_print_intmin.fl -- RUNTIME FORK #4 / A REAL DEFECT, **FIXED in v1.4.27** (this header is the
+//   record of the defect AND of the repair; the probe source is unchanged, so the ledger's `differs`
+//   row F-027 now turns RED BY DESIGN until the owner re-records it -- see "STATE" at the bottom).
+//   `print` of the int value INT_MIN (0x80000000 = -2147483648) used to be WRONG ON BOTH ENDS, and the
+//   two wrong answers DIFFERED from each other.  The correct text for that segment is `-2147483648`.
+//     real flint : min=[-./,),(-*,(]   -- '-' plus 10 bytes BELOW '0' (a negative-digit loop)
+//     boot       : min=[-]             -- '-' only, zero digits
+//   BOTH ENDS COMPILED AND RAN (both exit 0) => the pre-fix criterion was `differs`.
+//
+// STATE AFTER THE v1.4.27 FIX (MEASURED 2026-10-15, raw bytes out of the runner):
+//   flint : 54 bytes  max=[2147483647] min=[-2147483648] min1=[-2147483647]  exit 0
+//   boot  : 54 bytes  IDENTICAL hex, byte for byte                                     exit 0
+//   hex   = 6d 61 78 3d 5b 32 31 34 37 34 38 33 36 34 37 5d 20
+//           6d 69 6e 3d 5b 2d 32 31 34 37 34 38 33 36 34 38 5d 20
+//           6d 69 6e 31 3d 5b 2d 32 31 34 37 34 38 33 36 34 37 5d 0a
+//   => the two ends are now byte-identical, so `differs` NO LONGER HOLDS for this probe.  The post-fix
+//      review command is the -Compare form below; `contains:min=[-2147483648]` is the human-readable
+//      half of the same pin.  (Ledger action for the owner: re-record row F-027 with a reason.)
+//
+// WHY THE NEIGHBOURS ARE IN THE PROBE (bracketing = the self-check that localised the bug):
+//   INT_MAX    0x7FFFFFFF -> max=[2147483647]   correct on BOTH ends both before and after
+//   INT_MIN    0x80000000 -> min=[-2147483648]  WAS wrong on both ends  <-- exactly one bad value
+//   INT_MIN+1  0x80000001 -> min1=[-2147483647] correct on BOTH ends both before and after
+//   => the defect was the INT_MIN VALUE itself, not "negative numbers" and not "large numbers", and
+//      the fix must leave the two neighbours byte-identical -- which is what the 54-byte equality shows.
+//
+// PRE-FIX MEASUREMENT 2026-10-15 (kept: this is the evidence the fix was real):
+//   flint : 54 bytes  max=[2147483647] min=[-./,),(-*,(] min1=[-2147483647]
+//   boot  : 44 bytes  max=[2147483647] min=[-] min1=[-2147483647]
+//   first differing byte = offset 23: 0x2E '.' (flint) vs 0x5D ']' (boot); 21 offsets differed in
+//   total (compared 2026-10-15 by diffing the two .bin files byte by byte).
+//   TRAP FOR THE JUDGE (still worth remembering): flint's 54 wrong bytes are the SAME LENGTH as the
+//   correct line's 54 bytes (its garbage was 10 bytes for the 10 digits of 2147483648), so any
+//   length-only or "same byte count" check called it correct.  The comparison must be byte-by-byte.
+//
+// HOW THE EXPECTED STRING WAS COMPUTED (never hand-typed):
+//   $imin = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]2147483648), 0)  -> -2147483648
+//   $imin.ToString()                          -> '-2147483648'   (length 11)
+//   ([int]2147483647).ToString()              -> '2147483647'
+//   ($imin + 1).ToString()                    -> '-2147483647'
+//   [Text.Encoding]::ASCII.GetBytes("max=[2147483647] min=[-2147483648] min1=[-2147483647]`n").Length
+//                                             -> 54   (the correct line; same length as flint's old garbage)
+//
+// ROOT CAUSE (SAME SHAPE ON BOTH ENDS: negating INT_MIN overflows and stays INT_MIN) -- BOTH NOW FIXED:
+//   flint : src\main.c:241-253 builtin `_flint_out_int` -- `if (n < 0) { neg = 1; n = -n; }` then
+//           `while (n != 0) { tmp[i] = '0' + n % 10; ... }`.  n stayed INT_MIN (negative), C's % yields
+//           negative remainders, so `'0' + negative` landed on 0x2A..0x2F (`* + , - . /`) -- exactly the
+//           10 measured garbage bytes -- and the loop ran the full 10 digits.  '-' came from the prefix step.
+//   boot  : boot\lib_print.fl `if (v < 0) { neg = 1; v = 0 - v; }` then `while (v > 0)` -- v stayed
+//           negative, so the digit loop NEVER RAN and only "-" was printed.
+//   FIX (both ends, same caliber): **negative-domain remainder, never negate** --
+//     `int d = n % 10; if (d < 0) { d = 0 - d; }` inside a `while (n != 0)` loop, sign decided by the
+//     initial test only.  `-2147483648 % 10 = -8` -> 8, and `-2147483648 / 10 = -214748364` (no
+//     overflow), so INT_MIN prints all ten digits.  This is the caliber `lib\dstr_lib.fl`'s
+//     `std::str_addint` (`:174-205`) already used for the same problem -- copied, not invented.
+//   NOTE: this probe is deliberately about the PRINTER only; the wrapped-literal fork is f022's row.
+//
+// REVIEW COMMAND (both legs must exit 0 and their stdout bytes must be identical; every
+// `min=[-2147483648]` substring must be present):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f024_print_intmin -Compare flint,boot
+//   criterion: contains  ->  min=[-2147483648]
+//   (the OLD two-leg `differs` form -- `... -Compiler flint || ... -Compiler boot` -- is exactly what
+//    turns red now: both legs exit 0 and their bytes are equal.)
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f024_print_intmin.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\main.c;E:\FLINT-lab\boot\lib_print.fl
+//
+// ASCII only, no BOM; prints no pointer value -- three int values and fixed literal text.
+int main() {
+  int hi = 0x7FFFFFFF;
+  int mi = 0x80000000;
+  int m1 = 0x80000001;
+  print(["max=[", hi, "] min=[", mi, "] min1=[", m1, "]\n"]);
+  return 0;
+}

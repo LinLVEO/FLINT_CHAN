@@ -1,0 +1,32 @@
+// f001_utf8src.fl -- ASSERTION F-001: a FLINT source file may carry non-ASCII text.
+//
+// DELIBERATE EXCEPTION to the "pure ASCII probe" rule: the assertion under test IS
+// "non-ASCII characters can be written straight into a .fl source file", so this file
+// must contain them. Every other probe in this directory is pure ASCII.
+//
+// File encoding: UTF-8, NO BOM. The literal below is the 3 chars  C JK A  (see bytes).
+// Expected UTF-8 bytes:  E4 B8 AD | E6 96 87 | 41 | 00
+// exit 0 = both the compiler and the produced program handled the bytes verbatim.
+// Any mismatch returns the 1-based index of the first wrong byte.
+
+int main() {
+  char *s = "中文A";
+  int b0 = s[0];
+  int b1 = s[1];
+  int b2 = s[2];
+  int b3 = s[3];
+  int b4 = s[4];
+  int b5 = s[5];
+  int b6 = s[6];
+  int b7 = s[7];
+  print(["f001 bytes=", b0, ",", b1, ",", b2, ",", b3, ",", b4, ",", b5, ",", b6, ",", b7, "\n"]);
+  if (b0 != 0xE4) { return 1; }
+  if (b1 != 0xB8) { return 2; }
+  if (b2 != 0xAD) { return 3; }
+  if (b3 != 0xE6) { return 4; }
+  if (b4 != 0x96) { return 5; }
+  if (b5 != 0x87) { return 6; }
+  if (b6 != 0x41) { return 7; }
+  if (b7 != 0)    { return 8; }
+  return 0;
+}

@@ -1,0 +1,71 @@
+// f028_esc_literal.fl -- COMPILE-TIME FORK #2: the escapes `"\b"` and `"\f"` inside a STRING LITERAL.
+//   real flint : REFUSES the literal -- error "unknown escape '\b'" (src\tokenize.c:162), process exit 1
+//   boot       : ACCEPTS it -- and takes the byte literally, so `"\b"` stores 0x62 'b' and `"\f"`
+//                stores 0x66 'f' (boot's esc_val has \n \t \r \0 and "everything else as-is")
+//
+// WHAT IS UNDER TEST: a string literal -- not a char literal, and not `\x` (that is f003_xesc.fl's row).
+// The probe READS THE BYTES BACK, so the pinned text is not "it compiled" but WHICH byte each escape
+// produced.  The control segments are built the same way on both ends and agree everywhere:
+//   esc= b,f   -- the two bytes read out of the literal (`s[0]`, `s[1]`); the char-typed read prints
+//                 them as the CHARACTERS b and f (normal segment dispatch)
+//   ctl= 98,102-- `'b'` / `'f'` literals in the SAME probe; a bare char literal in a print segment
+//                 goes through the int path, so this half prints the NUMBERS
+//   num= 98,102-- the same bytes forced into int arithmetic (`s[0] + 0`, `s[1] + 0`)
+//   => `esc=` spelling `b,f` while `ctl=`/`num=` both spell `98,102` is the built-in cross-check:
+//      the literal decayed to exactly those two bytes (0x62/0x66), read back two independent ways.
+//
+// EXPECTED -- PER END (a compile-time fork cannot live in one leg: the ledger needs TWO rows for this
+// file, exactly the way F-018/F-018b and F-021 pin a refusal from both sides):
+//   row A  real flint = MUST REFUSE.  MEASURED 2026-10-15: `src\tokenize.c:161-162` is the `default:`
+//          arm of parse_escape -- error "unknown escape '\%c'" (src\tokenize.c:162) -- and only
+//          n/t/r/0/\\/'/"/x are handled, so the
+//          compiler errors out at the literal (line 65 col 13 of this file, as the compiler reports
+//          it) and exits 1 with
+//          `FLINT <compile error> ... unknown escape '\b'` => facts-run.ps1 -Compiler flint exits 1
+//          => criterion `exit=1`.
+//   row B  boot = MUST COMPILE AND RUN.  MEASURED: the program writes `esc=b,f ctl=98,102 num=98,102`
+//          + LF = 30 raw bytes and exits 0 => facts-run.ps1 -Compiler boot exits 0 and prints
+//          `stdout=[esc=b,f ctl=98,102 num=98,102]` => criterion
+//          `contains:stdout=[esc=b,f ctl=98,102 num=98,102]` (stronger than exit=0: it proves WHICH
+//          byte each escape decayed to, and the ctl=/num= halves are the built-in cross-check).
+//
+// WHICH END IS THE ODD ONE: boot.  `\b` (0x08) and `\f` (0x0C) are C-standard escapes; flint's
+//   tokenizer deliberately has a closed escape set and a LOUD "unknown escape" error (the loudness is
+//   a feature -- a silent literal would be worse).  boot's `esc_val` (boot\lib_token.fl:40-46) is the
+//   permissive side, and it does not merely accept them: it turns them into 'b'/'f', which is why the
+//   pinned text contains the bytes 0x62/0x66 and not 0x08/0x0C.  This row records BOTH halves of the
+//   fork: flint refuses; boot accepts AND changes the meaning of the text.
+//   NOTE (a SPEC decision for the owner -- not this probe's job): SPEC.md's escape table is the
+//   authority for which end is right; this probe only pins today's behaviour on both ends.
+//
+// WHY BOTH ESCAPES ARE IN ONE PROBE: they are the same code path (the `default:` arm / esc_val's
+//   fall-through), so one row would go red for either.  Both are measured, not assumed: if only one of
+//   them ever changes, the pinned text turns red and the owner sees which half moved.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (now, never hand-typed):
+//   [int][char]'b'                                                  -> 98    (0x62)
+//   [int][char]'f'                                                  -> 102   (0x66)
+//   [Text.Encoding]::ASCII.GetBytes("esc=b,f ctl=98,102 num=98,102`n").Length -> 30
+//   hex of those 30 bytes: 65 73 63 3d 62 2c 66 20 63 74 6c 3d 39 38 2c 31 30 32 20 6e 75 6d 3d 39 38 2c 31 30 32 0a
+//
+// REVIEW COMMANDS (one ledger row per end -- a single `||` chain CANNOT pin a fork: with `A || B` a
+// short-circuit hides whichever end is checked second):
+//   row A: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f028_esc_literal -Compiler flint
+//   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f028_esc_literal -Compiler boot
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f028_esc_literal.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl;E:\FLINT-lab\boot\lib_parse.fl
+//   (sibling row for the OTHER escape fork: E:\FLINT-lab\test\facts\f003_xesc.fl -- `\xNN`)
+//
+// ASCII only, no BOM.  The escaped bytes are only ever printed as printable ASCII (they decay to
+// 'b'/'f'), never as raw control bytes -- nothing that could corrupt the runner's captured stdout.
+// DELIBERATELY **NOT FIXED** BY THE v1.4.27 ROUND: which end should win is a SPEC decision, and
+// teaching flint two more escapes (or teaching boot to refuse) is its own slice.
+int main() {
+  char *s = "\b\f";
+  print(["esc=", s[0], ",", s[1],
+         " ctl=", 'b', ",", 'f',
+         " num=", s[0] + 0, ",", s[1] + 0, "\n"]);
+  return 0;
+}

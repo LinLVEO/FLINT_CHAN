@@ -1,0 +1,66 @@
+// f027_charptr_deref.fl -- RUNTIME FORK #5: `*p` on a `char *` used directly as a print segment.
+//   real flint : the segment is a CHAR value -> prints the character 'A'
+//   boot       : the segment is an INT value  -> prints the decimal number 65
+// BOTH ENDS COMPILE AND RUN (both exit 0), so the criterion is `differs` on the two ends' raw stdout
+// bytes -- the same shape as f003_xesc.fl / f007_charnul.fl / f023_callsub.fl.
+//
+// DELIBERATELY **NOT FIXED** BY THE v1.4.27 ROUND.  This row exists so the `*p` instance of the
+// known segment-dispatch defect stays pinned while the fix is scheduled as its own slice: the fix
+// has to move boot's NODE LOWERING (:1858-1876 lowers `*q` to generic node 53) or boot's SEGMENT
+// DISPATCH (boot\lib_parse.fl:2901-2904 classifies char by kind 42/37/39 or ty == 2 -- node 53 over a
+// char element is not in that list, so it falls through to kind 2 = int).  Either edit is a boot
+// dispatch change, not a compiler-fix-round change.  f023_callsub.fl is the CALL-RESULT instance of
+// the same root cause; the two rows are independent pins.
+//
+// THE `p[0]=...` SEGMENT IS THE BUILT-IN SELF-CHECK: `p[0]` parses through the char-typed subscript
+// node 37, which IS in boot's char list, so it prints `A` on BOTH ends.  The fork is therefore the
+// TYPE DISPATCH OF `*p` alone -- it is NOT "one end cannot print a char".
+//
+// WHICH END IS THE ODD ONE: boot.  Authority = SPEC.md:157 (the print segment dispatch):
+//   "char* -> whole string / char -> one character / int -> decimal".  `p` is `char *`, so `*p` is a
+//   char VALUE and the correct segment is ONE BYTE, 0x41.  HOW THE EXPECTED BYTE WAS COMPUTED:
+//   [int][char]'A' -> 65 (run 2026-10-15); the string literal is "AB", so its first byte is 0x41.
+//
+// ROOT CAUSE (read, not guessed):
+//   flint : the prefix-deref path types the node TY_CHAR (the char* pointee type), so seg_print_kind()
+//           src\parse.c:2204-2208 returns 1 (char) -> _flint_out_char.
+//   boot  : boot\lib_parse.fl:1858-1876 lowers `*q` to the GENERIC deref node **53**; the segment
+//           dispatcher boot\lib_parse.fl:2901-2904 recognises kinds 42/37/39 and ty == 2 only, so a
+//           node-53 char read is classified as kind 2 (int) -> _flint_out_int -> "65".
+//   Exactly the same one-node-kind-short dispatcher as f023, reached through a different parse path.
+//
+// MEASURED 2026-10-15 (raw bytes, straight out of the runner; the two files live at
+// %TEMP%\dsh-assert\stdout-f027_charptr_deref-<end>.bin):
+//   flint : 21 bytes  deref=A ref=65 idx=A
+//           hex  64 65 72 65 66 3d 41 20 72 65 66 3d 36 35 20 69 64 78 3d 41 0a
+//   boot  : 22 bytes  deref=65 ref=65 idx=A
+//           hex  64 65 72 65 66 3d 36 35 20 72 65 66 3d 36 35 20 69 64 78 3d 41 0a
+//   first differing byte = offset 6: 0x41 'A' (flint) vs 0x36 '6' (boot) -- true first difference;
+//   boot's segment is one byte longer, so the tail shifts by one for the rest of the line.
+//   NOTE: the runner's -Compare prints `first_diff_byte=21` here (for unequal lengths it reports
+//   min(len_a, len_b), which is NOT the true first difference), and -Compare would also go red if one
+//   end failed to COMPILE -- which must never be allowed to masquerade as a "divergence".  Hence the
+//   two-leg `differs` form below, exactly as f023 does.
+//
+// HOW THE EXPECTED BYTES WERE COMPUTED (now, never hand-typed):
+//   [int][char]'A'                                                   -> 65   (boot's wrong number)
+//   [Text.Encoding]::ASCII.GetBytes("deref=A ref=65 idx=A`n").Length -> 21   (flint, correct)
+//   [Text.Encoding]::ASCII.GetBytes("deref=65 ref=65 idx=A`n").Length-> 22   (boot)
+//   (the `ref=` segment is `'A'`, a NUMBER literal on both ends -- that is why it reads 65 on BOTH
+//    ends and why it is the self-check: the fork is the dispatch of `*p`, not "65 cannot be printed".)
+//
+// REVIEW COMMAND (one `||` chain, two legs -- both must exit 0 and their stdout bytes must differ):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f027_charptr_deref -Compiler flint || powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f027_charptr_deref -Compiler boot
+//   criterion: differs
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f027_charptr_deref.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\boot\lib_parse.fl;E:\FLINT-lab\SPEC.md
+//   (sibling pin for the same root cause: E:\FLINT-lab\test\facts\f023_callsub.fl)
+//
+// ASCII only, no BOM; prints no pointer value -- one dereferenced byte and two literals.
+int main() {
+  char *p = "AB";
+  print(["deref=", *p, " ref=", 'A', " idx=", p[0], "\n"]);
+  return 0;
+}

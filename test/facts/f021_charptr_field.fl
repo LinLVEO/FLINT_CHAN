@@ -1,0 +1,62 @@
+// f021_charptr_field.fl -- COMPILE-TIME FORK #1: a `char *` STRUCT FIELD.
+//   real flint : REFUSES the declaration (compile error), compiler process exit 1
+//   boot       : ACCEPTS it -- and the field really works (8-byte pointer slot, 1-byte elements)
+//
+// WHAT IS UNDER TEST: `struct S { char *p; int n; }` plus genuine USE of the field (store a string
+// address, store an int, print both). Not parse-only: on the boot end the declared field is a real
+// pointer field that carries an address and is subscripted with byte (1-byte) element semantics.
+//
+// EXPECTED -- PER END (a compile-time fork cannot live in one leg: the ledger needs TWO rows for this
+// file, exactly the way F-018 / F-019 pin a threshold from both sides):
+//   row A  real flint = MUST REFUSE.  MEASURED 2026-10-15: the compiler reports a FLINT compile error
+//          at line 54 col 18 whose message is (Chinese, quoted here in translation):
+//            "char pointer field not supported yet (v1.0.5: pointer fields are still
+//             int* / double* / struct pointer)"
+//          and the compiler exits 1 => facts-run.ps1 -Compiler flint exits 1 => criterion `exit=1`.
+//   row B  boot = MUST COMPILE AND RUN.  MEASURED: the program writes `ABC n=7` + LF = 8 raw bytes
+//          and exits 0 => facts-run.ps1 -Compiler boot exits 0 and prints `stdout=[ABC n=7]`
+//          => criterion `contains:stdout=[ABC n=7]`  (stronger than exit=0: it also proves the
+//          char* field actually carried the string through to a segment).
+//
+// WHICH END IS THE ODD ONE: boot.  Authority = SPEC.md:510 (v1.0.5 boundary list), which says in
+//   Chinese that "char reference / char own-share / char pointer field / char main" are EXPLICITLY
+//   REJECTED AT COMPILE TIME.
+//   NOTE (worth a SPEC fix by the owner -- not this probe's job): SPEC.md:506, the v1.0.9
+//   pointer-field-subscript paragraph, speaks of a `char* field -> 1 byte` element width as if such a
+//   field were legal, so the SPEC is not self-consistent on this point.  Whichever end is declared
+//   right, this probe turns its own row red the day that end changes.
+//
+// WHY THE TWO ENDS DIFFER (truth source read, not guessed):
+//   flint : src\parse.c:2517-2519 -- `bool fptr = consume(p, '*'); if (fptr && fchar) error_at(...)`.
+//   boot  : boot\lib_parse.fl:1232-1235 -- `char` followed by `*` sets fty = 2, i.e. a real char*
+//           field (elem width 1 byte: lib_parse.fl:196-207 fld_ty/fld_addr_ty, :2319 `char* -> byte`).
+//
+// HOW THE EXPECTED STDOUT WAS COMPUTED (now, never hand-typed):
+//   the probe was RUN through the runner and the raw bytes read back: stdout_bytes=8, stdout=[ABC n=7]
+//     raw bytes: 41 42 43 20 6e 3d 37 0a
+//   cross-check one-liners (all run 2026-10-15, outputs shown):
+//     $s = 'ABC n=7'; $s.Length                                     -> 7
+//     [Text.Encoding]::ASCII.GetBytes("ABC n=7`n").Length           -> 8   (the "\n" segment adds LF)
+//     [int][char]'A'                                                -> 65
+//
+// REVIEW COMMANDS (one ledger row per end -- a single `||` chain CANNOT pin a fork: with `A || B` a
+// short-circuit hides whichever end is checked second):
+//   row A: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f021_charptr_field -Compiler flint
+//   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f021_charptr_field -Compiler boot
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f021_charptr_field.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\boot\lib_parse.fl
+//   (the owner may also list SPEC.md, since it is the authority for "boot is the odd end"; it is left
+//    out here to keep the dependency shape identical to the existing rows)
+//
+// ASCII only, no BOM; the probe never prints a raw pointer value (ASLR would make a diff gate flake).
+struct S { char *p; int n; }
+
+int main() {
+  struct S s;
+  s.p = "ABC";
+  s.n = 7;
+  print([s.p, " n=", s.n, "\n"]);
+  return 0;
+}

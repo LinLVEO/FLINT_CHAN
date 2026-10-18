@@ -1,4 +1,4 @@
-# frame-diff.ps1 — frame size diff probe: compile the same sample with real flint and boot,
+﻿# frame-diff.ps1 — frame size diff probe: compile the same sample with real flint and boot,
 # then read main's `sub rsp,N` from the entry point via objdump.
 # Usage: pwsh -File frame-diff.ps1 -Src <path.fl> [-Quiet]
 param(

@@ -1,0 +1,51 @@
+// lib_str.fl — boot 内建 str([段, ...]) 的支撑库（用到 str 时 boot 在 lib_print.fl **之后**注入）
+// 与真 flint（src/main.c 的 LIB_STR_SRC 分块）**逐条同口径**：
+//   ① `_flint_str_begin()` 开一次拼接（sink=1、长度归零、超限标记清零）；重入时闩住并置失败标记。
+//   ② `_flint_str_put_*` 是段的追加器：**只调** lib_print.fl 的 _flint_out_*（⇒ 段类型分派与 print 一致）。
+//   ③ `_flint_str_end()` 关掉 sink 并把缓冲地址（失败时 0）交给表达式。
+//   ④ 缓冲是**唯一一个**静态数组 ⇒ 两次 str() 的结果互相覆盖（别名语义；探针 b_str3 钉住）。
+// 端差（诚实记账）：boot 没有 double ⇒ 段类型分派里**没有** _flint_str_put_dbl 这支；
+//   含 double 字面量的源码在 boot 词法/语法层就会报错（不会静默按 int 算）。
+// 上限：内容 ≤ 4095 字节（_flint_buf[4096]，写死的 4096 与 lib_print.fl 一致）；越限 ⇒ 返回 0。
+int _flint_str_begin() {
+  if (_flint_sink == 1) { _flint_bufovf = 1; _flint_nest = _flint_nest + 1; return 0; }
+  _flint_sink = 1;
+  _flint_pending = 0;
+  _flint_buflen = 0;
+  _flint_bufovf = 0;
+  _flint_buf[0] = 0;
+  return 0;
+}
+
+char *_flint_str_end() {
+  if (_flint_nest > 0) { _flint_nest = _flint_nest - 1; return 0; }
+  _flint_sink = 0;
+  _flint_pending = 0;
+  if (_flint_bufovf != 0) { return 0; }
+  return _flint_buf;
+}
+
+int _flint_str_put_str(char *s) {
+  if (_flint_nest > 0) { return 0; }
+  if (s == 0) { _flint_bufovf = 1; return 0; }
+  _flint_pending = _flint_pending + 1;
+  _flint_out_str(s);
+  _flint_pending = _flint_pending - 1;
+  return 0;
+}
+
+int _flint_str_put_char(int c) {
+  if (_flint_nest > 0) { return 0; }
+  _flint_pending = _flint_pending + 1;
+  _flint_out_char(c);
+  _flint_pending = _flint_pending - 1;
+  return 0;
+}
+
+int _flint_str_put_int(int v) {
+  if (_flint_nest > 0) { return 0; }
+  _flint_pending = _flint_pending + 1;
+  _flint_out_int(v);
+  _flint_pending = _flint_pending - 1;
+  return 0;
+}

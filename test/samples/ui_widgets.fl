@@ -12,6 +12,8 @@
 // 诊断位：bit20 按钮像素=按下色 ｜ bit21 勾选像素=面板底
 include "ui_lib.fl"
 
+api gdi32 int GetPixel(int, int, int);     // 本样本自己声明（ui_lib 不再带这条）
+
 // 直读 DIB 像素缓冲（地面真相；DIB 是 BGRA 排列，返回 0xRRGGBB）
 // ⚠️ 为什么不用 GetPixel 验裁剪：**裁剪区外的点 GetPixel 会返回非像素值**（实测读到 0xFFFFFF 这种假白），
 //    拿它判"盒外有没有被涂"必然假红。缓冲直读没有这个问题。

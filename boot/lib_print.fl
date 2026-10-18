@@ -1,13 +1,40 @@
-// lib_print.fl — boot 内建 print 的支撑库（B2g：用到 print 时 boot 自动前置注入）
-// 语言内建 print([段, ...] [, 换行]) 由 boot 展开为对下面三个隐藏函数的调用
+// lib_print.fl — boot 内建 print / str 的支撑库（B2g：用到 print 或 str 时 boot 自动前置注入）
+// 语言内建 print([段, ...] [, 换行]) 与 str([段, ...]) 由 boot 展开为对下面隐藏函数的调用
 // 段类型分派：字符串字面量/char* → _flint_out_str ｜ char 标量 → _flint_out_char ｜ int → _flint_out_int
-// 约束：函数 ≤4 参、无全局变量（stdout 句柄每次现取）、char 数组占 8 字节/元素（沿用 FLINT 布局）
+// ⚠️ v1.5.0：str 的段追加器（lib_str.fl 的 _flint_str_put_*）**只调**这三个 _flint_out_*，
+//   所以 print 与 str **共用同一套格式化实现**（不存在第二套、不会分叉）。分派点 = 最底层的
+//   `_flint_out_str` 里的 `_flint_sink`（0=stdout 给 print；1=静态缓冲 _flint_buf 给 str）。
+// 约束：函数 ≤4 参、char 数组是连续字节（b1_carr 探针核实过）、上限 4096 写死（boot 无宏 ⇒ 靠探针复核）
 api kernel32 ptr GetStdHandle(int);
 api kernel32 int WriteFile(int, int, int, int, int);
+
+// —— v1.5.0：str 的静态缓冲 + 输出目标分派（与真 flint src/main.c 的 LIB_STR_GLOBALS_SRC 同口径）——
+int _flint_sink = 0;        // 1 = 现在往静态缓冲里拼（一次 str() 的动态范围）
+int _flint_pending = 0;     // >0 = 这些字节确实来自 str 的段（print 混进来要判为响亮失败）
+int _flint_buflen = 0;      // 缓冲里已有的内容字节数（不含结尾 0）
+int _flint_bufovf = 0;      // 超限/重入标记：1 = 本次 str() 失败（_flint_str_end 返回 0）
+int _flint_nest = 0;        // >0 = 已「闩住」几个重入的内层 str()（它们不许碰 sink/缓冲）
+char _flint_buf[4096];      // 上限：内容 ≤ 4095 字节；越限 ⇒ str() 返回 0（响亮失败，不静默截断）
+
+int _flint_bufput(char *s, int len) {
+  int i = 0;
+  while (i < len) {
+    if (_flint_buflen >= 4096 - 1) { _flint_bufovf = 1; _flint_buf[_flint_buflen] = 0; return 0; }
+    _flint_buf[_flint_buflen] = s[i];
+    _flint_buflen = _flint_buflen + 1;
+    i = i + 1;
+  }
+  _flint_buf[_flint_buflen] = 0;
+  return 0;
+}
 
 int _flint_out_str(char *s) {
   int n = 0;
   while (s[n] != 0) { n = n + 1; }
+  if (_flint_sink == 1) {
+    if (_flint_pending == 0) { _flint_bufovf = 1; return 0; }   // 段里间接跑了 print()：响亮失败，不静默混内容
+    return _flint_bufput(s, n);
+  }
   int w = 0;
   int *h = GetStdHandle(-11);
   return WriteFile(h, s, n, &w, 0);
@@ -20,15 +47,22 @@ int _flint_out_char(int c) {
   return _flint_out_str(buf);
 }
 
+// v1.6.3 缺陷修复（print(INT_MIN)）：**负数域取余**，全程不取反 —— 同 lib\dstr_lib.fl 的
+//   std::str_addint 口径（`d = n % 10; if (d < 0) { d = 0 - d; }`）。
+//   旧写法 `if (v < 0) { neg = 1; v = 0 - v; }` 对 INT_MIN (0x80000000) 取反**溢出**，
+//   v 仍是负数 ⇒ 下面的 `while (v > 0)` 一次都不进，只剩一个 '-'（实测 min=[-]）。
+//   负数域里 % 与 / 都安全（-2147483648 % 10 = -8，取绝对值即 8），所以 INT_MIN 也能打全 10 位。
 int _flint_out_int(int v) {
   char buf[12];
   char out[12];
   int n = 0;
   int neg = 0;
-  if (v < 0) { neg = 1; v = 0 - v; }
+  if (v < 0) { neg = 1; }
   if (v == 0) { buf[0] = '0'; n = 1; }
-  while (v > 0) {
-    buf[n] = '0' + v - v / 10 * 10;
+  while (v != 0) {
+    int d = v % 10;
+    if (d < 0) { d = 0 - d; }
+    buf[n] = '0' + d;
     n = n + 1;
     v = v / 10;
   }

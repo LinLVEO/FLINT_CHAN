@@ -1,0 +1,397 @@
+// f020_esc.fl -- probe for lib\esc_lib.fl (JSON unescape + BMP UTF-8 encoder), assertion A3.
+// All 31 checks lit (mask 2147483647) => exit 42.  One bit per check; a red run prints the mask
+// and returns it, so the failing bit is visible at a glance.  Never a single sum.
+//
+//   bit  value      what it pins
+//    0        1  "\tA\u0008Z" (11 bytes) -> 09 41 08 5A, returns 4, dst NUL-terminated at [4]
+//    1        2  "\"" -> 0x22 ; "a\\/b" (5 bytes) -> 61 5C 2F 62, returns 4
+//    2        4  a plain run with no escapes at all is copied verbatim
+//    3        8  an embedded 0x00 in src is a byte, not a terminator: 41 00 42 -> "A\0B", 3 bytes
+//    4       16  BMP 1-byte: "\u0041" -> 0x41, returns 1
+//    5       32  BMP 2-byte: "\u00E9" -> C3 A9, returns 2
+//    6       64  BMP 3-byte: "\u4E2D" -> E4 B8 AD, returns 3
+//    7      128  lowercase hex digits work too: "\u00e9" gives the same C3 A9
+//    8      256  4 trailing bytes after the escape: "\u00411" -> "A1", returns 2
+//    9      512  SURROGATE PAIR, correctly joined: "\uD83D\uDE00" -> F0 9F 98 80 (4 bytes)
+//   10     1024  a lone HIGH surrogate "\uD800" -> -1 (loud), dst untouched
+//   11     2048  a lone LOW surrogate "\uDC00" -> -1 (loud), dst untouched
+//   12     4096  "\u00" (too short to be a code point) -> -1, dst untouched
+//   13     8192  "\uZZZZ" (bad hex) -> -1, dst untouched
+//   14    16384  unknown escapes are a loud failure, never plain characters: BOTH "\q" (a letter
+//                JSON does not define) and "\x" (a C-ism JSON does NOT have) -> -1, dst untouched
+//   15    32768  a trailing lone backslash at the very end of src -> -1, dst untouched
+//   16    65536  cap is EXACTLY enough (w+1): succeeds and the trailing 0 is written
+//   17   131072  cap is ONE BYTE SHORT (w): -1 and dst is byte-for-byte untouched
+//   18   262144  a MULTI-BYTE expansion that does not fit: "\u00E9" with cap 2 -> -1 and dst
+//                untouched (the 2-byte form needs cap >= 3).  This is the check that caught the
+//                library writing a partial encoding to dst before failing -- see esc_lib.fl.
+//   19   524288  illegal arguments: dst 0 / src 0 / n -1 / cap 0 all -> -1
+//   20  1048576  the empty input (n == 0) is legal: returns 0 with dst[0] == 0
+//   21  2097152  bytes that are NOT part of an escape are passed through, including 0x80..0xFF
+//   22  4194304  "\u0060" -> 0x60 (the boundary just below the 2-byte form)
+//   23  8388608  "\u0080" -> C2 80 (the lowest 2-byte form)
+//   24 16777216  "\u07FF" -> DF BF (the highest 2-byte form)
+//   25 33554432  "\u0800" -> E0 A0 80 (the lowest 3-byte form)
+//   26 67108864  "\uFFFF" -> EF BF BF (the highest 3-byte form; C0/C1-style overlong forms never
+//                appear because the branches are chosen by magnitude, not by a byte counter)
+//   27 134217728  "\uD800\uDC00" -> F0 90 80 80 (the LOWEST 4-byte form: cp == 0x10000 exactly)
+//   28 268435456  "\uD83D" followed by a plain "\u0041": the high surrogate is NOT followed by a
+//                low surrogate -> -1 and dst untouched (no silent half-pair)
+//   29 536870912  the LOW surrogate first, then the high one ("\uDE00\uD83D") -> -1
+//   30 1073741824  "\uD83D" followed by something that is not a backslash-u at all -> -1
+//
+// Every expected BYTE SEQUENCE in this file was computed OUTSIDE FLINT with PowerShell
+// ([Text.Encoding]::UTF8.GetBytes / [char]::ConvertFromUtf32 -- see the report), never by hand and
+// never by trusting this probe's own output.  The JSON escape SOURCE strings are built byte by byte
+// (the backslash is written as the numeric 92) so that this file stays pure ASCII and so that no
+// host compiler's string-literal escape parser can change the test data.  No raw pointer value is
+// ever printed (ASLR would make the two ends differ).  Pure ASCII on purpose.
+//
+// NOTE ON STRING LITERALS IN THIS FILE: real flint.exe REJECTS "\b" and "\f" as source-level escape
+// sequences ("unknown escape"), while boot accepts them and keeps them raw.  Therefore this probe
+// uses "\x08" / "\x0C" for those two bytes -- both ends accept \xNN.  See the report's "honest
+// boundaries" section.
+
+include "../../lib/esc_lib.fl"
+
+// Count how many bytes of got match want[0..n); used to keep the checks explicit.
+int esc_probe_cmp(char *got, char *want, int n) {
+  int i = 0;
+  int bad = 0;
+  while (i < n) {
+    if (got[i] != want[i]) { bad = bad + 1; }
+    i = i + 1;
+  }
+  return bad;
+}
+
+int main() {
+  int f = 0;
+
+  // The escape SOURCES, built from numeric byte values (92 = backslash, 117 = 'u').
+  //   srcA = \ t A \ u 0 0 0 8 Z      (11 bytes) -> TAB, 'A', BS, 'Z'
+  // NOTE: "\x08" is NOT a JSON escape -- JSON only has the single-letter escapes plus \uXXXX, so
+  // srcA uses \u0008 for the backspace byte (and bit 14 below pins that "\x" is rejected).
+  char srcA[11];
+  srcA[0] = 92; srcA[1] = 116; srcA[2] = 65; srcA[3] = 92;
+  srcA[4] = 117; srcA[5] = 48; srcA[6] = 48; srcA[7] = 48;
+  srcA[8] = 56; srcA[9] = 90; srcA[10] = 0;
+
+  //   srcB = " \ "        (2 bytes)   -> a single double quote
+  char srcB[2];
+  srcB[0] = 92; srcB[1] = 34;
+
+  //   srcC = a \ \ / b    (5 bytes)   -> a backslash slash b
+  char srcC[5];
+  srcC[0] = 97; srcC[1] = 92; srcC[2] = 92; srcC[3] = 47; srcC[4] = 98;
+
+  //   srcU0041 = \ u 0 0 4 1
+  char srcU0041[6];
+  srcU0041[0] = 92; srcU0041[1] = 117; srcU0041[2] = 48;
+  srcU0041[3] = 48; srcU0041[4] = 52; srcU0041[5] = 49;
+
+  //   srcU00E9 = \ u 0 0 E 9
+  char srcU00E9[6];
+  srcU00E9[0] = 92; srcU00E9[1] = 117; srcU00E9[2] = 48;
+  srcU00E9[3] = 48; srcU00E9[4] = 69; srcU00E9[5] = 57;
+
+  //   srcU00e9 = \ u 0 0 e 9  (lowercase hex)
+  char srcU00e9[6];
+  srcU00e9[0] = 92; srcU00e9[1] = 117; srcU00e9[2] = 48;
+  srcU00e9[3] = 48; srcU00e9[4] = 101; srcU00e9[5] = 57;
+
+  //   srcU4E2D = \ u 4 E 2 D
+  char srcU4E2D[6];
+  srcU4E2D[0] = 92; srcU4E2D[1] = 117; srcU4E2D[2] = 52;
+  srcU4E2D[3] = 69; srcU4E2D[4] = 50; srcU4E2D[5] = 68;
+
+  //   srcU5 = \ u 0 0 4 1 1  (5th hex digit is a plain byte)
+  char srcU5[7];
+  srcU5[0] = 92; srcU5[1] = 117; srcU5[2] = 48; srcU5[3] = 48;
+  srcU5[4] = 52; srcU5[5] = 49; srcU5[6] = 49;
+
+  //   srcPair = \ u D 8 3 D \ u D E 0 0
+  char srcPair[12];
+  srcPair[0] = 92; srcPair[1] = 117; srcPair[2] = 68; srcPair[3] = 56;
+  srcPair[4] = 51; srcPair[5] = 68; srcPair[6] = 92; srcPair[7] = 117;
+  srcPair[8] = 68; srcPair[9] = 69; srcPair[10] = 48; srcPair[11] = 48;
+
+  //   srcLowPair = \ u D 8 0 0 \ u D C 0 0  (the lowest possible 4-byte form, cp 0x10000)
+  char srcLowPair[12];
+  srcLowPair[0] = 92; srcLowPair[1] = 117; srcLowPair[2] = 68; srcLowPair[3] = 56;
+  srcLowPair[4] = 48; srcLowPair[5] = 48; srcLowPair[6] = 92; srcLowPair[7] = 117;
+  srcLowPair[8] = 68; srcLowPair[9] = 67; srcLowPair[10] = 48; srcLowPair[11] = 48;
+
+  //   srcHi = \ u D 8 0 0   (lone high surrogate)
+  char srcHi[6];
+  srcHi[0] = 92; srcHi[1] = 117; srcHi[2] = 68; srcHi[3] = 56; srcHi[4] = 48; srcHi[5] = 48;
+
+  //   srcLo = \ u D C 0 0   (lone low surrogate)
+  char srcLo[6];
+  srcLo[0] = 92; srcLo[1] = 117; srcLo[2] = 68; srcLo[3] = 67; srcLo[4] = 48; srcLo[5] = 48;
+
+  //   srcHiPlain = \ u D 8 3 D \ u 0 0 4 1  (high surrogate followed by a NON-surrogate \u)
+  char srcHiPlain[12];
+  srcHiPlain[0] = 92; srcHiPlain[1] = 117; srcHiPlain[2] = 68; srcHiPlain[3] = 56;
+  srcHiPlain[4] = 51; srcHiPlain[5] = 68; srcHiPlain[6] = 92; srcHiPlain[7] = 117;
+  srcHiPlain[8] = 48; srcHiPlain[9] = 48; srcHiPlain[10] = 52; srcHiPlain[11] = 49;
+
+  //   srcLoHi = \ u D E 0 0 \ u D 8 3 D  (the pair in the wrong order)
+  char srcLoHi[12];
+  srcLoHi[0] = 92; srcLoHi[1] = 117; srcLoHi[2] = 68; srcLoHi[3] = 69;
+  srcLoHi[4] = 48; srcLoHi[5] = 48; srcLoHi[6] = 92; srcLoHi[7] = 117;
+  srcLoHi[8] = 68; srcLoHi[9] = 56; srcLoHi[10] = 51; srcLoHi[11] = 68;
+
+  //   srcHiNotU = \ u D 8 3 D \ t   (the follower is an escape, but not \u)
+  char srcHiNotU[8];
+  srcHiNotU[0] = 92; srcHiNotU[1] = 117; srcHiNotU[2] = 68; srcHiNotU[3] = 56;
+  srcHiNotU[4] = 51; srcHiNotU[5] = 68; srcHiNotU[6] = 92; srcHiNotU[7] = 116;
+
+  //   srcShort = \ u 0 0
+  char srcShort[4];
+  srcShort[0] = 92; srcShort[1] = 117; srcShort[2] = 48; srcShort[3] = 48;
+
+  //   srcBadHex = \ u Z Z Z Z
+  char srcBadHex[6];
+  srcBadHex[0] = 92; srcBadHex[1] = 117; srcBadHex[2] = 90;
+  srcBadHex[3] = 90; srcBadHex[4] = 90; srcBadHex[5] = 90;
+
+  //   srcUnknown = \ q
+  char srcUnknown[2];
+  srcUnknown[0] = 92; srcUnknown[1] = 113;
+
+  //   srcTrail = \   (a lone backslash at the very end)
+  char srcTrail[1];
+  srcTrail[0] = 92;
+
+  //   srcPlain = Z high1 high2    (no escape at all; high bytes must pass through)
+  char srcPlain[3];
+  srcPlain[0] = 90; srcPlain[1] = 0x80; srcPlain[2] = 0xFF;
+
+  //   srcNul = A 0 B  (embedded NUL)
+  char srcNul[3];
+  srcNul[0] = 65; srcNul[1] = 0; srcNul[2] = 66;
+
+  //   srcU0060 / srcU0080 / srcU07FF / srcU0800 / srcUFFFF: the UTF-8 tier boundaries
+  char srcU0060[6];
+  srcU0060[0] = 92; srcU0060[1] = 117; srcU0060[2] = 48;
+  srcU0060[3] = 48; srcU0060[4] = 54; srcU0060[5] = 48;
+  char srcU0080[6];
+  srcU0080[0] = 92; srcU0080[1] = 117; srcU0080[2] = 48;
+  srcU0080[3] = 48; srcU0080[4] = 56; srcU0080[5] = 48;
+  char srcU07FF[6];
+  srcU07FF[0] = 92; srcU07FF[1] = 117; srcU07FF[2] = 48;
+  srcU07FF[3] = 55; srcU07FF[4] = 70; srcU07FF[5] = 70;
+  char srcU0800[6];
+  srcU0800[0] = 92; srcU0800[1] = 117; srcU0800[2] = 48;
+  srcU0800[3] = 56; srcU0800[4] = 48; srcU0800[5] = 48;
+  char srcUFFFF[6];
+  srcUFFFF[0] = 92; srcUFFFF[1] = 117; srcUFFFF[2] = 70;
+  srcUFFFF[3] = 70; srcUFFFF[4] = 70; srcUFFFF[5] = 70;
+
+  // dst is generously sized and pre-filled with '#' so "untouched" is provable.
+  char dst[64];
+  int k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+
+  // ---- bit 0: the mixed escape run ----
+  int w = std::esc_json(dst, 64, srcA, 10);
+  if (w == 4) {
+    if (dst[0] == 9 && dst[1] == 65 && dst[2] == 8 && dst[3] == 90 && dst[4] == 0) { f = f | 1; }
+  }
+
+  // ---- bit 1: quote + backslash + slash ----
+  w = std::esc_json(dst, 64, srcB, 2);
+  if (w == 1 && dst[0] == 34 && dst[1] == 0) {
+    w = std::esc_json(dst, 64, srcC, 5);
+    if (w == 4 && dst[0] == 97 && dst[1] == 92 && dst[2] == 47 && dst[3] == 98 && dst[4] == 0) { f = f | 2; }
+  }
+
+  // ---- bit 2: no escapes at all (plain ASCII passes through unchanged) ----
+  w = std::esc_json(dst, 64, srcPlain, 1);
+  if (w == 1) {
+    if (dst[0] == 90 && dst[1] == 0) { f = f | 4; }
+  }
+
+  // ---- bit 21: non-escape bytes above 0x7F pass through too (no UTF-8 validation) ----
+  w = std::esc_json(dst, 64, srcPlain, 3);
+  if (w == 3) {
+    if (dst[0] == 90 && dst[1] == 128 && dst[2] == 255 && dst[3] == 0) { f = f | 2097152; }
+  }
+
+  // ---- bit 3: an embedded NUL in src is a byte ----
+  w = std::esc_json(dst, 64, srcNul, 3);
+  if (w == 3) {
+    if (dst[0] == 65 && dst[1] == 0 && dst[2] == 66 && dst[3] == 0) { f = f | 8; }
+  }
+
+  // ---- bit 4: BMP, 1 byte ----
+  w = std::esc_json(dst, 64, srcU0041, 6);
+  if (w == 1 && dst[0] == 0x41 && dst[1] == 0) { f = f | 16; }
+
+  // ---- bit 5: BMP, 2 bytes ----
+  w = std::esc_json(dst, 64, srcU00E9, 6);
+  if (w == 2 && dst[0] == 0xC3 && dst[1] == 0xA9 && dst[2] == 0) { f = f | 32; }
+
+  // ---- bit 6: BMP, 3 bytes ----
+  w = std::esc_json(dst, 64, srcU4E2D, 6);
+  if (w == 3 && dst[0] == 0xE4 && dst[1] == 0xB8 && dst[2] == 0xAD && dst[3] == 0) { f = f | 64; }
+
+  // ---- bit 7: lowercase hex digits ----
+  w = std::esc_json(dst, 64, srcU00e9, 6);
+  if (w == 2 && dst[0] == 0xC3 && dst[1] == 0xA9 && dst[2] == 0) { f = f | 128; }
+
+  // ---- bit 8: the 5th digit is a plain byte ----
+  w = std::esc_json(dst, 64, srcU5, 7);
+  if (w == 2 && dst[0] == 0x41 && dst[1] == 0x31 && dst[2] == 0) { f = f | 256; }
+
+  // ---- bit 9: a correctly joined surrogate pair ----
+  w = std::esc_json(dst, 64, srcPair, 12);
+  if (w == 4) {
+    if (dst[0] == 0xF0 && dst[1] == 0x9F && dst[2] == 0x98 && dst[3] == 0x80 && dst[4] == 0) { f = f | 512; }
+  }
+
+  // ---- bit 27: the lowest 4-byte form, cp exactly 0x10000 ----
+  w = std::esc_json(dst, 64, srcLowPair, 12);
+  if (w == 4) {
+    if (dst[0] == 0xF0 && dst[1] == 0x90 && dst[2] == 0x80 && dst[3] == 0x80 && dst[4] == 0) { f = f | 134217728; }
+  }
+
+  // ---- bit 10: lone high surrogate ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcHi, 6);
+  if (w < 0) {
+    if (dst[0] == '#' && dst[1] == '#' && dst[2] == '#') { f = f | 1024; }
+  }
+
+  // ---- bit 11: lone low surrogate ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcLo, 6);
+  if (w < 0) {
+    if (dst[0] == '#' && dst[1] == '#' && dst[2] == '#') { f = f | 2048; }
+  }
+
+  // ---- bit 12: too short to be a code point ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcShort, 4);
+  if (w < 0) {
+    if (dst[0] == '#') { f = f | 4096; }
+  }
+
+  // ---- bit 13: bad hex digits ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcBadHex, 6);
+  if (w < 0) {
+    if (dst[0] == '#') { f = f | 8192; }
+  }
+
+  // ---- bit 14: an unknown escape is a loud failure, never a plain character ----
+  // Two cases: "\q" (a letter JSON does not define) and "\x" (a C-ism that JSON does NOT have --
+  // it must be rejected, which is exactly why the probe's own \x08 test data was replaced above).
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcUnknown, 2);
+  int u14 = 0;
+  if (w < 0) {
+    if (dst[0] == '#') { u14 = u14 + 1; }
+  }
+  char srcXesc[2];
+  srcXesc[0] = 92; srcXesc[1] = 120;             // "\x"
+  int wx = std::esc_json(dst, 64, srcXesc, 2);
+  if (wx < 0) {
+    if (dst[0] == '#') { u14 = u14 + 1; }
+  }
+  if (u14 == 2) { f = f | 16384; }
+
+  // ---- bit 15: a lone trailing backslash ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcTrail, 1);
+  if (w < 0) {
+    if (dst[0] == '#') { f = f | 32768; }
+  }
+
+  // ---- bit 16: cap exactly enough for "\u0041" (1 byte + NUL = 2) ----
+  char d2[2];
+  d2[0] = '#'; d2[1] = '#';
+  w = std::esc_json(d2, 2, srcU0041, 6);
+  if (w == 1 && d2[0] == 0x41 && d2[1] == 0) { f = f | 65536; }
+
+  // ---- bit 17: cap one byte short (1) ----
+  char d1[2];
+  d1[0] = '#'; d1[1] = '#';
+  w = std::esc_json(d1, 1, srcU0041, 6);
+  if (w < 0) {
+    if (d1[0] == '#' && d1[1] == '#') { f = f | 131072; }
+  }
+
+  // ---- bit 18: a MULTI-BYTE expansion that does not fit (the 2-byte form needs cap >= 3) ----
+  char d3[2];
+  d3[0] = '#'; d3[1] = '#';
+  int w18 = std::esc_json(d3, 2, srcU00E9, 6);
+  int u18 = 0;
+  if (d3[0] == '#') { u18 = u18 + 1; }
+  if (d3[1] == '#') { u18 = u18 + 1; }
+  if (w18 < 0 && u18 == 2) { f = f | 262144; }
+
+  // ---- bit 19: illegal arguments ----
+  w = std::esc_json(0, 64, srcU0041, 6);
+  int e1 = std::esc_json(dst, 64, 0, 6);
+  int e2 = std::esc_json(dst, 64, srcU0041, 0 - 1);
+  int e3 = std::esc_json(dst, 0, srcU0041, 6);
+  if (w < 0 && e1 < 0 && e2 < 0 && e3 < 0) { f = f | 524288; }
+
+  // ---- bit 20: n == 0 is legal and yields an empty NUL-terminated result ----
+  char d0[4];
+  d0[0] = '#'; d0[1] = '#';
+  w = std::esc_json(d0, 4, srcU0041, 0);
+  if (w == 0 && d0[0] == 0) { f = f | 1048576; }
+
+  // ---- bit 22..26: the UTF-8 tier boundaries ----
+  w = std::esc_json(dst, 64, srcU0060, 6);
+  if (w == 1 && dst[0] == 0x60 && dst[1] == 0) { f = f | 4194304; }
+
+  w = std::esc_json(dst, 64, srcU0080, 6);
+  if (w == 2 && dst[0] == 0xC2 && dst[1] == 0x80 && dst[2] == 0) { f = f | 8388608; }
+
+  w = std::esc_json(dst, 64, srcU07FF, 6);
+  if (w == 2 && dst[0] == 0xDF && dst[1] == 0xBF && dst[2] == 0) { f = f | 16777216; }
+
+  w = std::esc_json(dst, 64, srcU0800, 6);
+  if (w == 3 && dst[0] == 0xE0 && dst[1] == 0xA0 && dst[2] == 0x80 && dst[3] == 0) { f = f | 33554432; }
+
+  w = std::esc_json(dst, 64, srcUFFFF, 6);
+  if (w == 3 && dst[0] == 0xEF && dst[1] == 0xBF && dst[2] == 0xBF && dst[3] == 0) { f = f | 67108864; }
+
+  // ---- bit 28: high surrogate followed by a plain \u (not a low surrogate) ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcHiPlain, 12);
+  if (w < 0) {
+    if (dst[0] == '#' && dst[1] == '#') { f = f | 268435456; }
+  }
+
+  // ---- bit 29: the pair in the wrong order ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcLoHi, 12);
+  if (w < 0) {
+    if (dst[0] == '#' && dst[1] == '#') { f = f | 536870912; }
+  }
+
+  // ---- bit 30: high surrogate followed by an escape that is not \u ----
+  k = 0;
+  while (k < 64) { dst[k] = '#'; k = k + 1; }
+  w = std::esc_json(dst, 64, srcHiNotU, 8);
+  if (w < 0) {
+    if (dst[0] == '#' && dst[1] == '#') { f = f | 1073741824; }
+  }
+
+  print(["f020_esc mask=", f, "\n"]);
+  if (f == 2147483647) { return 42; }
+  return f;
+}

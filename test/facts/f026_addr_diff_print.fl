@@ -1,0 +1,83 @@
+// f026_addr_diff_print.fl -- ENTRY-POINT PIN for the v1.4.27 fix of "an ADDRESS-CHAIN DIFFERENCE used
+//   DIRECTLY as a print segment used to be REJECTED by real flint".
+//
+// THE DEFECT THIS ROW NAILS (it was a real flint defect, NOT a documented boundary; boot was right):
+//   int main() { int ia[8]; ...; print(["d=", (ia + 8) - ia, "\n"]); return 0; }
+//   before v1.4.27 -- real flint : COMPILE ERROR, exit 1, from src\codegen.c:1819-1827, whose message
+//       translates as: "an address value cannot go into an int parameter -- parameter 1 of function
+//       '_flint_out_int' is a value type (int/char/double), but the argument is a pointer/address
+//       (dereference *p first, or change the parameter to a pointer type)"
+//     boot : compiles and prints `d=8`, exit 0
+//   after v1.4.27 -- BOTH ends compile and print `d=8`, exit 0, byte-identical stdout.
+//
+// ROOT CAUSE (read before changing; the fix is deliberately LOCAL):
+//   src\codegen.c:708-709 `is_addr_expr` decides ND_ADD/ND_SUB by `lhs || rhs`, i.e. "either side is an
+//   address => the whole node is an address".  That rule is right for a chain like `*(a + i*8)` but
+//   WRONG for `addr - addr`, where the result is a SCALAR difference.  src\codegen.c:773-775 already
+//   carries that exception in `is_addr_value` (its ND_SUB arm, codegen.c:773-775: "address minus
+//   address = a difference, a scalar, not an address"), but the call-site
+//   width check at :1809 -- `is_addr_value(chk) || is_addr_expr(chk)` -- had no such exception, so the
+//   scalar difference was misread as an address and handed to the "address into a value parameter" error.
+//   FIX = the same exception, applied at that ONE call site (helper `addr_diff_is_scalar`, codegen.c,
+//   just above `emit_arg_rax_to_gp`), NOT a change to `is_addr_expr` itself: `is_addr_expr` also drives
+//   the 64-bit "wide" math selection (:1233-1236) and the "move whole 64 bits" / movsxd split
+//   (:1251/:1266/:1275), and
+//   changing it globally would break today-correct scalar paths (`int d = (ia + 8) - ia;` is 8).
+//
+// WHY THE PROBE HAS FOUR SEGMENTS (bracketing = the self-check that localises the fix):
+//   d  = (ia + 8) - ia   the repro form -- MEMORY-BACKED address chain, the exact shape that used to be rejected
+//   e  = (p + 8) - p     the POINTER-VARIABLE form of the same chain (the brief's second shape)
+//   f  = (ia + 8) - ia   stored into an int first -- the scalar path that was ALREADY correct (must not regress)
+//   g  = (p + 1) - p     a second scalar difference, so `8` cannot be a coincidence of one expression
+//   s  = ia[0]           a plain int read, proving the array really holds the data (not an accidental 0)
+//   Under FLINT's documented bare-pointer byte stepping (decision 40, SPEC.md:262/486) `ia + 8` is
+//   `(char*)ia + 8` BYTES, so `(ia + 8) - ia` is 8 -- not 1.  f025_ptr_arith already pins that rule;
+//   this row pins that the SAME expression is ACCEPTED as a print segment on both ends.
+//
+// CORRECT OUTPUT (computed from the rule, not from a run; `d=8` is the pinned part):
+//   d=8 e=8 f=8 g=1 s=1
+//   `contains:` pins `d=8 e=8 f=8 g=1 s=1`; the runner's -Compare additionally requires the two ends'
+//   raw stdout bytes to be IDENTICAL.  The probe prints no pointer value (ASLR-safe: no addresses leak).
+//
+// MEASURED 2026-10-15 (v1.4.27, raw bytes out of the runner; both ends identical, program exit 0):
+//   flint : 20 bytes  d=8 e=8 f=8 g=1 s=1 + LF  (stdout_bytes=20, first_diff_byte=-1 vs boot)
+//           hex  64 3d 38 20 65 3d 38 20 66 3d 38 20 67 3d 31 20 73 3d 31 0a
+//   boot  : 20 bytes  same hex, byte for byte
+//   BEFORE the fix (same probe path, old compiler from %TEMP%\flint-slice-compilerfix\flint-before.exe,
+//   the two-line form `print(["d=", (ia + 8) - ia, "\n"])`): real flint refused to compile (exit 1,
+//   message quoted above), boot printed `d=8` and exited 0.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (now, never hand-typed):
+//   $ia0 = 1; $ia8 = 1   -> d = 8 (byte stepping), g = 1
+//   [Text.Encoding]::ASCII.GetBytes("d=8 e=8 f=8 g=1 s=1`n").Length  -> 20
+//
+// REGRESSION GUARDS (what must turn this row red, and it should not):
+//   1. the call-site exception is removed -> real flint refuses again (compile exit 1);
+//   2. `is_addr_expr` is "fixed" globally instead -> the 64-bit wide path changes and/or the already
+//      correct scalar path breaks (f is the segment watching that: it must stay 8);
+//   3. decision-40 byte stepping is turned into C element scaling -> d/e/f become 1 and f025 goes red too.
+//
+// REVIEW COMMAND (one command, two ends -- both legs must exit 0 and their stdout bytes must be equal):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f026_addr_diff_print -Compare flint,boot
+//   criterion: contains  ->  d=8 e=8 f=8 g=1 s=1
+//   (the same command also enforces exit=0 on both ends and byte-identical stdout, which is the
+//    stronger half of the pin; `contains:` names the text a human reads in the ledger)
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f026_addr_diff_print.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\SPEC.md
+//   (context pin for the same expression, byte-stepping rule: E:\FLINT-lab\test\facts\f025_ptr_arith.fl)
+//
+// ASCII only, no BOM; prints no pointer value -- only scalar differences and one array element.
+int main() {
+  int ia[8];
+  ia[0] = 1; ia[1] = 2; ia[2] = 3; ia[3] = 4;
+  int *p = ia;
+  int f = (ia + 8) - ia;          // the already-correct scalar path (must not regress)
+  print(["d=", (ia + 8) - ia,     // the repro: memory-backed address chain, printed directly
+         " e=", (p + 8) - p,      // the repro: pointer-variable form
+         " f=", f,
+         " g=", (p + 1) - p,
+         " s=", ia[0], "\n"]);
+  return 0;
+}

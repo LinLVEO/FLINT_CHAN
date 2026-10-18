@@ -1,11 +1,35 @@
-// main.fl -- print "??: 56 C" where the two leading characters are Chinese, from a byte table.
+// main.fl -- print the 2-character Chinese label + ": 56 C", from a byte table (OLD route).
 //
 // Build: flint.exe examples\cn-print\main.fl
 // Run:   examples\cn-print\cn-print.exe
 //
-// Three honest facts about this language, all visible right here:
-//   1. This file AND cn_gen.fl must be PURE ASCII -- FLINT has no non-ASCII literal at all.
-//      (That is why this comment cannot show you the Chinese characters either.)
+// =========================  CORRECTION (2026-10-14, measured)  =========================
+// This header used to say: "This file AND cn_gen.fl must be PURE ASCII -- FLINT has no
+// non-ASCII literal at all."  THAT CLAIM IS WRONG. Corrected facts:
+//
+//   * FLINT DOES accept non-ASCII bytes in source files -- on BOTH ends. Real flint and
+//     boot\b1_emit.exe each load a raw UTF-8 Chinese literal byte-for-byte into the product.
+//     Evidence: tmp\cnlib\probe0.fl, bit 0 -> exit 42 on both ends.
+//   * The real gap is the NEXT link: the Win32 *A family (TextOutA / MessageBoxA / menus /
+//     window titles) wants ANSI, and on this machine ANSI = GBK(936). Handing it UTF-8 bytes
+//     paints mojibake, so a runtime UTF-8 -> GBK step is still needed.
+//   * That step is now a library: lib\cn_lib.fl -- std::cn_to_ansi (caller-owned buffer) and
+//     std::cn_ansi (library static buffer, 4096 bytes, loud failure past it).
+//
+// Two routes, and this example deliberately KEEPS THE OLD ONE as a side-by-side comparison:
+//   OLD (this file): UTF-8 text source -> gen-gbk.ps1 -> "\xNN" byte table -> include.
+//     One build step per label. MEASURED CAVEAT: the \xNN escape is understood ONLY by real
+//     flint; boot reads "\x41" as the literal characters x41 (tmp\cnlib\probe0d) -- so this
+//     route is single-end. This file therefore stays pure ASCII on purpose: build.ps1
+//     enforces high(>127) == 0 as this route's self-check.
+//   NEW (recommended): write the Chinese straight into the source, then convert at run time
+//     with std::cn_ansi("...") before handing it to any *A API. Compiles on BOTH ends and
+//     needs no generator. See lib\cn_lib.fl, tmp\cnlib\probe1.fl / probe2.fl / probe3.fl.
+// =======================================================================================
+//
+// Three honest facts about this language (fact 1 as corrected above):
+//   1. Non-ASCII literals ARE allowed (both ends); but text that reaches an *A API must be
+//      converted to GBK first -- see lib\cn_lib.fl.
 //   2. There is no Str type: a "string" is a char* to NUL-terminated bytes, and Chinese text is
 //      simply GBK(936) bytes. cn_gen.fl spells them out: "\xCE\xC2\xB6\xC8" = the 2 characters.
 //   3. print() takes an ARRAY of items -- text, int, text -- not a C format string.

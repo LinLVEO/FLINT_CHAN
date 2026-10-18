@@ -1,0 +1,54 @@
+// f034_struct_field4.fl -- WIDTH FAMILY #6: `struct` fields use the REAL C layout, so an `int`
+// FIELD is 4 bytes (pitch 4), unlike a variable/array slot which is 8 (f032).
+//
+// WHAT IS UNDER TEST: `struct S { int x; int y; }`; `(&s.y) - (&s.x)` must be 4, and reading
+// through an int* taken at &s.x with the DOCUMENTED byte-stepping rule (`f + 4`) must land exactly
+// on s.y. If fields were 8-byte slots the difference would be 8, and byte offset 4 would still be
+// the zero padding of s.x.
+//
+// MEASURED 2026-10-17 (this round): both ends print `field d=4 f0=11 f4=22` and exit 42, raw
+// stdout bytes identical.
+//
+// WHY IT MATTERS (the whole reason D10 exists): passing a FLINT struct pointer to a C API -- or
+// filling a struct that a C header defines -- works only because the field layout is C's. The
+// known historical failure was the reverse direction: a C-side 4-byte int filled into FLINT's
+// 8-byte ARRAY slot, so only every second cell took effect ("7 7 0 0").
+// Authority: docs\设计决策.md D10 (the table added 2026-10-17) + SPEC.md types section
+// ("int[N] = N eight-byte slots") + the struct section (real C layout) + ledger F-005/F-019 family.
+//
+// WHY THE `f + 4` FORM AND NOT `f[1]`: `f[1]` is ELEMENT-scaled (8 bytes, see f032) and would step
+// clean out of this two-field struct; the byte-stepping form `*(f + 4)` (decision 40, f033) is what
+// actually lands on the second field. Printing both would be misleading, so only the correct form
+// is pinned; the element form is pinned by f032 in an array where it is the right tool.
+//
+// WHEN THIS ROW TURNS RED:
+//   - d becomes 8 => struct fields stopped being C layout (that breaks every C interop struct).
+//   - f4 stops being 22 => either the field order or the read width changed.
+//
+// REVIEW COMMAND (both legs must exit 42 and their stdout bytes must be identical):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f034_struct_field4 -Compare flint,boot -ExpectExit 42
+//   criterion: contains -> field d=4 f0=11 f4=22
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f034_struct_field4.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
+//   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\docs\设计决策.md
+//
+// ASCII only, no BOM. No includes. Exits 42 when all assertions hold, 7 otherwise.
+struct S { int x; int y; }
+
+int main() {
+  struct S s;
+  s.x = 11;
+  s.y = 22;
+  int d = (&s.y) - (&s.x);
+  int *f = &s.x;
+  int f4 = *(f + 4);
+  print(["field d=", d, " f0=", f[0], " f4=", f4, "\n"]);
+  if (d == 4) {
+    if (f[0] == 11) {
+      if (f4 == 22) { return 42; }
+    }
+  }
+  return 7;
+}

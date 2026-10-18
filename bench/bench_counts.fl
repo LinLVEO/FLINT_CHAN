@@ -1,2 +1,2 @@
-// bench_counts.fl - 鐢?gen-counts.ps1 鐢熸垚锛岃鍕挎墜鏀癸紙涓?bench_counts.h 鍚屽€硷級
+// bench_counts.fl - 由 gen-counts.ps1 生成，请勿手改（与 bench_counts.h 同值）
 int BC_N = 2097152;

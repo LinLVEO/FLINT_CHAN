@@ -1,0 +1,17 @@
+// pos-ptrstep-elem.fl -- v1.6.4 `-strict` 第五类正例（本该**不报**）。
+// 取元素一律走下标形式 p[i] / &p[i]（按元素缩放，是正解），一个裸 ± 都没有。
+// 顺带把「int 元素 = 4 字节」用 (&a[1]) - a 钉住（v1.6.5 int4 ABI；决策 40：**只有**下标缩放，裸 ± 是字节）。
+// 期望值由 test\strict-verify.ps1 的 PowerShell 侧**现算**（不手打）：
+//   a[i] = 100 + 3*i（i=0..7）⇒ s = Σa[i] = 800 + 3*(0+…+7) = 884；q = a[5] = 115；d = 4
+int main() {
+  int a[8];
+  int i = 0;
+  while (i < 8) { a[i] = 100 + i * 3; i = i + 1; }
+  int *p = a;
+  int *q = &p[5];              // &p[i] 形态（元素取址）
+  int s = 0;
+  i = 0;
+  while (i < 8) { s = s + p[i]; i = i + 1; }   // p[i] 形态（元素取值）
+  print(["ptrstep_elem s=", s, " q=", q[0], " d=", (&a[1]) - a, "\n"]);
+  return 0;
+}

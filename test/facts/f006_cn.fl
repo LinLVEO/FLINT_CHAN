@@ -1,0 +1,51 @@
+// f006_cn.fl -- probe for lib\cn_lib.fl (UTF-8 -> ANSI/GBK 936 transcode), assertion F-006.
+//
+// The UTF-8 input is BUILT FROM RAW BYTE VALUES so that this file stays pure ASCII.
+// Input : the 4 characters  <CJK><CJK>42  whose UTF-8 bytes are  E6 B8 A9 | E5 BA A6 | 34 | 32
+// Expect: the same text as GBK(936) bytes                        CE C2    | B6 C8    | 34 | 32
+// The expected GBK byte values were computed OUTSIDE FLINT by PowerShell
+//     [Text.Encoding]::GetEncoding(936).GetBytes(...)
+// and cross-checked against the already verified probe2 sample (tmp\cnlib\probe2.fl).
+//
+// stdout = "cnbytes=<decimal byte values> bad=<n>"  (pure ASCII, so the two ends can be
+// byte-compared by the runner). exit 42 = transcode is byte-correct.
+
+include "../../lib/cn_lib.fl"
+
+int main() {
+  char src[16];
+  src[0] = 0xE6; src[1] = 0xB8; src[2] = 0xA9;
+  src[3] = 0xE5; src[4] = 0xBA; src[5] = 0xA6;
+  src[6] = 0x34; src[7] = 0x32;
+  src[8] = 0;
+
+  int exp[6];
+  exp[0] = 0xCE; exp[1] = 0xC2; exp[2] = 0xB6;
+  exp[3] = 0xC8; exp[4] = 0x34; exp[5] = 0x32;
+
+  char *g = std::cn_ansi(src);
+  if (g == 0) {
+    print(["cnbytes=nil bad=9\n"]);
+    return 9;
+  }
+
+  int bad = 0;
+  int i = 0;
+  while (i < 6) {
+    if (g[i] != exp[i]) { bad = bad + 1; }
+    i = i + 1;
+  }
+  if (g[6] != 0) { bad = bad + 1; }
+
+  print(["cnbytes="]);
+  i = 0;
+  while (i < 6) {
+    int b = g[i];
+    print([b, " "]);
+    i = i + 1;
+  }
+  print(["bad=", bad, "\n"]);
+
+  if (bad == 0) { return 42; }
+  return 1;
+}

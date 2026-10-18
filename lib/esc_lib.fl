@@ -1,0 +1,203 @@
+// esc_lib.fl — FLINT 标准库（JSON 批）：JSON 反转义（需求勘定-JSON解析器.md 的 A3）
+//
+// 为什么有它：JSON 的字符串字面量里 `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` `\uXXXX` 都是"源码里的
+//   写法"，解析出来必须还原成**真实字节**；`\uXXXX` 还要自己写 UTF-8 编码器（本机语言没有）。这一层
+//   是 JSON 解析器的必经之路（勘定 A3 原话："JSON 必须先做这一层"）。
+//
+// 用法（典型）：
+//   char src[16];                       // 输入：字节 + 长度（**不是** 0 结尾串）
+//   ... 逐字节填 src，填 n 字节 ...
+//   char out[32];
+//   int w = std::esc_json(out, 32, src, n);      // 返回**写入字节数**；out 末尾已补 0
+//   if (w < 0) { ... }                           // cap 不够 / 参数非法 / 转义非法 ⇒ -1
+//   print([out]);                                // out 可直接当 0 结尾串用
+//
+// 覆盖的转义（**每条都实测**，探针 test\facts\f020_esc.fl）：
+//   \" → 0x22   \\ → 0x5C   \/ → 0x2F
+//   \b → 0x08   \f → 0x0C   \n → 0x0A   \r → 0x0D   \t → 0x09
+//   \uXXXX → UTF-8 字节（见下）
+//   **其余一律响亮 -1**（例：`\q` / `\x41` / `\u` 后不足 4 位十六进制 / `\uZZZZ`）—— 绝不把未知
+//   转义当普通字符放过（"未知就是错"这条是刻意的：静默放过会把坏 JSON 解析成看似正常的字符串）。
+//
+// \uXXXX 的口径（承 需求勘定-JSON解析器.md §三 "明确不做：\\uXXXX 的完整 Unicode 语义（先按 UTF-8
+// 字节透传，规范化留后）"）：
+//   * 本期**不做**完整 Unicode 语义（不查表、不做 NFC/NFD 规范化、不映射到别的码位），只把码位
+//     **编码成 UTF-8 字节**：U+0000..U+007F → 1 字节；U+0080..U+07FF → 2 字节；U+0800..U+FFFF → 3 字节。
+//   * **代理对（U+D800..U+DFFF）：本库选"正确合对"这条**（实测，见下）：
+//       - 高位代理 U+D800..U+DBFF **必须**紧跟第二个 `\u` + 低位代理 U+DC00..U+DFFF，合对后按
+//         4 字节 UTF-8 写出（cp = 0x10000 + ((hi-0xD800)<<10) + (lo-0xDC00)）；合不上 → -1。
+//       - 孤立高位代理 / 孤立低位代理 / 高低位顺序颠倒 → **一律 -1**，绝不静默输出半个对。
+//     ⇒ 口径是"要么正确合对、要么响亮 -1"，不存在第三种结果（**实测**：\uD83D\uDE00 → F0 9F 98 80
+//     四字节；\uD800 单独 → -1；\uDC00 单独 → -1）。
+//   * 码位 U+10000 以上只有**合对**这一条路（单个 \uXXXX 最大 0xFFFF）。
+//
+// 边界（本机实测口径：真编译器 flint.exe ＋ 自举 boot\b1_emit.exe；每条标「实测」或「未测」）：
+//   * dst 的 cap 是**含结尾 0 的总字节数**：成功时写入 w 字节 ＋ 1 个 0，返回 w；
+//     `cap < w + 1` ⇒ **-1 且 dst 一个字节都不改**。**实测**：cap 恰好够（w+1）成功、
+//     cap 差 1 字节（w）→ -1 且 dst 一字未动。
+//   * **绝不留半格状态（这条是踩出来的）**：所有编码先写进栈上工作区 sb[4096]，**全部成功**后
+//     才一次性拷进 dst。所以失败（cap 不够 / 转义非法 / \u 非法 / 代理对合不上）时 dst 保持原样。
+//     ⚠️ 早期版本是"边解边写 dst、写不下才返回 -1"——那时一个**多字节**编码（例 \u00E9 展开成
+//     2 字节）在 cap 只差 1 字节时会先写进前 1 字节再失败，dst 被改了一半（**实测**：探针
+//     f020 bit18 就是钉这一格的，它当时变暗）。改成"工作区 + 最后一次拷贝"才真正做到原子。
+//   * 工作区上限 4096 字节（长度常量 esc_ibufcap() 与 esc_json 里的 sb 两处同步）：单次调用的
+//     **输出**超过 4095 字节会返回 -1（而不是悄悄截断）。调用方要解更长的串请分块调用。
+//     **实测**：常规样本远小于此；**未测** 4096 边界本身（没有构造 4096 字节的转义串）。
+//   * 参数非法一律 -1：dst==0 / src==0 / cap<1 / n<0（**实测**）。
+//   * src 是**字节 + 长度**语义（不是 0 结尾串）⇒ src 里的内嵌 0 **原样拷贝**（**实测**），
+//     n 由调用方给，本库不数长度。
+//   * `\uXXXX` 的十六进制位**大小写都收**（0-9 a-f A-F）；`\u00E9` 与 `\u00e9` 同结果（**实测**）。
+//   * `\u0041` 后面再跟一个 '1'（即 `\u00411`）→ 只吃 4 位、结果是 "A1"（**实测**）——
+//     JSON 的 \u 恰好 4 位，第 5 位是普通字节。
+//   * 转义在**字节**层做，不做 UTF-8 校验：输入里非法的 UTF-8 字节序列原样透传（本库不是校验器）。
+//     **实测**：不在转义序列里的 0x80..0xFF 字节原样拷贝。
+//   * 32 位算术：len / cap / 计数全按 32 位口径（**实测**：本机 int 宽度四处分岔，见 dstr_lib 文件头）；
+//     cap <= 0x7FFFFFFF 的常规取值下 `w + 1` 不会溢出。**未测**：cap 接近 2 GiB 的极端分配。
+//   * 自包含：不 include 任何库（FLINT 的 include 无守卫，重复 include 会撞重复定义）。
+//     **内部件不带 std:: 前缀**：esc_ihex（十六进制数字）/ esc_iesc（一个转义字符 → 1 字节）/
+//     esc_iescw（转义字符 → 2 字节，含 \u 的那种）/ esc_ipair（代理对合并）/ esc_iuw（写 1 字节，
+//     **本文件唯一写点**）/ esc_iutf8（码位 → UTF-8 字节）。除 esc_ihex 外它们**不是**公开 API。
+//   * 本库**不分配内存**（无 VirtualAlloc/VirtualFree）—— 缓冲由调用方给，所以没有所有权问题。
+
+// --- 内部：十六进制数字 → 0..15；非法 → -1（大小写都收）---
+int esc_ihex(int c) {
+  if (c >= '0' && c <= '9') { return c - '0'; }
+  if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+  if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+  return -1;
+}
+
+// --- 内部：一个普通转义字符 → 1 字节；未知 → -1（**响亮失败**，绝不当普通字符放过）---
+int esc_iesc(int c) {
+  if (c == '"') { return 34; }
+  if (c == '\\') { return 92; }
+  if (c == '/') { return 47; }
+  if (c == 'b') { return 8; }
+  if (c == 'f') { return 12; }
+  if (c == 'n') { return 10; }
+  if (c == 'r') { return 13; }
+  if (c == 't') { return 9; }
+  return -1;
+}
+
+// --- 内部：\u 那种转义 → 2 字节（高字节/低字节，已拆成 0..255）；非法 → -1 ---
+// 只做"这个字符该展开成哪两个字节"，不看代理对（合对由 esc_ipair 管）。
+int esc_iescw(int c) {
+  if (c == 'u') { return 1; }          // 1 = "这是 \u，要读 4 位十六进制"
+  return -1;
+}
+
+// --- 内部：写好的一对代理 → 码位（0x10000 以上）；合不上 → -1（绝不静默输出半个对）---
+int esc_ipair(int hi, int lo) {
+  if (hi < 0xD800) { return -1; }
+  if (hi > 0xDBFF) { return -1; }
+  if (lo < 0xDC00) { return -1; }
+  if (lo > 0xDFFF) { return -1; }
+  return 0x10000 + (hi - 0xD800) * 1024 + (lo - 0xDC00);
+}
+
+// --- 内部：本文件的工作区大小（字节）---
+// 关键设计：**所有编码先写进 esc_isbuf 这块工作区，全部成功后才一次性拷进调用方的 dst**
+// ⇒ 失败（cap 不够 / 转义非法 / 代理对合不上）时 dst **一个字节都不动**（不是"写了一半才发现"）。
+// 4 KB 与 esc_isbuf 的长度两处同步（本库不分配内存，这里是栈上定长数组）。
+int esc_ibufcap() { return 4096; }
+
+// --- 内部：往工作区写 1 字节 ---（工作区永远够大，故无失败路径）
+int esc_iuw(char *dst, int *at, int byte) {
+  dst[*at] = byte & 255;
+  *at = *at + 1;
+  return 0;
+}
+
+// --- 内部：码位 → UTF-8 字节（BMP 1~3 字节；0x10000 以上 4 字节），写进工作区 ---
+// 0 = 成功；-1 = 码位非法。工作区够大，所以这里唯一的失败是"码位本身不合法"。
+int esc_iutf8(char *dst, int *at, int cp) {
+  if (cp < 0) { return -1; }
+  if (cp < 0x80) {
+    return esc_iuw(dst, at, cp);
+  }
+  if (cp < 0x800) {
+    esc_iuw(dst, at, 0xC0 | (cp / 64));
+    return esc_iuw(dst, at, 0x80 | (cp & 0x3F));
+  }
+  if (cp < 0x10000) {
+    esc_iuw(dst, at, 0xE0 | (cp / 4096));
+    esc_iuw(dst, at, 0x80 | ((cp / 64) & 0x3F));
+    return esc_iuw(dst, at, 0x80 | (cp & 0x3F));
+  }
+  if (cp < 0x110000) {
+    esc_iuw(dst, at, 0xF0 | (cp / 262144));
+    esc_iuw(dst, at, 0x80 | ((cp / 4096) & 0x3F));
+    esc_iuw(dst, at, 0x80 | ((cp / 64) & 0x3F));
+    return esc_iuw(dst, at, 0x80 | (cp & 0x3F));
+  }
+  return -1;
+}
+
+// 把 src 前 n 字节里的 JSON 转义解回来写进 dst（并补结尾 0）；
+// 返回**写入字节数**；cap 不够 / 参数非法 / 转义非法 ⇒ -1（响亮失败，绝不静默截断，dst 保持原样）
+int std::esc_json(char *dst, int cap, char *src, int n) {
+  if (dst == 0) { return -1; }
+  if (src == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (n < 0) { return -1; }
+  char sb[4096];                                  // 工作区（长度与 esc_ibufcap 同步）
+  int at = 0;
+  int i = 0;
+  while (i < n) {
+    int c = src[i] & 255;
+    i = i + 1;
+    if (c != 92) {                                // 92 = '\'
+      if (esc_iuw(sb, &at, c) < 0) { return -1; }
+    } else {
+      if (i >= n) { return -1; }                  // 结尾孤零零一个 '\'
+      int e = src[i] & 255;
+      i = i + 1;
+      int v = esc_iesc(e);
+      if (v >= 0) {
+        if (esc_iuw(sb, &at, v) < 0) { return -1; }
+      } else if (esc_iescw(e) == 1) {             // \uXXXX
+        if (i + 4 > n) { return -1; }             // 不足 4 位
+        int cp = 0;
+        int k = 0;
+        while (k < 4) {
+          int h = esc_ihex(src[i + k] & 255);
+          if (h < 0) { return -1; }
+          cp = cp * 16 + h;
+          k = k + 1;
+        }
+        i = i + 4;
+        if (cp >= 0xD800 && cp <= 0xDBFF) {       // 高位代理：必须紧跟第二个 \u + 低位代理
+          if (i + 6 > n) { return -1; }
+          if ((src[i] & 255) != 92) { return -1; }
+          if ((src[i + 1] & 255) != 117) { return -1; }   // 117 = 'u'
+          int lo = 0;
+          k = 0;
+          while (k < 4) {
+            int h2 = esc_ihex(src[i + 2 + k] & 255);
+            if (h2 < 0) { return -1; }
+            lo = lo * 16 + h2;
+            k = k + 1;
+          }
+          i = i + 6;
+          int px = esc_ipair(cp, lo);
+          if (px < 0) { return -1; }
+          if (esc_iutf8(sb, &at, px) < 0) { return -1; }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+          return -1;                              // 孤立低位代理
+        } else {
+          if (esc_iutf8(sb, &at, cp) < 0) { return -1; }
+        }
+      } else {
+        return -1;                                // 未知转义（例 \q / \x）
+      }
+    }
+  }
+  // 到这里才碰调用方的 dst：dst 必须装得下 at 字节 + 1 个结尾 0（cap <= 0 已在前面挡掉，
+  // 所以 cap-1 不会下溢；失败时 dst **一个字节都没动** —— 这是"响亮失败"的一部分）
+  if (at > cap - 1) { return -1; }
+  int j = 0;
+  while (j < at) { dst[j] = sb[j]; j = j + 1; }
+  dst[at] = 0;
+  return at;
+}

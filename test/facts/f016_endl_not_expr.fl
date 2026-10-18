@@ -1,0 +1,13 @@
+// f016_endl_not_expr.fl -- NEGATIVE control for the v1.6.2 endl sugar: `endl` is a SEGMENT token only.
+//
+// Inside a print/str segment list the bare identifier `endl` (followed by ',' or ']') is the newline
+// segment. Everywhere else it must stay an ordinary identifier -- so this file must FAIL TO COMPILE on
+// both compilers (undeclared variable), never silently print a newline. That is the guard against the
+// sugar ever leaking into expression position.
+//
+// Ledger: the check is "the runner exits 1", i.e. both legs are expected to refuse to compile.
+// If either compiler starts accepting this, facts-run exits 0 and the row turns red.
+int main() {
+  print([endl + 1]);
+  return 0;
+}

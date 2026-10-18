@@ -1,0 +1,169 @@
+// f005_map.fl -- probe for lib\map_lib.fl (open-addressing hash map, key = NUL-terminated
+// byte string, value = 8-byte slot), used by assertion F-005.
+// Bit per check; all 9 bits lit (mask 511) => exit 42.
+//   bit0   1  init(cap 0) ok; count 0; a missing key reads back 0
+//   bit1   2  8-byte scalar round trip is byte-exact
+//   bit2   4  putting the same key again returns 1, count unchanged, value really replaced
+//   bit3   8  del -> 0, get after del -> 0, del again -> 1, count decremented
+//   bit4  16  growth: cap 1, insert 100 keys, every one reads back byte-exact
+//   bit5  32  count == 100 after growth
+//   bit6  64  missing keys (including near-prefixes and the empty key) read back 0
+//   bit7 128  keys are copied in: mutating the caller's key buffer does not move the entry
+//   bit8 256  failure paths: uninitialised put/get/count/del, huge cap, NUL key
+// The content checks borrow the untouched str_lib so the probe is not judging itself.
+// Modeled on the verified sample tmp\buflib\probe_map.fl (rewritten pure ASCII, and the
+// MEM_TOP_DOWN >4GB pointer bit of that sample is intentionally NOT reproduced here).
+
+include "../../lib/str_lib.fl"
+include "../../lib/map_lib.fl"
+
+int p_copy(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return n;
+}
+
+char *p_cview(int *p) {
+  char *c = p;
+  return c;
+}
+
+int p_same8(char *a, char *b) {
+  int i = 0;
+  int r = 1;
+  while (i < 8) {
+    if (a[i] != b[i]) { r = 0; }
+    i = i + 1;
+  }
+  return r;
+}
+
+int p_key(char *kk, int i) {
+  kk[0] = 'k';
+  if (i < 10) { kk[1] = '0' + i; kk[2] = 0; return 2; }
+  kk[1] = '0' + i / 10;
+  kk[2] = '0' + i % 10;
+  kk[3] = 0;
+  return 3;
+}
+
+int p_val(char *vb, int i) {
+  int lo = i * 7 + 1;
+  int hi = 0x10000000 + i;
+  vb[0] = lo & 255;
+  vb[1] = (lo >> 8) & 255;
+  vb[2] = (lo >> 16) & 255;
+  vb[3] = (lo >> 24) & 255;
+  vb[4] = hi & 255;
+  vb[5] = (hi >> 8) & 255;
+  vb[6] = (hi >> 16) & 255;
+  vb[7] = (hi >> 24) & 255;
+  return 0;
+}
+
+int main() {
+  int f = 0;
+
+  struct Map m;
+  m.tab = 0; m.cap = 0; m.count = 0; m.used = 0;
+  if (std::map_init(&m, 0) == 0) {
+    if (std::map_count(&m) == 0 && std::map_get(&m, "nope") == 0) { f = f | 1; }
+  }
+
+  char vb[8];
+  vb[0] = 0xF0; vb[1] = 0xDE; vb[2] = 0xBC; vb[3] = 0x9A;
+  vb[4] = 0x78; vb[5] = 0x56; vb[6] = 0x34; vb[7] = 0x12;
+  int v1 = 0;
+  p_copy(&v1, vb, 8);
+  if (std::map_put(&m, "BIG", &v1) == 0) {
+    int *g1 = std::map_get(&m, "BIG");
+    int back = 0;
+    if (g1 != 0) { p_copy(&back, g1, 8); }
+    if (p_same8(p_cview(&back), vb) == 1) { f = f | 2; }
+  }
+
+  char wb[8];
+  wb[0] = 0x11; wb[1] = 0x22; wb[2] = 0x33; wb[3] = 0x44;
+  wb[4] = 0x55; wb[5] = 0x66; wb[6] = 0x77; wb[7] = 0x88;
+  int v2 = 0;
+  p_copy(&v2, wb, 8);
+  int cnt0 = std::map_count(&m);
+  if (std::map_put(&m, "BIG", &v2) == 1) {
+    int *g2 = std::map_get(&m, "BIG");
+    int back2 = 0;
+    if (g2 != 0) { p_copy(&back2, g2, 8); }
+    if (std::map_count(&m) == cnt0 && p_same8(p_cview(&back2), wb) == 1) { f = f | 4; }
+  }
+
+  int cnt1 = std::map_count(&m);
+  if (std::map_del(&m, "BIG") == 0) {
+    if (std::map_get(&m, "BIG") == 0) {
+      if (std::map_del(&m, "BIG") == 1) {
+        if (std::map_count(&m) == cnt1 - 1) { f = f | 8; }
+      }
+    }
+  }
+
+  struct Map mg;
+  mg.tab = 0; mg.cap = 0; mg.count = 0; mg.used = 0;
+  if (std::map_init(&mg, 1) == 0) {
+    char kk[8];
+    char vv[8];
+    int ins = 1;
+    int i = 0;
+    while (i < 100) {
+      p_key(kk, i);
+      p_val(vv, i);
+      int v = 0;
+      p_copy(&v, vv, 8);
+      if (std::map_put(&mg, kk, &v) != 0) { ins = 0; }
+      i = i + 1;
+    }
+    int all = 1;
+    i = 0;
+    while (i < 100) {
+      p_key(kk, i);
+      p_val(vv, i);
+      int *got = std::map_get(&mg, kk);
+      if (got == 0) { all = 0; }
+      else {
+        int back = 0;
+        p_copy(&back, got, 8);
+        if (p_same8(p_cview(&back), vv) != 1) { all = 0; }
+      }
+      i = i + 1;
+    }
+    if (ins == 1 && all == 1) { f = f | 16; }
+    if (std::map_count(&mg) == 100) { f = f | 32; }
+    if (std::map_get(&mg, "zzz") == 0 && std::map_get(&mg, "k100") == 0 && std::map_get(&mg, "k1000") == 0 && std::map_get(&mg, "") == 0) { f = f | 64; }
+  }
+
+  struct Map mk;
+  mk.tab = 0; mk.cap = 0; mk.count = 0; mk.used = 0;
+  if (std::map_init(&mk, 0) == 0) {
+    char km[8];
+    km[0] = 'a'; km[1] = 'b'; km[2] = 'c'; km[3] = 0;
+    int v3 = 7;
+    if (std::map_put(&mk, km, &v3) == 0) {
+      km[0] = 'z'; km[1] = 'z'; km[2] = 'z';
+      char *old_hit = std::map_get(&mk, "abc");
+      char *new_hit = std::map_get(&mk, km);
+      if (old_hit != 0 && new_hit == 0 && std::map_count(&mk) == 1) { f = f | 128; }
+    }
+  }
+
+  int ur = 0;
+  struct Map mu;
+  mu.tab = 0; mu.cap = 0; mu.count = 0; mu.used = 0;
+  int v9 = 0;
+  if (std::map_put(&mu, "x", &v9) < 0 && std::map_get(&mu, "x") == 0 && std::map_count(&mu) == 0 && std::map_del(&mu, "x") < 0) { ur = ur + 1; }
+  struct Map mh;
+  mh.tab = 0; mh.cap = 0; mh.count = 0; mh.used = 0;
+  if (std::map_init(&mh, 0x7FFFFFFF) < 0 && mh.tab == 0) { ur = ur + 1; }
+  if (std::map_put(&m, 0, &v9) < 0) { ur = ur + 1; }
+  if (ur == 3) { f = f | 256; }
+
+  print(["f005_map mask=", f, " m_count=", std::map_count(&m), " mk_count=", std::map_count(&mk), "\n"]);
+  if (f == 511) { return 42; }
+  return f;
+}

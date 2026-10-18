@@ -1,0 +1,46 @@
+// f031_int_arith_wrap.fl -- WIDTH FAMILY #3: ARITHMETIC is 32-bit and wraps: INT32_MAX + 1
+// becomes INT32_MIN (-2147483648), on BOTH ends.
+//
+// WHAT IS UNDER TEST: `int i = 2147483647; i = i + 1;` -- values live in 8-byte slots (f032) but
+// the ARITHMETIC is 32-bit (the x86-64 instruction is a 32-bit add, then sign-extended into the
+// slot). So the slot holds 0xFFFFFFFF80000000-shaped sign extension of 0x80000000 = -2147483648.
+// This is the "arithmetic width" row; f029/f030 are the literal rows, f032/f033 the addressing
+// rows, f034 the C-layout row.
+//
+// MEASURED 2026-10-17 (this round): flint and boot both print `ovf=-2147483648`, both exit 42,
+// raw stdout bytes identical.
+//
+// WHY THE ASSERTION IS `i == (0 - 2147483647 - 1)`: the literal -2147483648 CANNOT be spelled in
+// this language (the decimal literal limit stops at 2147483647 -- that is f029), so the expected
+// value must be BUILT in-language. Both terms are in range, and the subtraction itself is the
+// 32-bit wrapping arithmetic under test, so the comparison is not circular: the printed line is
+// the primary pin, the comparison is the program's own verdict.
+//
+// HOW THE EXPECTED VALUE WAS COMPUTED (now, never hand-typed):
+//   [int32]2147483647 + 1  -> -2147483648   (PowerShell wraps .NET Int32 on overflow? NO --
+//   so: [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]2147483648), 0) -> -2147483648,
+//   and [int64]2147483648 - 4294967296 -> -2147483648.)
+//
+// WHY BOTH ENDS AGREEING IS NOT "the criterion is wrong": unlike the pointer-arithmetic case
+// (f025 / decision 40, where the C reading looks right and FLINT deliberately differs), 32-bit
+// wrapping arithmetic is a DOCUMENTED consequence of `int` being 32-bit at the instruction level,
+// and it is the same thing C does. The print path for INT_MIN was itself a defect until v1.6.3
+// (ledger F-027) -- that fix is what makes this row printable both ends.
+//
+// REVIEW COMMAND (both legs must exit 42 and their stdout bytes must be identical):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f031_int_arith_wrap -Compare flint,boot -ExpectExit 42
+//   criterion: contains -> ovf=-2147483648
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f031_int_arith_wrap.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\src\main.c;
+//   E:\FLINT-lab\boot\lib_print.fl
+//
+// ASCII only, no BOM. No includes. Exits 42 when the in-language assertion holds, 7 otherwise.
+int main() {
+  int i = 2147483647;
+  i = i + 1;
+  print(["ovf=", i, "\n"]);
+  if (i == (0 - 2147483647 - 1)) { return 42; }
+  return 7;
+}

@@ -1,6 +1,11 @@
-# FLGUI — FLINT 的 immediate-mode GUI 库（API 文档 · M4）
+# FLGUI — FLINT 的 immediate-mode GUI 库（API 文档 · M4q）
+
+> 🧭 元信息（机检）：类型=对外 ｜ 快照=否
+> 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`（**数字不许手抄**：值当场取自取数器，写成「事实标记」——标记写法与全部键名见 `docs\数字台账.md` 头部）
+> 引用我=`开源前-人类可用性缺口.md`、`docs\真实项目.md` ｜ 我引用=`docs\数字台账.md`（取数器）、`test\flgui-verify.ps1`、`test\verify-all.ps1`、`src\pe.c`、`tools\导入预算.ps1` ｜ 最后复核=2026-10-15 `test\docgate.mjs`
 
 > **定位**：FLINT（FL）自己的界面库，**私人工具用**（不外供、不追生态；对外的面孔是"用它做的工具"）。
+> ⚠️ **2026-10-15 订正（原文留档）**：上面那句「**私人工具用**（不外供、不追生态；对外的面孔是“用它做的工具”）」**已于 2026-10-13 由所有者明令作废**（原话：「作为私人的东西这条过期了 必须在未来真的有一席之地 像zig一样」）⇒ 现行定位 = **面向 Windows 小工具/面板的界面库**（口径见 `SPEC.md` §现行定位、`方向-对外一席之地（2026-10-13 用户口径变更）.md`、`docs\设计决策.md` **D7**）。
 > 三层全纯 FLINT，**不含 C**：内核 `lib\flgui.fl` ／ 控件 `lib\flgui_widgets.fl` ／ 平台 `lib\flgui_win32.fl`。
 > **本文档的硬要求**：每个示例**都能编、都能跑**（真 flint 与 boot 双端；退出码就是文里写的那个值）——
 > 这些示例同时就是回归样本（`test\samples\flgui*.fl`，由 `test\flgui-verify.ps1` 双端对账）。
@@ -177,10 +182,10 @@ int cur = gui_alpha_cur(&c);       // 当前生效值（空栈 = 255）
 2. **不是"整窗淡出"** —— 整窗常量 alpha 仍走 `Surf.const_a`（ULW 的 `BLENDFUNCTION`，见 `ui_lib.fl`）；
    本刀管的是**命令级**（"这一个面板 / 这一段"）。
 
-**为什么是软件混合（零新导入）**：最重链（`apps\m2_float\main.fl`）的**导入预算 96/96 已满**
-（`objdump -p tmp\loopcheck\app_flint.exe` 实测 96 条目 / 8 个 DLL 组；`src\pe.c` 的 `MAX_IMPORTS = 96`
+**为什么是软件混合（零新导入）**：最重链（`apps\m2_float\main.fl`）的**导入预算条目 <!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->（模块位 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact--> 顶格）**
+（`objdump -p tmp\loopcheck\app_flint.exe` 实测 <!--fact:imports-m2float-->90<!--/fact--> 条目 / <!--fact:modules-m2float-->8<!--/fact--> 个 DLL 组；`src\pe.c` 的 `MAX_IMPORTS = <!--fact:limit-imports-->96<!--/fact-->`、`MAX_GROUPS = <!--fact:limit-groups-->8<!--/fact-->`
 且判据是 `total >= MAX_IMPORTS`）⇒ 多用**一个**导入名（msimg32 的 `AlphaBlend`、gdi32 未文档的 `GdiAlphaBlend`
-都算）就会让那条链**当场编译失败**。所以走 `Surf.bits` 直写像素（`surf_alpha` 已在用的通道）。
+都算）今天已**不再**让那条链当场失败（条目还有余量），但**模块位 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact--> 已顶格** ⇒ 加**新的 DLL 模块**会当场撞墙 —— 这才是真正的墙。所以走 `Surf.bits` 直写像素（`surf_alpha` 已在用的通道）。
 ⚠️ **直写像素吃不到 DC 的裁剪区** ⇒ 渲染端另存一份"与内核同源的裁剪矩形栈"（`gwb_cl*`），混合前先求交。
 **代价**（同进程 QPC、40 个面板 × 1200px 的同一份几何，取 3 轮最小）：`a=255` 走 GDI = **155µs**、
 `a=128` 走混合 = **1566µs** ⇒ **≈29 ns / 每像素混合**（含同一份 `surf_paint` 的固定开销）；
@@ -557,7 +562,7 @@ if (r == 2) { /* Esc 取消：内容已回滚到基线 */ }
    · **不动老 dump 基线**：焦点序号/计数住池的 **k=1 / k=2 / k=3**（`gui_pool_sum` 只摘 k=0 ⇒ POOLSUM 零扰动）。
 7. **焦点链与"编辑焦点"（`c->edit_slot`）是两套状态、由控件层对齐**（三条规则写在 `gui_textfield_edit` 上）：
    链焦点落在文本域 ⇒ `gui_edit_focus` 跟上；链焦点在别人身上 ⇒ 编辑焦点收回；鼠标点进/点出 ⇒ 两个一起变。
-8. ⚠️⚠️ **函数预算（本刀实测踩到的硬约束，扩充这个库之前必须读）**：boot 编译器**只有一张 512 项的函数表**，
+8. ⚠️⚠️ **函数预算（本刀实测踩到的硬约束，扩充这个库之前必须读）**：boot 编译器**只有一张 <!--fact:limit-boottable-->512<!--/fact--> 项的函数表**，
    装的是 **api 声明 ＋ 函数定义**（`boot\lib_parse.fl` 的 `if (p->nfuncs >= 512) return -85;`）。
    最重链 `apps\m2_float\main.fl` 把 `ui_lib` ＋ FLGUI 全 include 进来，**实测只剩 8 个新函数的余量**
    （`tmp\m4o\measure-headroom.ps1`：给老库追加 8 个空函数仍能编、9 个就 `parse err=-85`）。
@@ -715,12 +720,12 @@ gui_font_pop(&c);                          // 回正文（基准）
 ⚠️ **键盘档要成事，就两件事**（M4c 实测定稿）：① 建窗不带 `NOACTIVATE`（否则窗口无法激活、真按键进不来
 —— 这一条也就替代了"点击自己 `SetForegroundWindow`/`SetFocus`"：真点击时系统会完成激活与焦点）；
 ② **字符翻译走平台层库内 US 表（按扫描码，不碰 VK/IME）**，见 §2.5 顶部那条红字与 §3.2。
-⚠️ **导入预算**（真 flint `MAX_IMPORTS = 96`，**含槽 0 `ExitProcess`**；另有一条 `MAX_GROUPS = 8` 的 **DLL 组数**上限）：`m2_float` 那条 include 链**最紧**。
+⚠️ **导入预算**（真 flint `MAX_IMPORTS = <!--fact:limit-imports-->96<!--/fact-->`，**含槽 0 `ExitProcess`**；另有一条 `MAX_GROUPS = <!--fact:limit-groups-->8<!--/fact-->` 的 **DLL 组数**上限）：`m2_float` 那条 include 链**最紧**。
 - **实测账（`objdump -p` 数产物导入表）**：M4c 加 `MapVirtualKeyA` 后 **94/96**；M4d 加 `GetTickCount` ＋
-  `MsgWaitForMultipleObjects` 后 = **95/96**；**M4e 加 `DwmFlush`（`dwmapi.dll`）后 = 96/96 —— 满格**，
+  `MsgWaitForMultipleObjects` 后 = **95/96**；**M4e 加 `DwmFlush`（`dwmapi.dll`）后 = 96/96 —— 满格**（当轮读数；⚠️ **2026-10-15 复测 = 条目 <!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->、模块 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact-->，模块位仍顶格**），
   且 `dwmapi` 占满**第 8 个 DLL 组**（两组上限**同时见底**）。2026-09-27 用户拍板「现在就花」（换"144fps 跟屏"这条通道）。
 - 🔎 **对后续开发的影响（2026-09-27 用户问，写在这儿免得重算）**：**再想"多用一个 Windows 函数"或"多用一个 DLL"，
-  `m2_float` 这条链就会编不过**（症状：`PE 打包失败: 导入函数总数超过上限 96` / `导入模块超过 8 个`；
+  `m2_float` 这条链就会编不过**（⚠️ **2026-10-15 复测**：条目侧尚有余量 = <!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->，**真正顶格的是模块位 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact-->**；症状：`PE 打包失败: 导入函数总数超过上限 96` / `导入模块超过 8 个`；
   注意 `flgui_demo` 链条小、**照样编得过**，别只看 demo 就放心）。三条出路，按代价从低到高：
   ① **腾格子**：删掉链上不再需要的声明（先 `objdump -p <产物>` 数、再看哪些真被调用）——零风险、首选；
   ② **抬上限**：改 `src\pe.c` 的 `MAX_IMPORTS` / `MAX_GROUPS`（**编译器侧改动，要重建 flint.exe 并单独过总门**）；
@@ -793,7 +798,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
 ① 本库的悬停/按下**本来就是每帧轮询重算**的（`gui_begin` 每帧 `hot = 0` 后按 `mx/my` 重新命中）
 ⇒ 没有"靠消息维持的悬停态"，也就没有 `WM_MOUSELEAVE` 要治的病；
 ② 拖动的收尾不靠 `WM_LBUTTONUP`（`gui_win_drag_frame` 每帧查物理左键）⇒ 消息丢没丢都不影响结果；
-③ **导入预算是硬账**：`m2_float` 链已 **96/96**（`MAX_IMPORTS` 满格）⇒ 不留着最后一格去买一个**不消费**的消息。
+③ **导入预算是硬账**：`m2_float` 链条目 **<!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->**、模块 **<!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact-->（模块位满格）**⇒ 不留着最后一格去买一个**不消费**的消息。
 
 `struct GuiInput`：`mx`、`my`、`down`、`pressed`、`released`、`wheel`、`key`、`ms`（本帧时间戳，毫秒）。
 
@@ -922,7 +927,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
    ⚠️ **`theme_radius = 0`（深色默认）= 经典档**：下面那些函数**一次都不进**，与 M4 及以前逐像素同形。
    📊 **实测**（40 个按钮、同进程 QPC、3 轮取最小）：现代档 **771µs** vs 经典档 **151µs**（≈ +15.5µs/按钮 ——
    1px 描边圈 ＋ 4 个角块逐像素）。判据 = `tmp\roundprobe\round-probe.fl`（6 位全亮）。
-   ⚠️ **代价的根因**：圆角/描边只能逐像素（零新导入的必然结果 —— GDI 的 `RoundRect` 会让最重链 96/96 的导入预算当场溢出）。
+   ⚠️ **代价的根因**：圆角/描边只能逐像素（零新导入的必然结果 —— GDI 的 `RoundRect` 会让最重链逼近上限：条目 <!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->，而模块位 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact--> 已是真正的墙）。
 6. **容量上限**（§1.0）：命令表 256 条/帧、状态池 512 槽、arena 4096 字节、裁剪 8 层、滚动/弹层 4 层嵌套。
    超限**只计数不崩**，但命令/字节会被丢 ⇒ dump 里的 `over=` / `textover=` 必须为 0。
 7. **时间与帧节拍（M4d 时间注入 ＋ M4e 帧率档位）**：① **时间由平台层注入**（`gui_win_input` 的 `GetTickCount()` 是全库唯一取时点），
@@ -943,7 +948,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
 8. **不透明度（M4h）＋ 离屏层（M4i）**：命令级、**3 参数版只作用于填充类命令** —— ① **文本不吃 alpha**（GDI 写的字没法逐命令混合）；
    ② "整段（含文本）一起淡" ⇒ **M4i 已做离屏层**（§1.4.2，走 **4 参数版**：整段先画进离屏 DIB、再整块按层 alpha 合成一次
    ⇒ **文字跟着淡**；3 参数版仍是本条这个边界）；③ 实现是**软件混合**
-   （零新导入 —— 最重链的导入预算 96/96 已满），实测 **≈29 ns/像素混合**；④ `kind 20/21` 已进命令流当
+   （零新导入 —— 最重链条目 <!--fact:imports-m2float-->90<!--/fact-->/<!--fact:limit-imports-->96<!--/fact-->、模块位 <!--fact:modules-m2float-->8<!--/fact-->/<!--fact:limit-groups-->8<!--/fact--> 已顶格），实测 **≈29 ns/像素混合**；④ `kind 20/21` 已进命令流当
    **层的边界标记**，但渲染端对它们**无状态**（生效值在每条命令的 `gui_cmd_a` 里）。详见 §1.4.1。
 9. **⚠️ M4k 轮修掉的一笔真 bug（通道序）**：直写像素那条路（M4h 的 `gui_win_blend` ＋ M4k 的 `gwb_put`）**把 R/B 写反**了 ——
    **COLORREF = `0x00BBGGRR`（低字节才是 R）**，而 **DIB 32bpp = BGRA（低字节是 B）**，原实现把"低字节"直接写进 DIB 的**第一个字节**
@@ -1027,6 +1032,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
        键码是字面量、序号/清单数直接读池、导航/收尾内联在 `gui_begin`/`gui_end`；
        **再要加库函数就得先给 boot 扩容或给真应用减函数**（这是一条会"当场打断真应用双端编译"的硬墙，
        本刀第一版 17 个函数就是这么被总门 `[11] loop` 抓住的）。
+       ⚠️ **2026-10-15 订正（原文保留）**：本行那个「**只剩 8 格**」出自 `tmp\m4o\measure-headroom.ps1` —— 一把**已被证伪的坏量尺**（同族订正见 `docs\索引.md` 与 `可用性路线图-人机两条线.md`）。现行真值 = boot 表 **<!--fact:boot-occupied-->507<!--/fact--> / <!--fact:boot-limit-->512<!--/fact-->**（余 **<!--fact:boot-headroom-->5<!--/fact-->** 格，取数器 `tools\文档事实.ps1` 实测）。
     ② **全新 ctx 的第一帧反向 Tab 不生效**：Shift+Tab 要"最后一个"，而"有几个可聚焦控件"是**上一帧**才知道的
        （正向 Tab 不需要 —— 第 0 个恒是第一个）⇒ 窗口刚起来那一帧就按 Shift+Tab 会什么都不做，下一帧起正常。
     ③ **序号是"本帧顺序"的**：界面控件增删会让序号跟着变（焦点可能落到另一个控件上）⇒ `gui_end` 里有
@@ -1047,7 +1053,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
 
 | 门 | 命令 | 期望 |
 |---|---|---|
-| FLGUI 门（无头 dump + 双端对账 + 基线 ＋ **光标条契约** ＋ **M4m 输入灵敏度契约** ＋ **M4n UI 美术契约** ＋ **M4o 焦点链契约** ＋ **M4p 焦点可见性契约** ＋ **M4q 多字体档契约**） | `pwsh -File test\flgui-verify.ps1` | **199/199 全绿**（flgui1~flgui17 + demo ＋ 3 帧光标契约 ＋ M4m/M4n/M4o/M4p 各段语义判据 ＋ **M4q 的 42 条**；M4d 起 +`flgui7`；M4e 起 +`flgui8`；M4f 起 +`flgui9`；M4g 起 +`flgui10`；M4h 起 +`flgui11`；M4j 起 +`flgui12`；M4m 起 +`flgui13`；M4n 起 +`flgui14`；M4o 起 +`flgui15`；M4p 起 +`flgui16`；**M4q 起 +`flgui17`**）。⚠️ **老 dump 基线一字未动**（逐条 SHA256 对过；M4q 只**新增** `test\flgui-baseline-flgui17.txt`） |
+| FLGUI 门（无头 dump + 双端对账 + 基线 ＋ **光标条契约** ＋ **M4m 输入灵敏度契约** ＋ **M4n UI 美术契约** ＋ **M4o 焦点链契约** ＋ **M4p 焦点可见性契约** ＋ **M4q 多字体档契约**） | `pwsh -File test\flgui-verify.ps1` | **<!--fact:flgui-checks-->199/199<!--/fact--> 全绿**（flgui1~flgui17 + demo ＋ 3 帧光标契约 ＋ M4m/M4n/M4o/M4p 各段语义判据 ＋ **M4q 的 42 条**；M4d 起 +`flgui7`；M4e 起 +`flgui8`；M4f 起 +`flgui9`；M4g 起 +`flgui10`；M4h 起 +`flgui11`；M4j 起 +`flgui12`；M4m 起 +`flgui13`；M4n 起 +`flgui14`；M4o 起 +`flgui15`；M4p 起 +`flgui16`；**M4q 起 +`flgui17`**）。⚠️ **老 dump 基线一字未动**（逐条 SHA256 对过；M4q 只**新增** `test\flgui-baseline-flgui17.txt`） |
 | 重录基线（**只在确认变化有意义之后**） | `pwsh -File test\flgui-verify.ps1 -WriteBaseline` | —— |
 | **光标条契约**（语义判据，2026-09-23 加） | 同上（门里自跑，不单独起命令） | 断言 `光标 x = 文本 x + 真字宽 × 字节数`，**字宽由 GDI 现量**（外部裁判，不是库里的值、也不是基线里记住的值） |
 | **时间注入 ＋ 动画开关**（无头契约，2026-09-26 M4d 加） | `test\samples\flgui7.fl`（门里自跑） | 固定序列 `0/16/32/48` 逐帧断言 `c.ms` 等于注入值 ＋ 负值原样搬运 ＋ `anim_pct` 默认/夹取/读回（12 位全亮） |
@@ -1080,7 +1086,7 @@ gui_win_drag_frame(&dg);                                       // 每帧跟手�
 | 真鼠标（画廊控件） | `pwsh -File apps\ui_gallery\mouse-test.ps1` | 4/4（**M4n 复跑仍 4/4** —— 画廊新增的单选钮/滑块/进度条/可编辑框都落在左列空闲区，脚本点的三个老坐标一字未改） |
 | **真键盘**（平台层契约） | `pwsh -File apps\flgui_demo\kb-probe.ps1` | **10/10 全绿（M4c 收口；M4d +3 条）**：点框聚焦 / 打字 `ok` 进盒子 / 退格删一个 / 回车提交且文本保留 ＋ **时间通道**（CV 行的 `ms=` 全 >0、单调不后退、一次运行真推进 ≥200ms）；账本走 stdout 追加、按字段名解析 |
 | 浮窗冒烟（loop 线） | `pwsh -File test\loop-verify.ps1` | 9/9 |
-| 总门 | `pwsh -File test\verify-all.ps1` | ALL GREEN 12/12 |
+| 总门 | `pwsh -File test\verify-all.ps1` | ALL GREEN（<!--fact:gate-steps-->14<!--/fact--> 步） |
 
 **两条判据的"层次"别搞混**（这是 M4 学到的）：
 

@@ -1,0 +1,27 @@
+// f015_endl.fl -- pins the v1.6.2 `endl` segment sugar.
+//
+// OWNER-REQUESTED SPELLING (2026-10-15): print(["a = ", a, endl]);  ==  print(["a = ", a, "\n"]);
+//
+// RULE: inside a print/str SEGMENT LIST, the bare identifier `endl` immediately followed by ',' or ']'
+// expands to the EXISTING string literal "\n" (D11 I1: no new codegen path, no budget cost).
+// Anywhere else `endl` is still an ordinary identifier (`endl + 1` => "undeclared", never a silent newline).
+// `str([...])` shares the rule -- print and str use one segment mechanism, so a print-only spelling
+// would be an artificial split that generators would trip over.
+//
+// The self-check is BYTE-level on purpose: it proves the newline is exactly one 0x0A byte in the right
+// position on BOTH compilers, with no reliance on how a terminal renders it.
+// Bits: 1='A' 2=0x0A 4='B' 8=0x0A 16=terminating 0  =>  all lit => exit 42.
+int main() {
+  int bits = 0;
+  char *s = str(["A", endl, "B", endl]);       // str leg
+  if (s[0] == 65) { bits = bits + 1; }
+  if (s[1] == 10) { bits = bits + 2; }          // the first endl byte
+  if (s[2] == 66) { bits = bits + 4; }
+  if (s[3] == 10) { bits = bits + 8; }          // the second endl byte
+  if (s[4] == 0) { bits = bits + 16; }          // still NUL-terminated
+  print(["a = ", 7, endl, "b = ", 42, endl]);  // print leg: two lines
+  print([s]);
+  if (bits == 31) { return 42; }
+  print(["bits=", bits, endl]);
+  return bits;
+}

@@ -1532,6 +1532,9 @@ for (const [sample, expect, expectOut] of compileCases) {
     ["neg-width-ret.fl", "E-STRICT-WIDTH"],
     ["neg-bounds-local.fl", "E-STRICT-BOUNDS"],
     ["neg-bounds-global.fl", "E-STRICT-BOUNDS"],
+    // v1.6.4 第五类：裸 ± 用在非 1 字节元素指针上（int* = 8 字节槽）——默认档静默（决策 40
+    // 的字节步进语义），-strict 才拦。默认档必须照常编译（不在 defaultClosed 里）。
+    ["neg-ptrstep.fl", "E-STRICT-PTRSTEP"],
   ];
   // v1.4.27（卡 T-20261012-210751）：这两条方向**不再"默认静默"** —— 默认档现在也拦，
   //   那正是本刀的目的。它们在上面的 -strict 断言里照旧带自己的稳定码；下面把
@@ -1557,8 +1560,19 @@ for (const [sample, expect, expectOut] of compileCases) {
         rp.ok, (rp.stderr || "").trim().slice(0, 140));
     }
   }
-  const strictPos = ["pos-basic.fl", "pos-outparam.fl", "pos-share.fl", "pos-mainptr.fl",
-                     "pos-apiaddr.fl", "pos-t1int.fl", "pos-loopwrite.fl"];
+  // v1.6.4：pos-share.fl **移出**本表 —— 它读 share 引用计数头 `*(a - 8)`，那是决策 40 记录在案的
+  //   p-8 块头约定（故意的字节步进，不是元素访问）⇒ 它是第五类 E-STRICT-PTRSTEP 的**真阳性**，
+  //   不可能再"在 -strict 下无告警编译"。它仍留在 test\strict-samples\ 里给前四类用；这里把
+  //   "第五类必须拦下它"单独记一条判据（见下面的例外块），不静默丢样本。
+  const strictPos = ["pos-basic.fl", "pos-outparam.fl", "pos-mainptr.fl",
+                     "pos-apiaddr.fl", "pos-t1int.fl", "pos-loopwrite.fl",
+                     "pos-ptrstep-elem.fl", "pos-ptrstep-char.fl"];
+  {
+    const src = path.join(SK, "pos-share.fl");
+    const rs = run(["-strict", "-o", path.join(TMP, "pp_share.exe"), src]);
+    check("-strict 第五类例外：pos-share.fl 被拦下（share 头 *(a-8) = 决策 40 字节步进，真阳性）",
+      !rs.ok && (rs.stderr || "").includes("E-STRICT-PTRSTEP"), (rs.stderr || "").trim().slice(0, 140));
+  }
   for (const f of strictPos) {
     const src = path.join(SK, f);
     const pa = path.join(TMP, `q_${f}.exe`);

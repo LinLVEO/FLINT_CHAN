@@ -1,0 +1,38 @@
+// f030_int_hex_ffffffff.fl -- WIDTH FAMILY #2: the HEXADECIMAL literal 0xFFFFFFFF is ACCEPTED
+// and reads as -1 (a 32-bit bit pattern, NOT an out-of-range error).
+//
+// WHAT IS UNDER TEST: `int h = 0xFFFFFFFF;` -- the upper end of the hex allowance. The decimal
+// allowance stops at 2147483647 (f029/f022 refuse 3000000000 / 2147483648), but hex is
+// deliberately allowed all the way to 0xFFFFFFFF because a 32-bit bit pattern is meaningful there
+// (Win32 flag constants). Truth source: src\tokenize.c:261-262 ->
+//   `if (v > (base == 16 ? 0xFFFFFFFFLL : 0x7FFFFFFFLL)) error_at(...)`
+//
+// SO THE PINNED FACT IS TWO-SIDED: 0xFFFFFFFF must COMPILE (no error) and its VALUE must be -1
+// (the same 32 bits read as a signed int). Both ends are expected to agree.
+//
+// MEASURED 2026-10-17 (this round): flint and boot both compile it, both print `hex=-1`, and the
+// program exits 42 (its own assertion) -- raw stdout bytes identical on both ends.
+//
+// WHY THE ASSERTION IS `h == (0 - 1)` AND NOT A PRINTED STRING ALONE: printing could agree by
+// accident, so the program also compares against a value computed in-language (0 - 1). The
+// printed line is what the ledger pins; the exit code is the program's own verdict.
+//
+// IT ALSO PINS THE CONTRAST WITH f022/f029 IN ONE PLACE: if a future change "unifies" the decimal
+// and hex limits (e.g. rejects 0xFFFFFFFF as out of range), THIS row turns red -- and that is the
+// intended signal, because Win32 constants such as 0xFFFFFFFF depend on it.
+//
+// REVIEW COMMAND (both legs must exit 42 and their stdout bytes must be identical):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f030_int_hex_ffffffff -Compare flint,boot -ExpectExit 42
+//   criterion: contains -> hex=-1
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f030_int_hex_ffffffff.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl
+//
+// ASCII only, no BOM. No includes. Exits 42 when the in-language assertion holds, 7 otherwise.
+int main() {
+  int h = 0xFFFFFFFF;
+  print(["hex=", h, "\n"]);
+  if (h == (0 - 1)) { return 42; }
+  return 7;
+}

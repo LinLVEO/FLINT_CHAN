@@ -50,9 +50,8 @@ int main() {
     print(["usage: filecount.exe <in.txt>   (writes <in.txt>.copy)\n"]);
     return 255;
   }
-  char out_path[256];
-  std::strcpy(out_path, in_path);
-  std::strcat(out_path, ".copy");
+  // v1.5.0：内建 str([...]) 一把拼出来（改前是 strcpy + strcat 手搓两行 + 一个定长缓冲声明）
+  char *out_path = str([in_path, ".copy"]);
 
   int got = std::file_read(in_path, fc_data, 4096);
   if (got < 0) {

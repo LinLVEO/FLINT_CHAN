@@ -1,4 +1,4 @@
-# start-driver.ps1 — 启动 WinRing0 驱动（FLINT 硬件通道的前置，需管理员 UAC）
+﻿# start-driver.ps1 — 启动 WinRing0 驱动（FLINT 硬件通道的前置，需管理员 UAC）
 # 用途：WinRing0_1_2_0 服务已注册（LHM 遗留 DEMAND_START），但 .sys 在 Temp 易被清
 # 本脚本：① 从 LibreHardwareMonitorLib.dll 内嵌资源提取 WinRing0x64.sys（FF 前缀 gzip）
 #         ② 放到服务 ImagePath 指向的路径 ③ UAC 提权启动服务 ④ 验证 RUNNING

@@ -1,0 +1,55 @@
+// f022_bigint_literal.fl -- COMPILE-TIME FORK #2: the out-of-range DECIMAL literal 2147483648.
+//   real flint : REFUSES it (compile error), compiler process exit 1
+//   boot       : ACCEPTS it and SILENTLY WRAPS it modulo 2^32 -- no error, no warning
+//
+// WHAT IS UNDER TEST: `int x = 2147483648;` (2^31, one past INT32_MAX). The probe then CLASSIFIES the
+// value it got with comparisons against a local 0, so it reports which value the compiler actually
+// produced without going through the (separately broken, see f024) int printer.
+//
+// EXPECTED -- PER END (two ledger rows, one per end; same reason as f021):
+//   row A  real flint = MUST REFUSE.  MEASURED 2026-10-15: the compiler reports a FLINT compile error
+//          at line 49 col 11 whose message is (Chinese, quoted here in translation):
+//            "integer literal out of 32-bit range (decimal <= 2147483647, hexadecimal <= 0xFFFFFFFF)"
+//          and the compiler exits 1 => facts-run.ps1 -Compiler flint exits 1 => criterion `exit=1`.
+//   row B  boot = MUST COMPILE AND RUN, and it reports the WRAPPED value: `bigint=negative` + LF =
+//          16 raw bytes, exit 0 => facts-run.ps1 -Compiler boot exits 0 and prints
+//          `stdout=[bigint=negative]` => criterion `contains:stdout=[bigint=negative]`.
+//          (`bigint=negative` IS the defect being pinned: a conforming end would have refused to
+//          compile, and "compiles + says negative" is the observable form of the silent wrap.)
+//
+// WHICH END IS THE ODD ONE: boot.  Authority = SPEC.md:575-576, the numeric-literal-range rule, which
+//   says in Chinese: "decimal <= 2147483647 (INT32_MAX); out of range = a COMPILE ERROR, never a
+//   silent saturation".  boot does exactly the forbidden silent saturation (here: a silent wrap).
+//
+// WHY THE TWO ENDS DIFFER (truth source read, not guessed):
+//   flint : src\tokenize.c:261-262 -- `if (v > (base == 16 ? 0xFFFFFFFFLL : 0x7FFFFFFFLL)) error_at(...)`
+//           (v is accumulated in a 64-bit temporary, so the check can fire at all; the hex branch
+//            deliberately allows up to 0xFFFFFFFF because a 32-bit bit pattern is meaningful there,
+//            e.g. 0x80000000 -> -2147483648 for Win32 flags).
+//   boot  : boot\lib_token.fl:73-78 -- `while (i < n && is_digit(src[i])) { v = v*10 + (src[i]-'0'); i++; }`
+//           with `v` a plain FLINT int: no range check anywhere, so the value wraps modulo 2^32.
+//
+// HOW THE EXPECTED VALUE WAS COMPUTED (now, never hand-typed):
+//   [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]2147483648), 0)   -> -2147483648
+//   [int64]2147483648 - 4294967296                                            -> -2147483648  (2^31 - 2^32)
+//   => the wrapped value is NEGATIVE, so exactly one of the three guards prints: bigint=negative.
+//   (0x80000000 read as a signed 32-bit int = -2147483648, which is < 0.)
+//
+// REVIEW COMMANDS:
+//   row A: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f022_bigint_literal -Compiler flint
+//   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f022_bigint_literal -Compiler boot
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f022_bigint_literal.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl
+//   (the owner may also list SPEC.md; see f021's note.)
+//
+// ASCII only, no BOM; prints no pointer value; the only out-of-range literal is the one under test.
+int main() {
+  int x = 2147483648;
+  int zero = 0;
+  if (x < zero) { print(["bigint=negative\n"]); }
+  if (x > zero) { print(["bigint=positive\n"]); }
+  if (x == zero) { print(["bigint=zero\n"]); }
+  return 0;
+}

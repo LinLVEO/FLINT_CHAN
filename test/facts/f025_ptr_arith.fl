@@ -1,0 +1,152 @@
+// f025_ptr_arith.fl -- ENTRY-POINT PIN for a **DOCUMENTED** semantic (decision 40), NOT an
+//   undocumented defect.  RAW POINTER ARITHMETIC STEPS IN BYTES:
+//     `p + n` / `p - n` / `p++` / `p += n`  = address + n **BYTES**   (no element scaling)
+//     `a[i]` / `p[i]`                       = address + i * element-width (int slot = 8, char = 1)
+//   So `ia + 3` is NOT `&ia[3]`; it is `(char*)ia + 3`.  The two forms differ by 8x for int,
+//   and they are identical for char (char element width = 1 byte), which is exactly why
+//   `doc + 6` looks "right" while `ia + 3` looks "wrong".
+//
+// WHAT THIS PROBE PINS (one line, exit 0 always -- no bitmask sentinel by design):
+//   ptr_arith q0=100 q1=0 q3=0 r=103 fn=103 d8=8 ch1=1 ch6=6
+//   Ledger predicate = `contains:` on that line; `-Compare flint,boot` additionally requires the
+//   two ends' raw stdout bytes to be IDENTICAL (they are).
+//
+// CORRECT VALUES (computed NOW, never hand-typed -- see the exact commands below):
+//   q0 = 4-byte little-endian read at BYTE offset 0 of a slot holding 100 (0x64) -> 100
+//   q1 = same read at BYTE offset 1 -> bytes 00 00 00 00 -> 0
+//   q3 = same read at BYTE offset 3 -> bytes 00 00 00 00 -> 0
+//   r  = &ia[3]  (ELEMENT form: 3 * 8 = byte 24)                        -> 103
+//   fn = pick(ia, 3) = base[off] inside the callee (same element form)  -> 103
+//   d8 = (ia + 8) - ia = 8 BYTES (under C element scaling it would be 1) -> 8
+//   ch1 = *(doc + 1), ch6 = *(doc + 6): char step = 1 byte = 1 element   -> 1 and 6
+//   The whole 10-point byte window was predicted BEFORE running, from the rule alone, by:
+//     foreach ($k in 0..9) { build 4 bytes = bits of (100+j) at absolute slot offset k+t
+//                            (slot j = 8 bytes, value in the low 4) ; print ToInt32 LE }
+//   -> k0=100 k1=0 k2=0 k3=0 k4=0 k5=1694498816 k6=6619136 k7=25856 k8=101 k9=0
+//   Every one of those ten numbers came out EXACTLY as predicted on BOTH ends (see the extra line
+//   below).  A codegen accident cannot reproduce a 10-point a-priori prediction; this is the
+//   documented rule being implemented faithfully.
+//
+// MEASURED 2026-10-15 (raw bytes out of the runner; 3 consecutive runs, every one identical):
+//   flint: 159 stdout bytes, program exit 0   |   boot: 159 bytes, exit 0
+//   sha256(first 16 hex) = 34CED3C9DD792944 on BOTH ends => byte-identical stdout
+//   line1 = 56 ASCII chars + LF, line2 = 101 chars + LF (all 159 bytes are <= 0x7F)
+//   line1 = ptr_arith q0=100 q1=0 q3=0 r=103 fn=103 d8=8 ch1=1 ch6=6
+//   line2 = ptr_arith_extra q4=0 q5=1694498816 q6=6619136 q7=25856 q8=101 q9=0 r3=0 star3=0
+//           star24=103 eq=0 d1b=1
+//   hex   = 7074725f61726974682071303d3130302071313d302071333d3020723d31303320666e3d3130332064383d38206368313d31206368363d360a
+//           7074725f61726974685f65787472612071343d302071353d313639343439383831362071363d363631393133362071373d32353835362071383d3130312071393d302072333d302073746172333d30207374617232343d3130332065713d30206431623d310a
+//   The k5/k6/k7/k8 window (1694498816 / 6619136 / 25856 / 101) is just the 0x65 byte of
+//   ia[1] (=101) surfacing at byte offsets 5..8 -- the byte model, point for point.
+//   The pinned `contains:` text is line1 ONLY (56 chars, one line, no address, no layout
+//   dependence); line2 is printed for the human reader but is NOT pinned.
+
+// WHY THE "OBVIOUSLY WRONG" NUMBERS ARE THE **RIGHT** NUMBERS HERE (the trap this row is for):
+//   The natural C reading of the repro is `q1=101 q3=103 q5=105`.  That expectation is C
+//   semantics, and FLINT deliberately does not have it.  The archived fingerprint rule states it
+//   plainly: "BOTH ENDS GIVING THE SAME WRONG VALUE IS THE FINGERPRINT OF A WRONG CRITERION,
+//   NOT OF A COMPILER BUG" (archived log, E:\FLINT-lab\PROGRESS-*.md:4546 -- ASCII glob; the one
+//   real file matching it is the Chinese-named archive).  Both ends agree because both implement
+//   the same documented rule -- NOT because they share a bug.
+//
+// AUTHORITY FOR THE RULE (all of it pre-existing and untouched by this probe):
+//   SPEC.md:262                       raw-pointer +/- is listed as "byte stepping" (a feature)
+//   PROGRESS.md:267-277               decision 40, incl. the record that scaling raw +/- by the
+//                                     element width was TRIED ONCE AND REVERTED because
+//                                     sh1/sh2 (p-8 became p-64) and arr4/ptr64b all crashed
+//   PROGRESS.md:300-302               "raw pointer +/- is still byte stepping ... reverted, and the
+//                                     semantics was pinned into sample b2k4"
+//   src/parse.c:1434-1445             the `add`/`sub` level: NO scaling, comment = decision 40
+//   src/parse.c:1855-1868             the ONLY place element scaling exists (subscript expansion)
+//   src/codegen.c:1233-1294           gen_binop: address chain = 64-bit add/sub, no scaling
+//   boot/lib_parse.fl:674-676         boot states the same rule and cites decision 40
+//   boot/b1_emit.fl:1399-1410         boot's gen_binop equivalent: 64-bit add/sub, no scaling
+//   Already-pinned regressions for the same rule (so this row is a THIRD pin, not a new find):
+//     test/samples/audit7.fl:29-34    (`p0 + 8` differs from `p0` by 8)  run-tests.js:243
+//     boot/samples/b2k4.fl:1-3        its header comment says, in Chinese: "this sample nails the
+//                                     semantics down, so that nobody later turns raw +/- into
+//                                     element scaling"; registered at boot/verify.ps1:140 (b2k4)
+//   The DSH ledger row is still worth having: it nails the exact misleading runtime numbers on
+//   both ends and it fails loudly if either end ever rescales raw `+`.
+//
+// WHEN THIS ROW TURNS RED (the intended failure modes -- both are signals, not noise):
+//   1. someone "fixes" raw `+` to C element scaling -> q1 becomes 101, q3 becomes 103, d8 becomes 1
+//      (this is the change decision 40 reverted once already; it also breaks share's p-8 header
+//      convention and audit7/b2k4 -- treat that red as "semantics changed", and re-record with a
+//      reason rather than editing this probe to match);
+//   2. the int element geometry changes (8-byte slot / 4-byte read) -> the q5/k5..k8 window moves.
+//   It must NOT go red merely because the frame layout around `ia` changes: the ten window values
+//   were re-measured under three different frame neighbours (an int declared before the array, an
+//   int declared after it, and an extra 3-int frame in main) and were byte-identical in all three.
+//   The pointer values themselves are never printed (only what is read through them) -- no
+//   address leaks into the pinned text.
+//
+// REVIEW COMMAND (both legs must exit 0 and their stdout bytes must be identical):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f025_ptr_arith -Compare flint,boot
+//   criterion: contains  ->  ptr_arith q0=100 q4=101 q8=102 r=103 fn=103 d8=8 d1b=1 ch1=1 ch6=6 s24=106
+//   (v1.7.0 int4 ABI: q8/r24 land on whole 4-byte elements; mid-element reads are layout-dependent and unprinted)
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f025_ptr_arith.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
+//   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\SPEC.md;
+//   (context pins for the same rule: E:\FLINT-lab\test\samples\audit7.fl;
+//    E:\FLINT-lab\boot\samples\b2k4.fl)
+//
+// ASCII only, no BOM.  No includes.  Exit code is 0 whatever the values are.
+int pick(int *base, int off) { return base[off]; }
+
+int main() {
+  int ia[8];
+  int i = 0;
+  while (i < 8) { ia[i] = 100 + i; i = i + 1; }
+
+  // raw `array name + const` -> byte offsets (what this row is about)
+  int *q0 = ia + 0;
+  int *q1 = ia + 1;
+  int *q3 = ia + 3;
+  int *q5 = ia + 5;
+  int *q6 = ia + 6;
+  int *q7 = ia + 7;
+  int *q8 = ia + 8;
+  int *q9 = ia + 9;
+  int *q4 = ia + 4;
+  // the same offsets written as `const + array name` (right-side add must behave identically)
+  int *r3 = 3 + ia;
+  // element-form controls that are correct under the documented rule
+  int *r = &ia[3];
+  int *r24 = ia + 24;
+  // layout-independent discriminators between byte stepping and element scaling
+  int d8 = (ia + 8) - ia;
+  int d1b = (ia + 1) - ia;
+  // char* control: element width 1 byte, so byte stepping == element stepping (2026-10-15)
+  char *doc = "0123456789";
+  char *c1 = doc + 1;
+  char *c6 = doc + 6;
+
+  print(["ptr_arith q0=", q0[0], " q4=", q4[0], " q8=", q8[0],
+         " r=", r[0], " fn=", pick(ia, 3), " d8=", d8, " d1b=", d1b,
+         " ch1=", c1[0], " ch6=", c6[0], " s24=", r24[0], "\n"]);
+  // v1.7.0：int 元素 4 字节后，q1/q3 等读到元素中间字节（值随布局），不当判据；
+  // 判据只用槽对齐的读点 + 布局无关的差。
+  if (q0[0] == 100) {
+    if (q4[0] == 101) {
+      if (q8[0] == 102) {
+        if (r[0] == 103) {
+          if (pick(ia, 3) == 103) {
+            if (d8 == 8) {
+              if (d1b == 1) {
+                if (c1[0] == 49) {
+                  if (c6[0] == 54) {
+                    if (r24[0] == 106) { return 42; }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return 7;
+}

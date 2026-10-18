@@ -583,6 +583,37 @@ static void emit_sub64(Buf *b)                { const uint8_t x[] = {0x48, 0x29,
 static void emit_cmp64(Buf *b)                { const uint8_t x[] = {0x48, 0x39, 0xC8}; buf_bytes(b, x, 3); } // cmp rax,rcx
 static void emit_test64(Buf *b)               { const uint8_t x[] = {0x48, 0x85, 0xC0}; buf_bytes(b, x, 3); } // test rax,rax
 
+// ===== v1.7.0 int_64：64 位值算术语义的全套发射器 =====
+// 口径（§2.9）：溢出 = 2^64 回绕（补码，不饱和/不陷阱，与 int 的 32 位回绕同一条纪律）；
+//   除零 / INT64_MIN ÷ -1 = 硬件 #DE（与 int 的 INT32_MIN ÷ -1 完全对称，不做守卫）；
+//   移位量 ≥ 64 由硬件掩码（mod 64），与 32 位侧的 mod 32 一致。
+// ⚠️ 寄存器约定与 32 位档**逐条同形**：rax = 左/累加，rcx = 右（除法另用 rdx）。
+static void emit_imul64(Buf *b)               { const uint8_t x[] = {0x48, 0x0F, 0xAF, 0xC1}; buf_bytes(b, x, 4); } // imul rax,rcx
+static void emit_and64(Buf *b)                { const uint8_t x[] = {0x48, 0x21, 0xC8}; buf_bytes(b, x, 3); } // and rax,rcx
+static void emit_or64(Buf *b)                 { const uint8_t x[] = {0x48, 0x09, 0xC8}; buf_bytes(b, x, 3); } // or  rax,rcx
+static void emit_xor64(Buf *b)                { const uint8_t x[] = {0x48, 0x31, 0xC8}; buf_bytes(b, x, 3); } // xor rax,rcx
+static void emit_shl64(Buf *b)                { const uint8_t x[] = {0x48, 0xD3, 0xE0}; buf_bytes(b, x, 3); } // shl rax,cl
+static void emit_sar64(Buf *b)                { const uint8_t x[] = {0x48, 0xD3, 0xF8}; buf_bytes(b, x, 3); } // sar rax,cl（算术右移保符号）
+static void emit_not64(Buf *b)                { const uint8_t x[] = {0x48, 0xF7, 0xD0}; buf_bytes(b, x, 3); } // not rax
+static void emit_neg64(Buf *b)                { const uint8_t x[] = {0x48, 0xF7, 0xD8}; buf_bytes(b, x, 3); } // neg rax
+static void emit_cqo(Buf *b)                  { const uint8_t x[] = {0x48, 0x99}; buf_bytes(b, x, 2); }       // cqo（rdx:rax = 符号扩展）
+static void emit_idiv64(Buf *b)               { const uint8_t x[] = {0x48, 0xF7, 0xF9}; buf_bytes(b, x, 3); } // idiv rcx（商 rax / 余 rdx）
+static void emit_mov_rax_rdx64(Buf *b)        { const uint8_t x[] = {0x48, 0x89, 0xD0}; buf_bytes(b, x, 3); } // mov rax,rdx（取余数）
+// int_64 → int（to_int32）：取低 32 位。`mov eax,eax` 顺带把高半清零（64 位寄存器的 32 位写约束）
+static void emit_l2i(Buf *b)                  { const uint8_t x[] = {0x89, 0xC0}; buf_bytes(b, x, 2); }
+// mov rax, imm64：`48 B8` + 8 字节；能装进 int32 时退 `48 C7 C0 imm32`（符号扩展，短 3 字节）
+static void emit_mov_rax_imm64(Buf *b, long long v) {
+  if (v >= -2147483648LL && v <= 2147483647LL) {
+    const uint8_t x[] = {0x48, 0xC7, 0xC0};
+    buf_bytes(b, x, 3);
+    buf_u32(b, (uint32_t)(int)v);
+    return;
+  }
+  buf_byte(b, 0x48);
+  buf_byte(b, 0xB8);
+  buf_u64(b, (uint64_t)v);
+}
+
 // —— v0.9 new/own 内存管理助手 ——
 static void emit_push_rcx(Buf *b)             { buf_byte(b, 0x51); g_rspm = (g_rspm - 8) & 15; } // push rcx（main 返回值保护）
 static void emit_lea_rax_rdx8(Buf *b)         { const uint8_t x[] = {0x48, 0x8D, 0x42, 0x08}; buf_bytes(b, x, 4); } // lea rax,[rdx+8]（负载=基址+头部8B）
@@ -718,6 +749,16 @@ static bool is_addr_expr(Node *n) {
   }
 }
 
+// ===== v1.7.0：64 位取值通道的**单一判据** =====
+// 语义：`rax` 里这个表达式的值是不是**完整 64 位**（可以直接参与 64 位 alu / 64 位存槽 / 整搬）。
+//   两条来源：① 地址类（is_addr_expr）② int_64 值（expr_is_i64）。
+// ⚠️ 这是本设计最关键的一刀（§2.4）：宽档里原来那 6 处
+//   `if (wide && !is_addr_expr(x)) emit_movsxd_rax_eax(b);`
+//   的语义是"非地址侧是 32 位值，要符号扩展"。int_64 操作数既不满足 is_addr_expr
+//   又**不该**被扩展 ⇒ 条件一律改成 `!is64_value(x)`。漏改任何一处 =
+//   每个 int64 操作数的高 32 位被 movsxd 抹掉，**编译完全通过、值错**。
+static bool is64_value(Node *n) { return is_addr_expr(n) || expr_is_i64(n); }
+
 // ===== v1.0.13 T1：int 装地址的自动适配（评审清单【3】收口，用户拍板「编译器自己判断」）=====
 // 病根：int 是 4 字节语义，往 int 槽里存 64 位地址会**静默截断**高 32 位，再当指针用即 0xC0000005。
 // T1 规则（判断不了就报错，绝不静默猜一个宽度）：
@@ -778,6 +819,20 @@ static bool is_addr_value(Node *n) {
   }
 }
 
+// v1.6.3 缺陷修复（地址链相减当 print 段用会编译失败）：
+//   `print(["d=", (ia + 8) - ia, "\n"])` —— `(ia+8)-ia` 是**标量差值**，可调用点 :1809 的
+//   `is_addr_value(chk) || is_addr_expr(chk)` 里，is_addr_expr 对 ND_ADD/ND_SUB **一律**按
+//   `lhs || rhs` 判地址（:708-709），**缺了 is_addr_value 早已写好的那条例外**（:773-775：
+//   两侧都是地址 ⇒ 地址 − 地址 = 标量）⇒ 差值被误判成地址 ⇒ 报"地址值不能装进 int 形参"。
+//   ⚠️ 这里**只**在需要那条例外的判据处修（调用点的"这个值是不是地址"），**不动** is_addr_expr
+//   本身：它还管着"算术是否走 64 位"（wide 选择 :1233-1236 / movsxd 分流 :1251,1266,1275），
+//   全局改会反过来打坏今天正确的标量路径（`int d = (ia+8)-ia;` 今天 8/8 正确）。
+//   判据口径与 is_addr_value 的 ND_SUB 分支逐字一致（两侧都是"值-地址类" ⇒ 结果是标量）。
+static bool addr_diff_is_scalar(Node *n) {
+  if (!n || n->kind != ND_SUB) return false;
+  return is_addr_value(n->lhs) && is_addr_value(n->rhs);
+}
+
 // ===== 卡 T-20261010-122541：实参值搬进 64 位 GP 实参寄存器时的「宽度语义」单点 =====
 // 病：`mov rcx/rdx/r8/r9, rax` 是**整搬** 64 位，可 rax 里的 int 值是 32 位运算的结果
 //     （`mov eax,0; sub eax,2` 会把高 32 位清零）⇒ 负值被**零扩展**成 0x00000000FFFFFFFE。
@@ -787,7 +842,8 @@ static bool is_addr_value(Node *n) {
 //     其余都是 int 值（4 字节语义）⇒ **movsxd r64,eax 符号扩展**（与地址链 int 侧同一口径）。
 // 调用点三处：gen_call 的双通道落位 / gen_call_many / gen_apicall —— **必须同源**（写错一处就是静默错值）。
 static void emit_arg_rax_to_gp(Buf *b, int gi, Node *arg) {
-  bool addr = is_addr_value(arg) || is_addr_expr(arg);
+  // v1.7.0：int_64 实参也要**整搬**（它是完整 64 位值；走 movsxd 会截断高 32 位）
+  bool addr = is_addr_value(arg) || is_addr_expr(arg) || expr_is_i64(arg);
   if (gi == 0)      { if (addr) emit_mov_rcx_rax(b); else emit_movsxd_rcx_eax(b); }
   else if (gi == 1) { if (addr) emit_mov_rdx_rax(b); else emit_movsxd_rdx_eax(b); }
   else if (gi == 2) { if (addr) emit_mov_r8_rax(b);  else emit_movsxd_r8_eax(b); }
@@ -1232,8 +1288,13 @@ static int simple_int_var_off(Node *n) {
 
 static void gen_binop(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
-  bool wide = (node->kind == ND_ADD || node->kind == ND_SUB) &&
-              (is_addr_expr(node->lhs) || is_addr_expr(node->rhs));
+  // ===== v1.7.0：64 位通道的两个来源要**分开判**（合并判会改掉既有 int 程序的字节）=====
+  //   ① 地址类：只有 ADD/SUB 才点火（决策 17/40 的老口径，一行未改）
+  //   ② int_64：**所有**二元算术/位运算/移位都点火（它的值域就是 64 位）
+  bool addr_wide = (node->kind == ND_ADD || node->kind == ND_SUB) &&
+                   (is_addr_expr(node->lhs) || is_addr_expr(node->rhs));
+  bool i64_wide = expr_is_i64(node->lhs) || expr_is_i64(node->rhs);
+  bool wide = addr_wide || i64_wide;
   // ===== v1.4.26（M5 ①）：下标地址链融合 =====
   //   `a[i]` 被 parse 展开成 *(基址 + i*8)；本地数组的基址是**编译期常量**（rbp-off）
   //   ⇒ 一条 SIB 寻址顶老路径的 8 条（lea+push+算下标+imul+movsxd+pop+add）。详见 try_gen_elem_addr。
@@ -1248,22 +1309,23 @@ static void gen_binop(FuncCtx *c, Node *node) {
        node->kind == ND_BITAND || node->kind == ND_BITOR || node->kind == ND_BITXOR)) {
     int v = node->rhs->val;
     gen_expr(c, node->lhs);
-    if (wide && !is_addr_expr(node->lhs)) emit_movsxd_rax_eax(b);
+    if (wide && !is64_value(node->lhs)) emit_movsxd_rax_eax(b);
     switch (node->kind) {
       case ND_ADD:    emit_alu_imm(b, 0, wide, v); break;
       case ND_SUB:    emit_alu_imm(b, 5, wide, v); break;
-      case ND_MUL:    emit_imul_imm(b, false, v);  break;
-      case ND_BITAND: emit_alu_imm(b, 4, false, v); break;
-      case ND_BITOR:  emit_alu_imm(b, 1, false, v); break;
-      default:        emit_alu_imm(b, 6, false, v); break;   // ND_BITXOR
+      case ND_MUL:    emit_imul_imm(b, wide, v);  break;   // v1.7.0：int_64 常量要 48 前缀
+      case ND_BITAND: emit_alu_imm(b, 4, wide, v); break;  // v1.7.0：int_64 位运算同理
+      case ND_BITOR:  emit_alu_imm(b, 1, wide, v); break;
+      default:        emit_alu_imm(b, 6, wide, v); break;  // ND_BITXOR
     }
     return;
   }
   gen_expr(c, node->lhs);
   // v1.0.12（评审清单【1】）：地址链的「左」侧同样要符号扩展——原实现只认 rhs，
   // `i + p`（负 int 在左、地址在右）把 -8 零扩展成 0xFFFFFFF8（约 42 亿）→ 野指针 0xC0000005。
-  // 规则统一：wide 时「非地址类的一侧」必须 movsxd（地址类一侧 64 位已完整）。
-  if (wide && !is_addr_expr(node->lhs)) emit_movsxd_rax_eax(b);
+  // 规则统一：wide 时「非 64 位值的一侧」必须 movsxd（地址/int_64 一侧 64 位已完整）。
+  // v1.7.0：判据从 is_addr_expr 改成 is64_value —— int_64 操作数不该被 movsxd（§2.4 的坑 #1）
+  if (wide && !is64_value(node->lhs)) emit_movsxd_rax_eax(b);
   // v1.4.9② 窥孔：rhs 是普通局部 int 变量 → 直接读进 ecx（整对 push/pop 与 eax 中转一起消失）
   if (!try_load_var_to_ecx(c, node->rhs, wide)) {
     emit_push_rax(b);
@@ -1272,23 +1334,27 @@ static void gen_binop(FuncCtx *c, Node *node) {
       // v1.0.6.2 盲区审计 A7：地址链 rhs 若是 int（下标×宽 / p±n 的 n）须符号扩展 movsxd——
       // 原恒 mov rcx,rax：32 位乘/负偏移零扩展成 0xFFFFFFF8 巨大正数 → p[-1]/p-n 解引用崩
       // （正偏移侥幸对，负偏移必现；栈地址 <4GB 时正偏移掩盖了路径本身 32 位残留问题）
-      if (is_addr_expr(node->rhs)) emit_mov_rcx_rax(b);   // rhs 真地址（64 位完整）
-      else emit_movsxd_rcx_eax(b);                        // rhs int 偏移 → 符号扩展
+      // v1.7.0：int_64 的 rhs 也是 64 位完整值 ⇒ 整搬（判据同 is64_value）
+      if (is64_value(node->rhs)) emit_mov_rcx_rax(b);   // rhs 真地址 / int_64 值（64 位完整）
+      else emit_movsxd_rcx_eax(b);                      // rhs int 偏移 → 符号扩展
     } else emit_mov_ecx_eax(b);        // ecx = rhs
     emit_pop_rax(b);                 // rax = lhs
   }
   switch (node->kind) {
     case ND_ADD: if (wide) emit_add64(b); else emit_add(b); break;
     case ND_SUB: if (wide) emit_sub64(b); else emit_sub(b); break;
-    case ND_MUL: emit_imul(b); break;
-    case ND_DIV: emit_cdq(b); emit_idiv(b); break;
-    case ND_MOD: emit_cdq(b); emit_idiv(b); emit_mov_eax_edx(b); break;
+    // v1.7.0：int_64 的乘/除/取模/位运算/移位全部走 64 位档（§2.4 的 P0 清单）
+    case ND_MUL: if (i64_wide) emit_imul64(b); else emit_imul(b); break;
+    case ND_DIV: if (i64_wide) { emit_cqo(b); emit_idiv64(b); }
+                 else { emit_cdq(b); emit_idiv(b); } break;
+    case ND_MOD: if (i64_wide) { emit_cqo(b); emit_idiv64(b); emit_mov_rax_rdx64(b); }
+                 else { emit_cdq(b); emit_idiv(b); emit_mov_eax_edx(b); } break;
     // v0.7.2 位运算（eax op ecx；移位量在 cl）
-    case ND_BITAND: emit_and(b); break;
-    case ND_BITOR: emit_or(b); break;
-    case ND_BITXOR: emit_xor(b); break;
-    case ND_SHL: emit_shl(b); break;
-    case ND_SHR: emit_sar(b); break;
+    case ND_BITAND: if (i64_wide) emit_and64(b); else emit_and(b); break;
+    case ND_BITOR:  if (i64_wide) emit_or64(b);  else emit_or(b); break;
+    case ND_BITXOR: if (i64_wide) emit_xor64(b); else emit_xor(b); break;
+    case ND_SHL:    if (i64_wide) emit_shl64(b); else emit_shl(b); break;
+    case ND_SHR:    if (i64_wide) emit_sar64(b); else emit_sar(b); break;
     default: break;
   }
 }
@@ -1455,7 +1521,8 @@ static void gen_dbl_neg(FuncCtx *c, Node *node) {
 // 塌缩只发生在结尾（setcc+movzx ↔ 取反 jcc），不会悄悄改掉宽度或符号扩展规则。
 static void gen_cmp_flags(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
-  bool wide = is_addr_expr(node->lhs) || is_addr_expr(node->rhs);
+  // v1.7.0：判据从 is_addr_expr 改成 is64_value —— int_64 的比较必须 64 位（谓词仍是有符号 setl/setg）
+  bool wide = is64_value(node->lhs) || is64_value(node->rhs);
   // ===== v1.4.26（M5 ③）：比较就地化 =====
   // 病（三个基准的循环条件都是它）：`while (i < n)` 老路 `mov i→eax / mov n→ecx / cmp eax,ecx`
   //   —— 三条里前两条纯搬运；i/n 都进寄存器后（M4/②）最省的是 `cmp [rbp-n], rS` **一条**。
@@ -1477,7 +1544,7 @@ static void gen_cmp_flags(FuncCtx *c, Node *node) {
   gen_expr(c, node->lhs);
   // v1.0.12（评审清单【1】同族）：64 位比较两侧都要按 64 位语义取值——左侧非地址类（int）
   // 须 movsxd；否则 `i < &a[0]`（i = -1）把 0xFFFFFFFF 当正整数与栈地址比 → 结果反了。
-  if (wide && !is_addr_expr(node->lhs)) emit_movsxd_rax_eax(b);
+  if (wide && !is64_value(node->lhs)) emit_movsxd_rax_eax(b);
   // v1.4.9③ 窥孔：右操作数是常量字面量 → 直接立即数比较（省掉 push/pop 与 mov ecx,eax）
   if (node->rhs && node->rhs->kind == ND_NUM) {
     emit_alu_imm(b, 7, wide, node->rhs->val);
@@ -1494,7 +1561,7 @@ static void gen_cmp_flags(FuncCtx *c, Node *node) {
   // 右侧同理：地址类 → mov rcx,rax（64 位完整）；int → movsxd rcx,eax（原恒 mov rcx,rax
   // 零扩展，`p == -1`/负 int 参与 64 位比较全错）
   if (!wide) emit_mov_ecx_eax(b);                     // 非地址比较照旧走 32 位
-  else if (is_addr_expr(node->rhs)) emit_mov_rcx_rax(b);
+  else if (is64_value(node->rhs)) emit_mov_rcx_rax(b);   // v1.7.0：地址 / int_64 都整搬
   else emit_movsxd_rcx_eax(b);
   emit_pop_rax(b);
   if (wide) emit_cmp64(b);
@@ -1538,7 +1605,7 @@ static bool try_gen_cmp_branch(FuncCtx *c, Node *cond, bool jump_if_false, int l
     Node *in = cond->lhs;
     if (!in) return false;
     gen_expr(c, in);
-    if (is_addr_expr(in)) emit_test64(b); else emit_test(b);
+    if (is64_value(in)) emit_test64(b); else emit_test(b);
     emit_jcc_label(c, jump_if_false ? 0x85 : 0x84, label);
     return true;
   }
@@ -1569,10 +1636,10 @@ static void gen_logand(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
   int f = new_label(c), end = new_label(c);
   gen_expr(c, node->lhs);
-  if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+  if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
   emit_jcc_label(c, 0x84, f);      // je false
   gen_expr(c, node->rhs);
-  if (is_addr_expr(node->rhs)) emit_test64(b); else emit_test(b);
+  if (is64_value(node->rhs)) emit_test64(b); else emit_test(b);
   emit_jcc_label(c, 0x84, f);      // je false
   emit_mov_eax_imm(b, 1);
   emit_jmp_label(c, end);
@@ -1586,10 +1653,10 @@ static void gen_logor(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
   int t = new_label(c), end = new_label(c);
   gen_expr(c, node->lhs);
-  if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+  if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
   emit_jcc_label(c, 0x85, t);      // jne true
   gen_expr(c, node->rhs);
-  if (is_addr_expr(node->rhs)) emit_test64(b); else emit_test(b);
+  if (is64_value(node->rhs)) emit_test64(b); else emit_test(b);
   emit_jcc_label(c, 0x85, t);      // jne true
   emit_mov_eax_imm(b, 0);
   emit_jmp_label(c, end);
@@ -1806,7 +1873,8 @@ static void gen_call(FuncCtx *c, Node *node) {
       //    指针/引用形参不会走到这里被包（parse 的 widen 分支要求 !by_addr），所以解包对方向①无影响。
       Node *chk = a;
       if (chk->kind == ND_I2D && chk->lhs) chk = chk->lhs;
-      bool arg_is_addr = is_addr_value(chk) || is_addr_expr(chk);
+      // v1.4.27：`(ia + 8) - ia`（地址 − 地址 = 标量差值）不是地址 —— 见 addr_diff_is_scalar 的注释。
+      bool arg_is_addr = (is_addr_value(chk) || is_addr_expr(chk)) && !addr_diff_is_scalar(chk);
       if (by_addr && !arg_is_addr && a->kind != ND_NUM && a->kind != ND_APICALL) {
         if (flint_strict)
           error_at_nodef(node, "[E-T1-INTTOPTR] 实参只有 32 位（int 值），而第 %d 个形参是指针"
@@ -2181,6 +2249,18 @@ static void gen_expr(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
   switch (node->kind) {
     case ND_NUM: emit_mov_eax_imm(b, node->val); return;
+    // ===== v1.7.0 int_64 =====
+    case ND_NUM64:   // 64 位字面量 → rax（小值退 mov rax,imm32 符号扩展，短 3 字节）
+      emit_mov_rax_imm64(b, node->lval);
+      return;
+    case ND_I2L:     // int → int_64（符号扩展：movsxd rax,eax）
+      gen_expr(c, node->lhs);
+      emit_movsxd_rax_eax(b);
+      return;
+    case ND_L2I:     // int_64 → int（显式收窄 to_int32：低 32 位）
+      gen_expr(c, node->lhs);
+      emit_l2i(b);
+      return;
     // ===== v1.1.0 浮点（阶段1）=====
     case ND_DBL: {
       // double 字面量 → xmm0（内容 8 字节位型进数据区，disp 排布后回填）
@@ -2262,6 +2342,11 @@ static void gen_expr(FuncCtx *c, Node *node) {
         slot_load_dbl(b, node->offset);
         return;
       }
+      // v1.7.0：int_64 局部读 = 8 字节整读（必须排在 slot_load_eax 兜底之前 —— 漏补这一档 = 读半截）
+      if (node->ty == TY_INT64) {
+        slot_load_rax64(b, node->offset);
+        return;
+      }
       // v1.0.13 T1 ②：装地址的 int 变量 → 8 字节读（高半完整；算术仍只消费 eax，语义不变）
       if (node->ty == TY_INT && slot_marked(node->offset)) {
         slot_load_rax64(b, node->offset);
@@ -2274,6 +2359,8 @@ static void gen_expr(FuncCtx *c, Node *node) {
       // v0.9.2：读写宽度随读取目标类型——ptr 字段（s.hwnd）→ 64 位；int 字段/*p/a[i] → 32 位
       // v1.0.5：char 目标（char 字段/元素/char* 解引用）→ movzx 字节读
       if (node->ty == TY_PTR) emit_deref_rax64(b);
+      // v1.7.0：int_64 目标（int_64 数组元素 / 结构体 int_64 字段 / int_64* 解引用）→ 8 字节整读
+      else if (node->ty == TY_INT64) emit_deref_rax64(b);
       else if (node->ty == TY_CHAR) emit_load_byte_at_rax(b);
       // v1.2.4：double 目标（double 数组元素 / double 结构体字段 / double 指针解引用）→ SSE 8 字节读
       else if (node->ty == TY_DOUBLE) { emit_mov_rdx_rax(b); emit_load_dbl_at_rdx(b); }
@@ -2305,6 +2392,12 @@ static void gen_expr(FuncCtx *c, Node *node) {
         gen_expr(c, node->rhs);
         if (node->lhs->ty == TY_PTR || node->lhs->ty == TY_FUNCPTR)
           slot_store_rax64(b, node->lhs->offset);
+        // v1.7.0：int_64 局部槽必须 8 字节整写（排在所有 32 位档之前；parse 已保证 rhs 是
+        //   64 位值或 ND_I2L，这里再兜一道 movsxd 保证高半确定 —— 与 T1 ① 同一条纪律）
+        else if (node->lhs->ty == TY_INT64) {
+          if (!is64_value(node->rhs)) emit_movsxd_rax_eax(b);
+          slot_store_rax64(b, node->lhs->offset);
+        }
         else if (node->lhs->ty == TY_CHAR) { slot_store_byte(b, node->lhs->offset); emit_movzx_eax_al(b); } // v1.0.5 字节写（v1.0.6.2 A2：表达式值截断=存储字节）
         // v1.0.13 T1 ①：装地址的 int 槽按 8 字节存——地址值原样写满；普通 int 值先符号扩展再写满
         // （否则高半留旧值/栈残渣，T1 ② 的 8 字节读会读回垃圾）
@@ -2345,6 +2438,9 @@ static void gen_expr(FuncCtx *c, Node *node) {
                             "——请把目标声明成 int *（或先存进一个 int * 变量再整体赋值）");
       if (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR) check_ptr_target(node, node->rhs);
       gen_expr(c, node->rhs);                 // eax/rax = 右值（内部 call 对齐）
+      // v1.7.0：int_64 间接目标兜一道符号扩展（parse 已保证右侧是 64 位值或 ND_I2L；
+      //   这里再守一次，保证写进内存的高 32 位永远是确定值，不留栈残渣）
+      if (node->lhs->ty == TY_INT64 && !is64_value(node->rhs)) emit_movsxd_rax_eax(b);
       slot_store_rax64(b, c->scratch_off);    // [rbp-scratch] = rax（值暂存）
       gen_lvalue_addr(c, node->lhs);          // rax = 目标地址（无 call 跨越，安全）
       emit_push_rax(b);
@@ -2355,8 +2451,10 @@ static void gen_expr(FuncCtx *c, Node *node) {
       // （0x00007ffc…DLL 返回地址残渣）→ RegisterClassA 读 hCursor=0x7ffc00000000 巨值
       // err 87（大帧换栈位置即现，v1.0.4 撞墙；小帧残留恰 0 侥幸掩盖）。
       // 判定：rhs 地址类 或 目标本身是指针字段（ND_DEREF.ty==TY_PTR）→ 64 位写。
+      // v1.7.0：+ 目标本身是 int_64（数组元素/结构体字段/*p）→ 必须 64 位写（32 位写 = 只写低半）
       bool wide = is_addr_expr(node->rhs) ||
-                  (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR);
+                  (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR) ||
+                  node->lhs->ty == TY_INT64;
       if (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_CHAR) {
         emit_store_byte_at_rdx(b);   // v1.0.5：char 目标（字段/元素/char*）88 02 字节写（不碰邻字节）
         emit_movzx_eax_al(b);        // v1.0.6.2 A2：表达式值截断=存储字节（88 写后 eax 高 24 位残留运算结果）
@@ -2506,14 +2604,15 @@ static void gen_expr(FuncCtx *c, Node *node) {
       // v1.1.0：double 取负 = 翻符号位（统一走 gen_dbl_neg，别在这里重复实现一份）
       if (expr_is_dbl(node->lhs)) { gen_dbl_neg(c, node); return; }
       gen_expr(c, node->lhs);
-      emit_neg(b);
+      // v1.7.0：int_64 取负 = neg rax（48 F7 D8）；int 仍是 32 位 neg eax
+      if (expr_is_i64(node->lhs)) emit_neg64(b); else emit_neg(b);
       return;
     // v1.3.1：三元——条件判真后**只生成被选中的那一支**（C 语义；不选的那支不求值）
     case ND_TERN: {
       int else_l = new_label(c), end = new_label(c);
       if (!try_gen_cmp_branch(c, node->lhs, true, else_l)) {   // v1.4.9① 比较塌缩（条件为假 → 跳 else）
         gen_expr(c, node->lhs);
-        if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+        if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
         emit_jcc_label(c, 0x84, else_l);   // je else
       }
       gen_expr(c, node->rhs);            // 真分支（double 时结果天然落 xmm0）
@@ -2726,13 +2825,13 @@ static void gen_expr(FuncCtx *c, Node *node) {
     case ND_LOGOR: gen_logor(c, node); return;
     case ND_NOT:
       gen_expr(c, node->lhs);
-      if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+      if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
       emit_setcc(b, 0x94); // sete：eax==0 → 1
       emit_movzx_eax_al(b);
       return;
-    case ND_BITNOT:   // v0.7.2：~x = not eax
+    case ND_BITNOT:   // v0.7.2：~x = not eax；v1.7.0：int_64 → not rax（48 F7 D0）
       gen_expr(c, node->lhs);
-      emit_not(b);
+      if (expr_is_i64(node->lhs)) emit_not64(b); else emit_not(b);
       return;
     default:
       fprintf(stderr, "FLINT: 内部错误：表达式出现语句节点（kind=%d）\n", (int)node->kind);
@@ -2815,7 +2914,7 @@ static void gen_stmt_inner(FuncCtx *c, Node *node) {
       size_t cstart = c->code.len;   // v1.4.16：条件字节的起点（下面单独记一条行表记录）
       if (!try_gen_cmp_branch(c, node->lhs, true, else_l)) {   // v1.4.9① 比较塌缩（条件为假 → 跳 else）
         gen_expr(c, node->lhs);       // cond
-        if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+        if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
         emit_jcc_label(c, 0x84, else_l); // je else
       }
       dbg_record(c, node->lhs, cstart, c->code.len);   // v1.4.16：条件（取条件表达式的行）
@@ -2834,7 +2933,7 @@ static void gen_stmt_inner(FuncCtx *c, Node *node) {
       size_t cstart = c->code.len;   // v1.4.16：条件字节的起点
       if (!try_gen_cmp_branch(c, node->lhs, true, end)) {      // v1.4.9① 比较塌缩（条件为假 → 跳出循环）
         gen_expr(c, node->lhs);       // cond
-        if (is_addr_expr(node->lhs)) emit_test64(b); else emit_test(b);
+        if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
         emit_jcc_label(c, 0x84, end); // je end
       }
       dbg_record(c, node->lhs, cstart, c->code.len);   // v1.4.16：条件（取条件表达式的行）
@@ -2854,7 +2953,7 @@ static void gen_stmt_inner(FuncCtx *c, Node *node) {
         size_t cstart = c->code.len;   // v1.4.16：条件字节的起点
         if (!try_gen_cmp_branch(c, node->cond, true, end)) {   // v1.4.9① 比较塌缩（条件为假 → 跳出循环）
           gen_expr(c, node->cond);
-          if (is_addr_expr(node->cond)) emit_test64(b); else emit_test(b);
+          if (is64_value(node->cond)) emit_test64(b); else emit_test(b);
           emit_jcc_label(c, 0x84, end);
         }
         dbg_record(c, node->cond, cstart, c->code.len);   // v1.4.16：条件（取条件表达式的行）
@@ -2999,7 +3098,8 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
       //   rbp+8 = 返回地址、+16..+47 = shadow ⇒ 第 i(i≥5) 个形参在 [rbp+48+(i-5)*8]。
       if (i >= 4) {
         int disp = 48 + (i - 4) * 8;
-        bool wide2 = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR;
+        bool wide2 = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR
+                  || fn->param_ty[i] == TY_INT64;   // v1.7.0：int_64 栈参也整 64 位落槽
         if (fn->param_ty[i] == TY_DOUBLE) {
           emit_load_rbp_pos(&c->code, disp, 2);              // movsd xmm0,[rbp+disp]
           slot_store_dbl_xmm(&c->code, fn->param_offsets[i], 0);
@@ -3018,7 +3118,8 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
         continue;
       }
       // v1.3.2：函数指针形参 = 地址 → 也要 64 位落槽（记 TY_INT 会截断成 32 位 = 静默传野地址）
-      bool wide = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR;
+      bool wide = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR
+               || fn->param_ty[i] == TY_INT64;   // v1.7.0：int_64 值形参 → 64 位 GP 落槽
       switch (gi) {
         case 0:
           if (wide) slot_store_rcx64(&c->code, fn->param_offsets[i]);

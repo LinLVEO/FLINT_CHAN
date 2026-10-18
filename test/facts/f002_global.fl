@@ -1,0 +1,32 @@
+// f002_global.fl -- ASSERTION F-002: top-level globals (a scalar with an initialiser
+// plus a char ARRAY) compile AND run on both the current boot and the pre-v1.5.0 boot.
+//
+// The two globals below are exactly the pair that the stale memory claim denied:
+//     "the boot compiler subset has no global variables".
+// Bit per check; all 5 bits lit (mask 31) => exit 0, otherwise exit = mask (non-zero).
+//   bit0  1  the char array is writable at [0]
+//   bit1  2  ... and at [1]
+//   bit2  4  ... and we can terminate it ourselves
+//   bit3  8  the initialised scalar is writable
+//   bit4 16  gb[7] is zero -- proves the array really got 8 bytes of zeroed storage
+// (The mask is printed, never a char-typed NUL, because the two ends render a NUL char
+//  differently and that noise is not what F-002 is about.)
+
+int g = 0;
+char gb[8];
+
+int main() {
+  int m = 0;
+  gb[0] = 'O';
+  gb[1] = 'K';
+  gb[2] = 0;
+  g = 7;
+  if (gb[0] == 'O') { m = m | 1; }
+  if (gb[1] == 'K') { m = m | 2; }
+  if (gb[2] == 0)   { m = m | 4; }
+  if (g == 7)       { m = m | 8; }
+  if (gb[7] == 0)   { m = m | 16; }
+  print(["f002 mask=", m, " gb=", gb, " g=", g, "\n"]);
+  if (m == 31) { return 0; }
+  return m;
+}

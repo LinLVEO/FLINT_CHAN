@@ -1,0 +1,16 @@
+// f003_xesc.fl -- ASSERTION F-003: the escape "\xNN" is NOT implemented the same way on
+// the two ends.
+//   real flint : "\x41"  ->  0x41 'A' then NUL      => prints "xesc=65,0"
+//   boot       : "\x41"  ->  the four chars x 4 1   => prints "xesc=120,52"
+// The probe only REPORTS what it saw and always returns 0, so the two ends can be compared
+// with the "differs" predicate (both must run, and their stdout must differ).
+// NOTE: \x is deliberately used ONLY in this probe. boot does not expand it, so any other
+// probe that used it would silently carry the literal text.
+
+int main() {
+  char *s = "\x41";
+  int b0 = s[0];
+  int b1 = s[1];
+  print(["xesc=", b0, ",", b1, "\n"]);
+  return 0;
+}

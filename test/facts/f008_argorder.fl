@@ -1,0 +1,18 @@
+// f008_argorder.fl -- fact probe: call arguments are evaluated RIGHT-TO-LEFT.
+// Why it matters: any compiler sugar that is expanded into ONE nested call expression
+// (str(a) -> _end(_put(b, _put(a, _begin())))) silently concatenates in the wrong order,
+// because the inner arguments run first. The str([...]) builtin avoids this by expanding
+// into a STATEMENT chain instead (order pinned by statement order, not by argument order).
+// Ledger row F-008 pins the order itself: the printed flag sequence must be "BA".
+int tag(int id, char *s) {
+  print([s]);
+  return id;
+}
+int f2(int a, int b) {
+  return a * 10 + b;
+}
+int main() {
+  int r = f2(tag(1, "A"), tag(2, "B"));
+  print(["=", r, "\n"]);
+  return 0;
+}

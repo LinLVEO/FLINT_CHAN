@@ -227,10 +227,36 @@ Token *tokenize(char *p, char *filename) {
           error_at(start, "0x 后需跟十六进制数字");
         base = 16;
       }
-      // S5 修复（v0.9.1）：strtol 是 32 位 long，溢出静默饱和成 2147483647（数据损坏无人知）
-      // → 改 strtoll + 显式范围检查报错。语义对齐 C：十进制 ≤ INT32_MAX；十六进制是
-      // 32 位位型，允许到 0xFFFFFFFF（高位 1 即负数位型，Win32 flag 刚需：WS_POPUP=0x80000000）。
-      long long v = strtoll(buf, &buf, base);
+      // v1.7.0 int_64：宽度规则（三条，写进文档口径）
+      //   ① 十进制：值 > INT32_MAX(2147483647) ⇒ 自动升级成 TK_NUM64（不改任何既有程序的 token 流：
+      //      改前这种写法是**硬错**「整数字面量超出 32 位范围」，所以升级是纯增量）
+      //   ② 十六进制：≤ 0xFFFFFFFF 仍是 **32 位位型**（0xFFFFFFFF → -1，Win32 flag 刚需，
+      //      test\facts\f030 钉着）；> 0xFFFFFFFF 或 9 位以上 ⇒ 64 位值（按无符号位型解释，
+      //      `0xFFFFFFFFFFFFFFFF` → -1）
+      //   ③ `L` / `l` 后缀：强制 64 位（`int_64 mask = 1L << 40;` 是唯一不啰嗦的写法——
+      //      `1 << 40` 在没有 64 位操作数时仍是 32 位移位，结果是 0）
+      //   ⚠️ int 上下文里超范围**仍然是编译错误**（f029 的墙不放松）：parse 侧的 asgn_rhs /
+      //      call_arg_norm / parse_global_init 对「int_64 字面量塞进 int 目标」一律报错。
+      bool is_hex = (base == 16);
+      long long v = 0;
+      unsigned long long uv = 0;   // 十六进制专用：无符号位型（0xFFFFFFFFFFFFFFFF → UV_MAX）
+      if (is_hex) {
+        // 十六进制按**无符号 64 位位型**解析：`0xFFFFFFFFFFFFFFFF` 是合法的 -1 位型
+        errno = 0;
+        uv = strtoull(buf, &buf, 16);
+        if (errno == ERANGE)
+          error_at(start, "十六进制字面量超出 64 位范围（最多 16 位十六进制数字）");
+        v = (long long)uv;
+      } else {
+        errno = 0;
+        v = strtoll(buf, &buf, 10);
+        if (errno == ERANGE)
+          error_at(start, "十进制整数字面量超出 64 位有符号范围"
+                          "（INT64_MAX = 9223372036854775807；写 INT64_MIN 请写 -9223372036854775807 - 1）");
+      }
+      // `L` / `l` 后缀：强制 64 位（十六进制 `0x1FL` / 十进制 `42L`）
+      bool force64 = false;
+      if (*buf == 'L' || *buf == 'l') { force64 = true; buf++; }
       // v1.1.0 浮点（阶段1）：此前这里直接报「暂不支持浮点数」。现在识别三种形态：
       //   ① 小数点 3.14（要求点后跟数字，避免与字段访问 3.x / a.b 撞车）
       //   ② 指数 3e5 / 3E5（十进制直接跟 e）
@@ -258,10 +284,18 @@ Token *tokenize(char *p, char *filename) {
         cur = cur->next = dtok;
         continue;
       }
-      if (v > (base == 16 ? 0xFFFFFFFFLL : 0x7FFFFFFFLL))
-        error_at(start, "整数字面量超出 32 位范围（十进制 ≤ 2147483647，十六进制 ≤ 0xFFFFFFFF）");
+      // —— 宽度判定（v1.7.0）：超 32 位 ⇒ TK_NUM64；否则 TK_NUM（32 位位型，语义一个字节不动）——
+      //   十六进制：无符号位型 > 0xFFFFFFFF 才是 64 位（0xFFFFFFFF 仍是 -1 的 32 位位型 —— f030 钉着）
+      //   十进制：  > INT32_MAX 才是 64 位
+      bool out_of_32 = is_hex ? (uv > 0xFFFFFFFFULL) : (v > 0x7FFFFFFFLL);
+      if (force64 || out_of_32) {
+        Token *tok = new_token(TK_NUM64, start, buf);
+        tok->lval = v;
+        cur = cur->next = tok;
+        continue;
+      }
       Token *tok = new_token(TK_NUM, start, buf);
-      tok->val = (int)v;
+      tok->val = is_hex ? (int)(uint32_t)uv : (int)v;
       cur = cur->next = tok;
       continue;
     }

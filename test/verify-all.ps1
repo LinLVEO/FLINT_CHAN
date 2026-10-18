@@ -76,7 +76,7 @@
 #   powershell ... -File test\verify-all.ps1 -Only wx,debug
 param(
   [switch]$SkipBuild,
-  [string[]]$Only = @('build', 'warn', 'wx', 'debug', 'regress', 'boot', 'diffgate', 'audit', 'eqgate', 'bench', 'strict', 'loop', 'budget'),
+  [string[]]$Only = @('build', 'warn', 'wx', 'debug', 'regress', 'boot', 'diffgate', 'audit', 'eqgate', 'bench', 'strict', 'loop', 'budget', 'doc'),
   [string]$BaselineExe = '.\flint_before_aslr.exe',
   [int]$TailLines = 6
 )
@@ -225,6 +225,27 @@ if (Want 'budget') {
   $bout += @("budget gate: $verdict (see the exit= line above; the baseline lives in test\)")
   Add-Result 'budget' 'gate: budget regression vs recorded baseline (imports + boot table)' $code $bout ([Math]::Round($sw.Elapsed.TotalSeconds, 1))
 }
+
+# [13] documentation gate (2026-10-15, test\docgate.mjs -- written in Node on purpose, see below).
+#      Numbers in prose used to have no truth source: a single reading taken on 2026-10-13 was still
+#      quoted in 12+ documents, and the file written to prevent exactly that (the docs index) had
+#      drifted itself. This step checks four things mechanically:
+#        * every <!--fact:key-->value<!--/fact--> marker equals what the meter computes RIGHT NOW
+#          (the meter lives in tools\, its file name contains CJK; values may only ever come from
+#          it -- docgate -Fix rewrites just the value and preserves BOM/line endings, and -Trace
+#          walks a number back to its truth source AND to every other document that quotes it);
+#        * every document is classified: outward documents need a machine-readable meta block,
+#          process artifacts need a dated snapshot banner, generated/archive files are exempt,
+#          anything else is RED (it forces a decision instead of silent rot);
+#        * the docs index resolves, and it mentions every outward document;
+#        * every outward document is tracked by git -- a document absent from a clone makes the
+#          index dangle for the reader, so "go get the right answer" breaks at step one.
+#      WHY NODE AND NOT POWERSHELL: a .ps1 holding CJK literals needs a UTF-8 BOM, every edit tool
+#      strips that BOM, and the file is then decoded as GBK -- which raises FAKE syntax errors. That
+#      trap already bit this project (test\flgui-verify.ps1) and bit this gate twice while it was
+#      still a .ps1. Node reads and writes UTF-8 unconditionally, so the whole bug class is gone.
+#      It prints "DOCGATE documents N / issues M", which this harness picks up as the summary.
+Run-Gate 'doc'     'gate: documentation (numbers vs meter, links, snapshot banners, meta blocks)' 'node' @((Join-Path $root 'test\docgate.mjs'))
 
 Pop-Location
 

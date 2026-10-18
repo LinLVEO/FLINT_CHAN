@@ -1,0 +1,242 @@
+// dstr_lib.fl — FLINT 标准库（新增批）：动态字符串 Str（长度 + 容量，自动扩容，NUL 结尾）
+//
+// 为什么有它：str_lib 只有定长 dst 上的 strlen/strcpy/strcat（调用方**先算好缓冲大小**，算错就
+//   溢出）；fmt_lib 是位置游标式（容量还是调用方开）。JSON / 配置 / 日志要的是"先把字节攒起来、
+//   长度自己长"的那一格 —— 补一个带 len/cap 的自动扩容字符串：str_s 的返回值可以直接喂给任何
+//   吃 char* 的地方（print / CreateFileA / 别的库）。本刀只做「长度 + 容量」（勘定 A2）与
+//   「整数格式化到动态缓冲」（D4）；切片 view（A4）、转义（A3）留给下一刀 —— 但 str_addn 的 n
+//   这一格就是给切片预留的入口。
+//
+// 用法（典型）：
+//   struct Str s;
+//   s.p = 0; s.len = 0; s.cap = 0;            // 未初始化态：p == 0（见"边界"）
+//   if (std::str_init(&s, 0) < 0) { ... }     // cap 0 = 默认 64 字节
+//   std::str_add(&s, "hello");                // 返回新长度 5
+//   std::str_addc(&s, ',');                   // 追加 1 字节，返回新长度 6
+//   std::str_addn(&s, " world!!!", 6);        // 最多 6 字节，返回新长度 12
+//   std::str_addint(&s, -7);                  // 十进制整数（含负号），返回新长度 14
+//   char *t = std::str_s(&s);                 // NUL 结尾，可直接当 char* 用
+//   std::str_clear(&s);                       // 长度归 0、**保留容量**
+//   std::str_free(&s);                        // 幂等：再调一次仍返回 0
+//
+// 边界（本机实测口径：真编译器 flint.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
+// 或「推断」，**两端分叉**的单独标出来 —— 探针 test\facts\f017_str_core.fl 全程可复现）：
+//   * struct 字段不支持 char*：真 flint **实测**报"char 指针字段暂不支持（v1.0.5）"，
+//     而 boot 端**实测放行**（同一份源码 boot 编过、flint 编不过 —— 两端分叉）⇒ 本库内部指针
+//     一律存 int* 字段；取用处 `char *q = s->p;` 跨指针类型赋值（**实测**可用，承 buf_lib 先例）。
+//   * int 宽度四处分岔（**实测**：变量/数组元素 = 8 字节槽、struct 字段 = 4 字节、`p[i]` = 4 字节
+//     元素 ＋ 8 字节步长）⇒ 本库**一律**把 s->p 落到 char* 局部变量上做逐字节存取，**绝不**用
+//     s->p[i] 算术 —— 违反的后果是静默错位（纪律出处 boot\lib_parse.fl:80）。
+//   * 算术按 32 位截断（**实测**）⇒ len/cap 只按 32 位口径算；本库显式自设单块上限 1 GiB，
+//     **不是**操作系统上限（VirtualAlloc 本身能要到更大）。
+//   * 十进制字面量上限 2147483647：真 flint **实测**拦（"整数字面量超出 32 位范围"），boot 端
+//     **实测放行**（又一处两端分叉）⇒ 上限常量写十六进制 0x40000000，两端都安全。
+//   * 未初始化 = 结构里 p == 0。请先把三个字段清零再第一次 str_init；p != 0 时再调 str_init
+//     返回 -1（挡住重复分配造成的泄漏），且**原缓冲一字不动**（**实测**）。
+//   * str_init：cap < 1 → 默认 64（**实测**）；cap > 1 GiB → **直接 -1**、p 保持 0（不留半格状态，
+//     之后 add 仍 -1）（**实测**）。
+//   * str_add(&s, 0) → -1（空指针算失败）；str_add(&s, "") → 当前长度（追加空串是合法空操作）（**实测**）。
+//   * str_addn(&s, t, n)：n < 0 → -1 且长度不动（**实测**）；n 比 t 的实际长度大**不算错**
+//     （遇结尾 0 提前停）（**实测**）。
+//   * str_addc(&s, c) 写低 8 位（`c & 255`，与 buf_addc 同口径）（**实测**：300 → 44、-1 → 255）；
+//     c = 0 会真的写进一个内嵌 NUL，此后 str_s 看到的是前半段而 len 继续数 —— 这是**字节语义**，
+//     不是 bug（**实测**：'A'、0、'B' 三连后 len == 3 而 str_s 只见 "A"）。
+//   * str_addint 覆盖 0 / 正 / 负，且 0x80000000（INT_MIN）由"负数域取余"逐个取位 —— **不**走
+//     `0 - n`（那条路在 INT_MIN 上溢出）（**实测**：两端都得 "-2147483648"，11 字节）。
+//     ⚠️ 顺带实测到一条**语言侧**坑：`print` 直接打 INT_MIN 值时两端都错（flint 打出 11 字节乱码、
+//     boot 打出 "-"，两端分叉）⇒ 要验 INT_MIN 请走 str_addint + str_s 打字符串，别打那个 int。
+//   * **容量上限守卫在每一条增长路径上**：上限常量单点 str_imax()，守卫三处 —— str_init、
+//     str_igrow 入口的 `need < 1`、str_igrow 的翻倍循环内。超限一律**响亮返回 -1**，绝不静默越界。
+//     ⚠️ 真正承重的是**入口那条 `need < 1`**，而且它必须摆在 `cap >= need` **之前**：32 位算术下
+//     need 可能溢出成负数，而负 need 会被"容量够"分支误判成成功、静默返回 0（**实测**：buf_lib 的
+//     buf_igrow(&b, -1) == 0，cap 一字未动 —— 那正是"增长路径静默放行"的形态；本库把 need < 1
+//     摆在前面就是为了挡这一格）。
+//     翻倍循环内那条 `ncap > 1 GiB` 在**上限恰好是 2^30** 时是打不响的兜底（下一次翻倍就是
+//     0x80000000 = 负数，由符号检查接手）—— 留着是为了上限常量若被改大时仍有守卫（**实测**：
+//     去掉入口那条 ⇒ 探针 bit28 变暗；只动循环内那条 ⇒ 探针全亮）。
+//   * 经公开 API 撞到"need > 上限"要真攒到 ~1 GiB；探针用白盒 str_igrow(&s, 0x40000001) 钉住
+//     这一格（**实测**）。白盒直呼内部件是刻意的：公开 API 那条路在探针里不可廉价触达。
+//   * 未初始化安全（**实测**）：str_len → 0、str_s → 0、str_clear → 0、str_free → 0、四条追加路径
+//     全 -1。传 s == 0（空结构体指针）（**实测**）也不炸：init -1、len -1、clear 0、free 0、s 0
+//     （本库内部件 str_igrow(0, ...) 也有 s == 0 检查 → -1；对比 buf_lib 的 buf_igrow(0, -1)
+//     **实测**是访问违例 0xC0000005 —— 它的空指针检查在公开 API 上，不在增长函数的入口）。
+//   * 所有权：块由 str_init 分配、str_free 释放；str_s 返回的指针**归 Str 所有**，任何会扩容的
+//     调用（add/addc/addn/addint）之后它**立即失效**，调用方不许自己 VirtualFree。
+//   * **不许把 str_s 的返回值再喂回 str_add（自追加）**：扩容会先 VirtualFree 旧块，那个指针当场
+//     悬空 ⇒ 要自追加请先拷进临时缓冲。这条是"无隐藏"的一部分，不是限制（**未测**：没有安全网，
+//     不做自毁式验证）。
+//   * 自包含：不 include 任何库（FLINT 的 include 无守卫，重复 include 会撞重复定义）。
+//     本文件内的 str_imax / str_icopy / str_igrow / str_ipush 是内部件，**不是**公开 API。
+//   * 方法糖 `s.add("x")` 在本库**不成立**（**实测**）：糖名 = 结构体名_方法名 = `Str_add`，而公开
+//     API 的全名是 `std::str_add`（长度 11 ≠ 7）⇒ 大小写兜底也救不了。真 flint 报"方法糖
+//     'recv.add(...)' 摊平后要找的自由函数 'Str_add' 不存在"；boot 端更早一步，直接 parse err=-50
+//     （boot 尚未实现方法糖）—— 两端都编不过，但报错形态不同。要用糖写法就得再加一个非命名空间的
+//     `Str_add` 包装（本刀不加，等拍板）。
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+struct Str { int *p; int len; int cap; }
+
+// --- 内部：单块容量上限（1 GiB = 0x40000000）——**全库唯一出处**，每条增长路径都拿它比 ---
+int str_imax() { return 0x40000000; }
+
+// --- 内部：逐字节复制（自包含，不借 mem_lib）---
+int str_icopy(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return n;
+}
+
+// --- 内部：保证 cap >= need（need 含结尾 0）；0 = 好，-1 = 失败 ---
+// 守卫三处，见文件头：入口 `need < 1`（**承重**：必须摆在 cap 检查之前，挡 32 位溢出成负数的
+// need 被误判成"容量够"而静默放行）+ 入口 `need > 上限` + 翻倍循环内（上限被改大时的兜底）。
+int str_igrow(struct Str *s, int need) {
+  if (s == 0) { return -1; }
+  if (need < 1) { return -1; }              // need 溢出成负数也走这条（响亮失败）
+  if (s->cap >= need) { return 0; }
+  if (need > str_imax()) { return -1; }     // 单块上限（与 str_init 同一口径）
+  int ncap = s->cap;
+  if (ncap < 16) { ncap = 16; }
+  while (ncap < need) {
+    ncap = ncap * 2;
+    if (ncap < 1) { return -1; }            // 32 位算术溢出保护
+    if (ncap > str_imax()) { return -1; }   // 翻倍循环内的上限守卫（上限 = 2^30 时打不响，见文件头）
+  }
+  char *np = VirtualAlloc(0, ncap, 0x3000, 4);
+  if (np == 0) { return -1; }
+  char *op = s->p;
+  str_icopy(np, op, s->len + 1);            // 含结尾 0
+  VirtualFree(op, 0, 0x8000);
+  s->p = np;
+  s->cap = ncap;
+  return 0;
+}
+
+// --- 内部：追加 t 的前 n 字节（遇结尾 0 提前停）；返回新长度，-1 = 失败 ---
+int str_ipush(struct Str *s, char *t, int n) {
+  if (s == 0) { return -1; }
+  if (s->p == 0) { return -1; }
+  if (t == 0) { return -1; }
+  if (n < 0) { return -1; }
+  int k = 0;
+  while (k < n && t[k] != 0) { k = k + 1; }
+  if (k == 0) { return s->len; }            // 空操作：返回当前长度（不是 0）
+  if (str_igrow(s, s->len + k + 1) < 0) { return -1; }
+  char *q = s->p;                           // 扩容后必须重新取，且必须落到 char* 局部变量
+  int i = 0;
+  while (i < k) { q[s->len + i] = t[i]; i = i + 1; }
+  s->len = s->len + k;
+  q[s->len] = 0;
+  return s->len;
+}
+
+// 分配初始容量（cap < 1 = 默认 64；cap > 1 GiB = 直接失败）；0 = 成功，-1 = 失败（含重复 init）
+int std::str_init(struct Str *s, int cap) {
+  if (s == 0) { return -1; }
+  if (s->p != 0) { return -1; }
+  if (cap < 1) { cap = 64; }
+  if (cap > str_imax()) { return -1; }      // 单块上限（见文件头"边界"）
+  char *p = VirtualAlloc(0, cap, 0x3000, 4);
+  if (p == 0) { return -1; }
+  p[0] = 0;
+  s->p = p;
+  s->len = 0;
+  s->cap = cap;
+  return 0;
+}
+
+// 追加一个 0 结尾串；返回新的长度（不含结尾 0），-1 = 失败
+int std::str_add(struct Str *s, char *t) {
+  if (t == 0) { return -1; }
+  int n = 0;
+  while (t[n] != 0) { n = n + 1; }
+  return str_ipush(s, t, n);
+}
+
+// 追加最多 n 字节（遇 0 提前停）；返回新的长度，-1 = 失败（n < 0 也算失败）
+// 这一条的 n 上限就是给下一刀的"切片"（指针 + 长度，不改原串）预留的入口。
+int std::str_addn(struct Str *s, char *t, int n) {
+  return str_ipush(s, t, n);
+}
+
+// 追加 1 字节（低 8 位）；返回新的长度，-1 = 失败
+int std::str_addc(struct Str *s, int c) {
+  if (s == 0) { return -1; }
+  if (s->p == 0) { return -1; }
+  if (str_igrow(s, s->len + 2) < 0) { return -1; }
+  char *q = s->p;
+  q[s->len] = c & 255;
+  s->len = s->len + 1;
+  q[s->len] = 0;
+  return s->len;
+}
+
+// 追加十进制整数（含负号；D4）；返回新的长度，-1 = 失败
+// INT_MIN（0x80000000）走"负数域取余"逐个取位，不走 `0 - n`（那条路在 INT_MIN 上溢出）
+int std::str_addint(struct Str *s, int v) {
+  if (s == 0) { return -1; }
+  if (s->p == 0) { return -1; }
+  char tmp[12];
+  int i = 0;
+  int neg = 0;
+  int n = v;
+  if (n < 0) { neg = 1; }
+  if (n == 0) { tmp[0] = '0'; i = 1; }
+  while (n != 0) {
+    int d = n % 10;
+    if (d < 0) { d = 0 - d; }
+    tmp[i] = '0' + d;
+    n = n / 10;
+    i = i + 1;
+  }
+  int need = s->len + i + neg + 1;
+  if (str_igrow(s, need) < 0) { return -1; }
+  char *q = s->p;                           // 扩容后必须重新取
+  int j = s->len;
+  if (neg != 0) { q[j] = '-'; j = j + 1; }
+  while (i > 0) {
+    i = i - 1;
+    q[j] = tmp[i];
+    j = j + 1;
+  }
+  s->len = j;
+  q[s->len] = 0;
+  return s->len;
+}
+
+// 当前长度（不含结尾 0）；s == 0 → -1；未初始化（p == 0）→ 0
+int std::str_len(struct Str *s) {
+  if (s == 0) { return -1; }
+  if (s->p == 0) { return 0; }
+  return s->len;
+}
+
+// 内部缓冲的 char*（保证 NUL 结尾）；s == 0 或未初始化 → 0
+// ⚠️ 这个指针归 Str 所有，任何会扩容的调用之后立即失效（见文件头"所有权"）
+char *std::str_s(struct Str *s) {
+  if (s == 0) { return 0; }
+  if (s->p == 0) { return 0; }
+  char *q = s->p;
+  return q;
+}
+
+// 长度归 0、**保留容量**（cap 与块都不动）；未初始化 / s == 0 也安全返回 0
+int std::str_clear(struct Str *s) {
+  if (s == 0) { return 0; }
+  if (s->p == 0) { return 0; }
+  char *q = s->p;
+  q[0] = 0;
+  s->len = 0;
+  return 0;
+}
+
+// 释放并把结构清零（幂等：再调一次仍返回 0；s == 0 也返回 0）
+int std::str_free(struct Str *s) {
+  if (s == 0) { return 0; }
+  char *q = s->p;
+  if (q != 0) { VirtualFree(q, 0, 0x8000); }
+  s->p = 0;
+  s->len = 0;
+  s->cap = 0;
+  return 0;
+}

@@ -1,0 +1,133 @@
+// buf_lib.fl — FLINT 标准库（新增批）：可增长字节缓冲（NUL 结尾，可直接当 char* 用）
+//
+// 为什么有它：现有两件套都缺"会自己长"的这一格 —— fmt_lib 是位置游标式拼缓冲
+//   （容量由调用方自己开，末尾靠 fmt_end 补 0），str_lib 是定长 dst 上的
+//   strlen/strcpy/strcat。JSON / 配置 / 日志都得先把字节攒起来再一次性看结果，
+//   所以补一个自动扩容、永远留结尾 0 的字节缓冲：buf_s 的返回值可以直接喂给
+//   任何吃 char* 的地方（CreateFileA / print / 别的库）。
+//
+// 用法（典型）：
+//   struct Buf b;
+//   b.p = 0; b.len = 0; b.cap = 0;            // 未初始化态：p == 0（见"边界"）
+//   if (std::buf_init(&b, 0) < 0) { ... }     // cap 0 = 默认 64 字节
+//   std::buf_add(&b, "hello");                // 返回新长度 5
+//   std::buf_addc(&b, ',');                   // 追加 1 字节，返回新长度 6
+//   char *s = std::buf_s(&b);                 // NUL 结尾，可直接当 char* 用
+//   std::buf_free(&b);                        // 幂等：再调一次仍返回 0
+//
+// 边界（本机实测口径，编译器 v1.4.26，探针 tmp\buflib\ 全程可复现）：
+//   * struct 字段不支持 char*（实测报错："char 指针字段暂不支持（v1.0.5：指针字段仍
+//     int*/double*/结构体指针）"，见 lang_A_charptr_field.fl）。所以内部指针存 int*
+//     字段；取用处 `char *p = b->p;` 直接跨指针类型赋值（实测可用，lang_B）。
+//   * int 变量是 8 字节槽，但算术按 32 位截断（实测：0x40000000*4 == 0，
+//     0x80000000/2 == -1073741824，见 lang_H_width.fl）。所以本库的 len/cap
+//     只按 32 位口径算，单块容量上限 ~2GB；超过 2GB 的缓冲不在支持范围。
+//   * int* 的 p[i] 是 8 字节槽距 / 4 字节写宽（实测 lang_D），所以本库一律把指针
+//     落到 char* 局部变量上做逐字节存取，绝不用 p[i] 算术。
+//   * 十进制字面量上限 2147483647（实测报错），要用大常量请写十六进制（≤ 0xFFFFFFFF）。
+//   * buf_add(&b, 0) → -1（空指针算失败）；buf_add(&b, "") → 当前长度（追加空串是合法的空操作）。
+//   * 未初始化 = 结构里 p == 0。请先把三个字段清零再第一次 buf_init；p != 0 时再调
+//     buf_init 返回 -1（挡住重复分配造成的泄漏）。
+//   * 单块容量上限 1 GiB（0x40000000）：请求更大直接返回 -1（cap < 1 = 默认 64）。
+//     这不是操作系统上限，是本库的显式安全检查 —— 32 位算术下 ncap*2 会在 2^31 处
+//     溢出成负数，与其让扩容循环打转，不如一开始就拒绝（也正好让"超大 → 负值"这条
+//     失败路径变得可确定触发）。
+//   * 所有权：缓冲块由 buf_init 分配、buf_free 释放；buf_s 返回的指针归 Buf 所有，
+//     add/addc 一旦扩容旧指针立即失效，调用方不许自己 VirtualFree 它。
+//   * **不许把 buf_s 的返回值再喂回 buf_add（自追加）**：扩容会先 VirtualFree 旧块，
+//     那个指针当场悬空 ⇒ 要自追加请先拷进临时缓冲。这条是"无隐藏"的一部分，不是限制。
+//   * 自包含：不 include 任何库（FLINT 的 include 无守卫，重复 include 会撞重复定义）。
+//     本文件内的 buf_icopy / buf_igrow 是内部件，不是公开 API。
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+struct Buf { int *p; int len; int cap; }
+
+// --- 内部：逐字节复制（自包含，不借 mem_lib）---
+int buf_icopy(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return n;
+}
+
+// --- 内部：保证 cap >= need（need 含结尾 0）；0 = 好，-1 = 分配失败 ---
+int buf_igrow(struct Buf *b, int need) {
+  if (b->cap >= need) { return 0; }
+  int ncap = b->cap;
+  if (ncap < 16) { ncap = 16; }
+  while (ncap < need) {
+    ncap = ncap * 2;
+    if (ncap < 1) { return -1; }              // 32 位算术溢出保护
+    if (ncap > 0x40000000) { return -1; }     // 单块上限 1 GiB（与 buf_init 同一口径，见文件头"边界"）
+  }
+  char *np = VirtualAlloc(0, ncap, 0x3000, 4);
+  if (np == 0) { return -1; }
+  char *op = b->p;
+  buf_icopy(np, op, b->len + 1);          // 含结尾 0
+  VirtualFree(op, 0, 0x8000);
+  b->p = np;
+  b->cap = ncap;
+  return 0;
+}
+
+// 分配初始容量（cap < 1 = 默认 64；cap > 1 GiB = 直接失败）；0 = 成功，-1 = 失败（含重复 init）
+int std::buf_init(struct Buf *b, int cap) {
+  if (b == 0) { return -1; }
+  if (b->p != 0) { return -1; }
+  if (cap < 1) { cap = 64; }
+  if (cap > 0x40000000) { return -1; }      // 单块上限 1 GiB（见文件头"边界"）
+  char *p = VirtualAlloc(0, cap, 0x3000, 4);
+  if (p == 0) { return -1; }
+  p[0] = 0;
+  b->p = p;
+  b->len = 0;
+  b->cap = cap;
+  return 0;
+}
+
+// 追加一个 0 结尾串；返回新的长度（不含结尾 0），-1 = 失败
+int std::buf_add(struct Buf *b, char *s) {
+  if (b == 0) { return -1; }
+  if (b->p == 0) { return -1; }
+  if (s == 0) { return -1; }
+  int slen = 0;
+  while (s[slen] != 0) { slen = slen + 1; }
+  if (buf_igrow(b, b->len + slen + 1) < 0) { return -1; }
+  char *dst = b->p;                       // 扩容后必须重新取
+  int i = 0;
+  while (i < slen) { dst[b->len + i] = s[i]; i = i + 1; }
+  b->len = b->len + slen;
+  dst[b->len] = 0;
+  return b->len;
+}
+
+// 追加 1 字节（低 8 位）；返回新的长度，-1 = 失败
+int std::buf_addc(struct Buf *b, int c) {
+  if (b == 0) { return -1; }
+  if (b->p == 0) { return -1; }
+  if (buf_igrow(b, b->len + 2) < 0) { return -1; }
+  char *p = b->p;
+  p[b->len] = c & 255;
+  b->len = b->len + 1;
+  p[b->len] = 0;
+  return b->len;
+}
+
+// 内部缓冲的 char*（保证 NUL 结尾）；未初始化 / b == 0 → 0
+char *std::buf_s(struct Buf *b) {
+  if (b == 0) { return 0; }
+  if (b->p == 0) { return 0; }
+  char *p = b->p;
+  return p;
+}
+
+// 释放并把结构清零（可重复调用）；返回 0
+int std::buf_free(struct Buf *b) {
+  if (b == 0) { return 0; }
+  char *p = b->p;
+  if (p != 0) { VirtualFree(p, 0, 0x8000); }
+  b->p = 0;
+  b->len = 0;
+  b->cap = 0;
+  return 0;
+}

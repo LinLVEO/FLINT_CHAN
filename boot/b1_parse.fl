@@ -366,6 +366,14 @@ int ex_stmt(struct Ast *a, struct Parse *p, int idx, struct Vars *vs) {
     return ret;
   }
   if (k == 65) {                                // B4a：for（init 一次 → 判 → body → inc → 回判）
+    // ===== v1.6.1（2026-10-15）：for 段不再打包 =====
+    //   `vv` = body 块节点号、`a->ty` = inc 语句节点号（-1 = 空段）。
+    //   ⚠️ **本读点就是修复草案漏掉的那一个**：漏改 ⇒ 旧解码 `vv/100000` 恒为 0 ⇒ 自增段整段跳过
+    //   ⇒ `for (i = 0; i < 7; i++)` 永不增量 ⇒ 本解释器自测（b1_parse.exe）无限循环：实测烧 8 秒 CPU 不退。
+    int fbd65 = vv[idx];
+    int finc65 = a->ty[idx];
+    if (fbd65 < 0 || fbd65 >= a->cnt) { print(["b1_parse: bad for-body idx=", fbd65, " cnt=", a->cnt, "\n"]); return 1; }
+    if (finc65 >= a->cnt) { print(["b1_parse: bad for-inc idx=", finc65, " cnt=", a->cnt, "\n"]); return 1; }
     if (ll[idx] >= 0) { ex_stmt(a, p, ll[idx], vs); }
     int going2 = 1;
     int ret2 = 0;
@@ -375,9 +383,9 @@ int ex_stmt(struct Ast *a, struct Parse *p, int idx, struct Vars *vs) {
         if (c2 == 0) { going2 = 0; }
       }
       if (going2 == 1) {
-        int r2 = ex_block(a, p, vv[idx] % 100000, vs);
+        int r2 = ex_block(a, p, fbd65, vs);
         if (r2 != 0) { going2 = 0; ret2 = 1; }
-        else { if (vv[idx] / 100000 != 0) { ex_stmt(a, p, vv[idx] / 100000 - 1, vs); } }
+        else { if (finc65 >= 0) { ex_stmt(a, p, finc65, vs); } }
       }
     }
     return ret2;

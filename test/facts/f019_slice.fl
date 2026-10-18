@@ -1,0 +1,322 @@
+// f019_slice.fl -- probe for lib\slice_lib.fl (string slice view: base pointer + length; the
+// original bytes are never modified and never copied).  All 16 checks lit (mask 65535) => exit 42.
+// One bit per check; a red run prints the mask and returns it, so the failing bit is visible at a
+// glance.  Never a single sum.
+//
+//   bit  value      what it pins
+//    0        1  slc_mk(&v, doc, 0, 5) == 0 and slc_len == 5; the whole 18-byte corpus still has
+//                byte[i] == 64+i afterwards (the view never wrote to the original)
+//    1        2  content of [0,5): every byte reads back as 64+i AND slc_eq(&v, "@ABCD") == 1
+//    2        4  slc_at: 0..4 give 64..68; index 5 (== len) -> -1; index -1 -> -1
+//    3        8  a slice from the middle (off 6, len 4) reads 70,71,72,73; a zero-length slice
+//                at off 0 has len 0 and equals ""
+//    4       16  slc_eqs: [0,5) vs [0,5) == 1; [0,5) vs [6,4) == 0; two empty slices with
+//                DIFFERENT bases == 1
+//    5       32  slc_find returns a pointer whose bytes ARE the found text: find("FG") on the
+//                13-byte window [5,18) gives a slice reading 70,71,72,73, and that slice equals
+//                "FGHI"; find("xy") on the same window == 0
+//    6       64  slc_find sentinels: empty needle -> v->p (not 0); v == 0 -> 0; needle == 0 -> 0
+//    7      128  slc_copy: cap exactly len+1 -> returns len, dst NUL-terminated and byte-equal;
+//                cap == len (one byte short) -> -1 with dst byte-for-byte untouched; cap 0 -> -1
+//    8      256  slc_copy of a 4-byte mid-slice into a 5-byte dst -- cap is exactly enough
+//    9      512  illegal arguments are LOUD and leave the struct alone: slc_mk(v=0) / base=0 /
+//                off<0 / n<0 -> -1 each and a failed mk leaves p/len untouched; slc_len(v=0) == -1;
+//                slc_eq(t=0) == -1; slc_eqs(b=0) == -1; slc_copy(v=0) == -1; slc_copy(dst=0) == -1
+//   10     1024  an embedded NUL byte is a byte: len counts 3, slc_at returns 0 (and that 0 is
+//                NOT the out-of-range -1), slc_eqs compares it byte-wise
+//   11     2048  DSTR BRIDGE: materialise the slice with slc_copy, hand the buffer to
+//                std::str_addn(&s, buf, n), and the Str content is byte-equal (the documented
+//                "slice -> Str" path)
+//   12     4096  slc_at over HIGH bytes returns 128/228/255, not negative numbers
+//   13     8192  NULL BASE: slc_mk(&v, 0, 0, 0) is rejected, and after that failure slc_len still
+//                returns the OLD value (no half-done state)
+//   14    16384  slc_eq is a length test, not a NUL test: [0,5) != "@ABCD," and != "@ABCDEF,"
+//                (longer) and != "@ABC" (shorter), while [0,5) == "@ABCD"
+//   15    32768  the golden JSON-shaped case: from the 13-byte window [5,18), key [0,5) == "EFGHI"
+//                and value [7,4) == "LMNO", and find("LMNO") lands on the value (slc_eqs agrees)
+//
+// DATA: the corpus is byte[i] == 64+i for i in 0..17, i.e. the printable ASCII text
+//   @ABCDEFGHIJKLMNOPQ
+// Every expected byte value was computed OUTSIDE FLINT with PowerShell (see the report).
+// A PRINTABLE sentinel was chosen deliberately: it differs from its own index at every position, so
+// any addressing/stride error shows up as a mismatching byte, and it contains no NUL byte (slc_eq
+// compares against a 0-terminated string, so a NUL byte inside a slice can never be "equal" to one
+// -- that case has its own check, bit 10).
+//
+// LENGTH CONVENTION (learned the hard way while writing this probe): a literal handed to slc_eq
+// must be EXACTLY as long as the slice under test.  Appending a "sentinel" byte to such a literal
+// makes it one byte longer, and slc_eq then correctly reports "not equal" because the length test
+// fires -- that is the intended behaviour (bit 14 pins it), not a library bug.
+//
+// ADDRESSING DISCIPLINE (why this file looks the way it does): every byte of the corpus is reached
+// through a subscript on a pointer VARIABLE (`p[i]`, `B[i]`), never through pointer arithmetic
+// written in this file (`&B[6]`, `doc + 6`).  Pointer arithmetic in this file's own declaration
+// pattern was measured to be unreliable on BOTH ends, while pointer arithmetic INSIDE a callee
+// (`base + off`) behaves correctly; the probe therefore delegates all offset arithmetic to
+// std::slc_mk and verifies the result byte-wise.  Raw pointer VALUES are never printed (ASLR would
+// make the two ends differ); only the mask and small derived ASCII strings are printed.
+// Pure ASCII on purpose.
+
+include "../../lib/str_lib.fl"
+include "../../lib/dstr_lib.fl"
+include "../../lib/slice_lib.fl"
+
+// Fill B with the distinct printable sentinel B[i] == 64+i, so that any addressing error shows up
+// as a mismatching byte instead of a plausible-looking value.  Returns the corpus length.
+int slc_fill(char *B, int n) {
+  char *p = B;
+  int i = 0;
+  while (i < n) { p[i] = 64 + i; i = i + 1; }
+  p[n] = 0;
+  return n;
+}
+
+// 0 = every one of the first n bytes of B still equals 64+its index; 1 = something moved.
+int slc_drift(char *B, int n) {
+  char *p = B;
+  int i = 0;
+  int bad = 0;
+  while (i < n) {
+    if ((p[i] & 255) != 64 + i) { bad = 1; }
+    i = i + 1;
+  }
+  return bad;
+}
+
+int main() {
+  int f = 0;
+
+  // corpus: byte[i] == 64+i, i = 0..17  =>  @ A B C D E F G H I J K L M N O P Q
+  char B[30];
+  slc_fill(B, 18);
+  char *doc = B;
+
+  // literals handed to slc_eq are EXACTLY the length of the slice they are compared with
+  char *lit5 = "@ABCD";
+  char *lit5long = "@ABCD,";
+  char *lit5longer = "@ABCDEF,";
+  char *lit5short = "@ABC";
+  char *litFGHI = "FGHI";
+  char *litEFGHI = "EFGHI";
+  char *litLMNO = "LMNO";
+  char *needleFG = "FG";        // needle: its own length is up to its NUL, so no sentinel
+  char *needleXY = "xy";
+
+  // ---- bits 0..1: mk + len + content + "the original was not touched" ----
+  struct Slice a;
+  a.p = 0; a.len = 0;
+  if (std::slc_mk(&a, doc, 0, 5) == 0) {
+    if (std::slc_len(&a) == 5) {
+      if (slc_drift(B, 18) == 0) { f = f | 1; }
+    }
+  }
+  if (std::slc_len(&a) == 5) {
+    char *ap = a.p;
+    if (ap != 0 && (ap[0] & 255) == 64 && (ap[1] & 255) == 65 && (ap[2] & 255) == 66 && (ap[3] & 255) == 67 && (ap[4] & 255) == 68) {
+      if (std::slc_eq(&a, lit5) == 1) { f = f | 2; }
+    }
+  }
+
+  // ---- bit 2: slc_at in range and out of range ----
+  if (std::slc_at(&a, 0) == 64 && std::slc_at(&a, 1) == 65 && std::slc_at(&a, 2) == 66) {
+    if (std::slc_at(&a, 4) == 68 && std::slc_at(&a, 5) == 0 - 1 && std::slc_at(&a, 0 - 1) == 0 - 1) { f = f | 4; }
+  }
+
+  // ---- bit 3: a slice from the middle + a zero-length slice ----
+  // bytes 6..9 are F G H I (70 71 72 73)
+  struct Slice b;
+  b.p = 0; b.len = 0;
+  if (std::slc_mk(&b, doc, 6, 4) == 0) {
+    if (std::slc_len(&b) == 4) {
+      char *bp = b.p;
+      if (bp != 0 && (bp[0] & 255) == 70 && (bp[1] & 255) == 71 && (bp[2] & 255) == 72 && (bp[3] & 255) == 73) {
+        struct Slice e0;
+        e0.p = 0; e0.len = 7;
+        if (std::slc_mk(&e0, doc, 0, 0) == 0) {
+          if (std::slc_len(&e0) == 0 && std::slc_eq(&e0, "") == 1) { f = f | 8; }
+        }
+      }
+    }
+  }
+
+  // ---- bit 4: slc_eqs same / different / two empty with different bases ----
+  struct Slice a2;
+  a2.p = 0; a2.len = 0;
+  std::slc_mk(&a2, doc, 0, 5);
+  struct Slice b2;
+  b2.p = 0; b2.len = 0;
+  std::slc_mk(&b2, doc, 6, 4);
+  struct Slice e1;
+  e1.p = 0; e1.len = 0;
+  std::slc_mk(&e1, doc, 0, 0);
+  struct Slice e2;
+  e2.p = 0; e2.len = 0;
+  std::slc_mk(&e2, doc, 9, 0);
+  if (std::slc_eqs(&a, &a2) == 1) {
+    if (std::slc_eqs(&a, &b2) == 0) {
+      if (std::slc_eqs(&e1, &e2) == 1) { f = f | 16; }
+    }
+  }
+
+  // ---- bit 5: the pointer slc_find returns really points at the found text ----
+  struct Slice tail;
+  tail.p = 0; tail.len = 0;
+  if (std::slc_mk(&tail, doc, 5, 13) == 0) {      // bytes 5..17 = E F G H I J K L M N O P Q
+    char *hit = std::slc_find(&tail, needleFG);   // "FG" first occurs at window offset 1
+    if (hit != 0) {
+      struct Slice got;
+      got.p = 0; got.len = 0;
+      if (std::slc_mk(&got, hit, 0, 4) == 0) {
+        if (std::slc_eq(&got, litFGHI) == 1) {
+          char *miss = std::slc_find(&tail, needleXY);
+          if (miss == 0) { f = f | 32; }
+        }
+      }
+    }
+  }
+
+  // ---- bit 6: the find sentinels ----
+  char *m6 = std::slc_find(&a, needleXY);
+  char *empty_needle = std::slc_find(&a, "");
+  char *ap2 = a.p;
+  if (m6 == 0) {
+    if (empty_needle == ap2) {
+      char *z1 = std::slc_find(0, "a");
+      char *z2 = std::slc_find(&a, 0);
+      if (z1 == 0 && z2 == 0) { f = f | 64; }
+    }
+  }
+
+  // ---- bit 7: slc_copy cap accounting (exact / one short / zero) ----
+  char c1[6];
+  int k = 0;
+  while (k < 6) { c1[k] = '#'; k = k + 1; }
+  if (std::slc_copy(c1, 6, &a) == 5) {
+    if ((c1[0] & 255) == 64 && (c1[1] & 255) == 65 && (c1[2] & 255) == 66 && (c1[3] & 255) == 67 && (c1[4] & 255) == 68 && (c1[5] & 255) == 0) {
+      char c2[6];
+      k = 0;
+      while (k < 6) { c2[k] = '#'; k = k + 1; }
+      if (std::slc_copy(c2, 5, &a) == 0 - 1) {
+        if (c2[0] == '#' && c2[1] == '#' && c2[2] == '#' && c2[3] == '#' && c2[4] == '#' && c2[5] == '#') {
+          if (std::slc_copy(c2, 0, &a) == 0 - 1) { f = f | 128; }
+        }
+      }
+    }
+  }
+
+  // ---- bit 8: cap exactly enough for a mid-slice (4 bytes + NUL = 5) ----
+  char c3[5];
+  k = 0;
+  while (k < 5) { c3[k] = '#'; k = k + 1; }
+  if (std::slc_copy(c3, 5, &b) == 4) {
+    if ((c3[0] & 255) == 70 && (c3[1] & 255) == 71 && (c3[2] & 255) == 72 && (c3[3] & 255) == 73 && (c3[4] & 255) == 0) { f = f | 256; }
+  }
+
+  // ---- bit 9: illegal arguments are loud and a failed mk leaves the struct alone ----
+  struct Slice bad;
+  bad.p = 0; bad.len = 0 - 1;                     // deliberately poisoned
+  int m0 = std::slc_mk(0, doc, 0, 3);
+  int m1 = std::slc_mk(&bad, 0, 0, 3);
+  int m2 = std::slc_mk(&bad, doc, 0 - 1, 3);
+  int m3 = std::slc_mk(&bad, doc, 0, 0 - 3);
+  int g9 = 0;
+  if (m0 < 0 && m1 < 0 && m2 < 0 && m3 < 0) { g9 = g9 + 1; }
+  if (bad.p == 0 && bad.len == 0 - 1) { g9 = g9 + 1; }
+  if (std::slc_len(0) < 0) { g9 = g9 + 1; }
+  if (std::slc_eq(&a, 0) < 0 && std::slc_eq(0, lit5) < 0) { g9 = g9 + 1; }
+  if (std::slc_eqs(&a, 0) < 0 && std::slc_eqs(0, &a) < 0) { g9 = g9 + 1; }
+  char c4[8];
+  if (std::slc_copy(c4, 8, 0) < 0 && std::slc_copy(0, 8, &a) < 0) { g9 = g9 + 1; }
+  if (g9 == 6) { f = f | 512; }
+
+  // ---- bit 10: an embedded NUL is a byte, not a terminator ----
+  char n3[8];
+  char *np = n3;
+  np[0] = 65; np[1] = 0; np[2] = 66; np[3] = 0;
+  struct Slice n;
+  n.p = 0; n.len = 0;
+  if (std::slc_mk(&n, n3, 0, 3) == 0) {
+    if (std::slc_len(&n) == 3) {
+      if (std::slc_at(&n, 1) == 0) {
+        if (std::slc_at(&n, 2) == 66) {
+          struct Slice n2;
+          n2.p = 0; n2.len = 0;
+          std::slc_mk(&n2, n3, 0, 3);
+          if (std::slc_eqs(&n, &n2) == 1) { f = f | 1024; }
+        }
+      }
+    }
+  }
+
+  // ---- bit 11: the documented bridge -- slice -> Str via std::str_addn ----
+  struct Str s;
+  s.p = 0; s.len = 0; s.cap = 0;
+  if (std::str_init(&s, 0) == 0) {
+    char c5[8];
+    k = 0;
+    while (k < 8) { c5[k] = '#'; k = k + 1; }
+    if (std::slc_copy(c5, 8, &b) == 4) {
+      if (std::str_addn(&s, c5, 4) == 4) {
+        char *ss = std::str_s(&s);
+        if (ss != 0 && (ss[0] & 255) == 70 && (ss[1] & 255) == 71 && (ss[2] & 255) == 72 && (ss[3] & 255) == 73 && (ss[4] & 255) == 0) {
+          if ((c5[0] & 255) == 70 && (c5[1] & 255) == 71 && (c5[2] & 255) == 72 && (c5[3] & 255) == 73 && (c5[4] & 255) == 0) { f = f | 2048; }
+        }
+      }
+    }
+  }
+  std::str_free(&s);
+
+  // ---- bit 12: slc_at over high bytes returns 128/228/255, never a negative ----
+  char hi[8];
+  char *hp = hi;
+  hp[0] = 0x80; hp[1] = 0xE4; hp[2] = 0xFF; hp[3] = 0;
+  struct Slice h;
+  h.p = 0; h.len = 0;
+  if (std::slc_mk(&h, hi, 0, 3) == 0) {
+    if (std::slc_at(&h, 0) == 128 && std::slc_at(&h, 1) == 228 && std::slc_at(&h, 2) == 255) { f = f | 4096; }
+  }
+
+  // ---- bit 13: null base is rejected and leaves the previous value alone ----
+  struct Slice g;
+  g.p = 0; g.len = 0;
+  std::slc_mk(&g, doc, 6, 4);                     // a good value first
+  int m4 = std::slc_mk(&g, 0, 0, 0);
+  if (m4 < 0) {
+    if (std::slc_len(&g) == 4) { f = f | 8192; }
+  }
+
+  // ---- bit 14: slc_eq really is a length test ----
+  if (std::slc_eq(&a, lit5long) == 0) {
+    if (std::slc_eq(&a, lit5longer) == 0) {
+      if (std::slc_eq(&a, lit5short) == 0) {
+        if (std::slc_eq(&a, lit5) == 1) { f = f | 16384; }
+      }
+    }
+  }
+
+  // ---- bit 15: the golden JSON-shaped case over the 13-byte window [5,18) ----
+  // window = E F G H I J K L M N O P Q ; key = [0,5) = E F G H I ; value = [7,4) = L M N O
+  struct Slice win;
+  win.p = 0; win.len = 0;
+  if (std::slc_mk(&win, doc, 5, 13) == 0) {
+    struct Slice key;
+    key.p = 0; key.len = 0;
+    std::slc_mk(&key, win.p, 0, 5);
+    struct Slice val;
+    val.p = 0; val.len = 0;
+    std::slc_mk(&val, win.p, 7, 4);
+    if (std::slc_eq(&key, litEFGHI) == 1 && std::slc_eq(&val, litLMNO) == 1) {
+      char *vh = std::slc_find(&win, litLMNO);
+      if (vh != 0) {
+        struct Slice chk;
+        chk.p = 0; chk.len = 0;
+        std::slc_mk(&chk, vh, 0, 4);
+        if (std::slc_eqs(&chk, &val) == 1) { f = f | 32768; }
+      }
+    }
+  }
+
+  print(["f019_slice mask=", f, "\n"]);
+  if (f == 65535) { return 42; }
+  return f;
+}

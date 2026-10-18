@@ -24,7 +24,6 @@
 
 // —— 平台层自己要用的 api（ui_lib 未声明的；别重复声明 ui_lib 已有的，会撞重复声明）——
 api user32 int ScreenToClient(int, int);
-api user32 int GetClientRect(int, int);
 api user32 int GetAsyncKeyState(int);
 api gdi32 int GetDeviceCaps(int, int);                                // 88 = LOGPIXELSX（读 DPI 用；ui_lib 未声明）
 api user32 int TranslateMessage(int);                                 // M4b：**必须有它才有 WM_CHAR**（见 gui_win_pump 注释）

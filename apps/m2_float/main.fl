@@ -25,7 +25,6 @@
 //    ⇒ 报「api 声明必须放在文件最顶部」，而报错位置指的正是这批**本来就在最顶部**的行（方向完全错）。
 //    裸名等价：pe.c 写出端会补 `.dll`（预留也是「名字 + 4 + 1」同源）⇒ 产物导入表仍是 HwBridge.dll。
 api HwBridge int hw_init();
-api HwBridge int hw_snap(int);
 api HwBridge int hw_snap64(int);
 api HwBridge int hw_rtss_mode();
 api HwBridge int hw_rtss_flags();
@@ -35,7 +34,6 @@ api HwBridge int hw_pm_want(int);
 api HwBridge int hw_pm_src(int, int);
 api HwBridge int hw_pm_status();
 api HwBridge int hw_pm_lines();
-api HwBridge int hw_pm_stop();
 
 // M3(a)：行绘制换到 FLGUI 的绘制/容器层 —— 这一条 include 一并带进 ui_lib.fl（窗口/表面/拖动仍用它）、
 //   flgui.fl（内核：命令表 / 裁剪栈 / 布局）、flgui_widgets.fl、flgui_win32.fl（平台层渲染器）。

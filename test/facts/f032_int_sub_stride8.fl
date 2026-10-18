@@ -1,0 +1,56 @@
+// f032_int_sub_stride8.fl -- WIDTH FAMILY #4: `p[i]` steps by 4 BYTES (the int element), and the
+// value it READS is 4 bytes wide.
+//
+// 2026-10-17 v1.6.5 (int4 ABI, owner's decision): `int` is now a C-compatible 4-byte element.
+// The file name is kept for ledger-anchor stability; the numbers below are RE-RECORDED for the
+// new ABI, not the old 8-byte-slot geometry.
+//
+// WHAT IS UNDER TEST: `int a[3]; a[0]=11; a[1]=22; a[2]=33; int *p = a;` then p[0], p[1], p[2] --
+// and the element-form address differences `&a[1] - a` (=4) and `&a[2] - a` (=8).
+//
+// MEASURED 2026-10-17 v1.6.5 (this round): prints
+//   `sub p0=11 p1=22 p2=33 ad1=4 ad2=8`
+// and exits 42. Old ABI (8-byte slot) printed `ad1=8 ad2=16`.
+//
+// Contrast with f033 (same array, addressed through RAW pointer addition): `a + 1` moves ONE BYTE,
+// so `a + 4` lands exactly on a[1]. Subscript scales by the element size (now 4); raw +/- does not
+// scale at all (decision 40).
+//
+// TRUTH SOURCE:
+//   src\parse.c  slot allocation `slots = (elem_bytes*arr_len + 7)/8` for int arrays (v1.6.5)
+//   src\parse.c  postfix `esize_bytes` = 4 for int (v1.6.5)
+//   src\parse.c  add/sub level: NO scaling (decision 40, raw +/- = byte stepping)
+//
+// WHEN THIS ROW TURNS RED:
+//   - p0/p1/p2 stop being 11/22/33 => element stride broke.
+//   - ad1/ad2 stop being 4/8     => the ABI changed again; re-record with a reason.
+//
+// REVIEW COMMAND (both legs must exit 42 and their stdout bytes must be identical):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f032_int_sub_stride8 -Compare flint,boot -ExpectExit 42
+//   criterion: contains -> sub p0=11 p1=22 p2=33 ad1=4 ad2=8
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f032_int_sub_stride8.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
+//   E:\FLINT-lab\SPEC.md;E:\FLINT-lab\PROGRESS.md
+//
+// ASCII only, no BOM. No includes. Exits 42 when all assertions hold, 7 otherwise.
+int main() {
+  int a[3];
+  a[0] = 11; a[1] = 22; a[2] = 33;
+  int *p = a;
+  int ad1 = (&a[1]) - a;
+  int ad2 = (&a[2]) - a;
+  print(["sub p0=", p[0], " p1=", p[1], " p2=", p[2],
+         " ad1=", ad1, " ad2=", ad2, "\n"]);
+  if (p[0] == 11) {
+    if (p[1] == 22) {
+      if (p[2] == 33) {
+        if (ad1 == 4) {
+          if (ad2 == 8) { return 42; }
+        }
+      }
+    }
+  }
+  return 7;
+}

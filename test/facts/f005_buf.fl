@@ -1,0 +1,79 @@
+// f005_buf.fl -- probe for lib\buf_lib.fl (growable byte buffer), used by assertion F-005.
+// Bit per check; all 8 bits lit (mask 255) => exit 42.
+//   bit0  1  init(cap 0) works; buf_s is usable at once (first byte 0, strlen 0)
+//   bit1  2  add "hello" == 5 and the content reads back
+//   bit2  4  addc ',' == 6 and the content reads back
+//   bit3  8  add " world" == 12; content and length both right
+//   bit4 16  growth: init(cap 1) then 300 x "ab" -> every return value right, end length 600
+//   bit5 32  after growth every one of the 600 bytes matches the generator, plus trailing NUL
+//   bit6 64  failure path: on an uninitialised struct add < 0, buf_s == 0, free is idempotent
+//   bit7 128  failure path: repeated init < 0 while the first buffer stays usable
+// The content checks borrow the untouched str_lib so the probe is not judging itself.
+// Modeled on the verified sample tmp\buflib\probe_buf.fl (rewritten pure ASCII).
+
+include "../../lib/str_lib.fl"
+include "../../lib/buf_lib.fl"
+
+int main() {
+  int f = 0;
+
+  struct Buf b;
+  b.p = 0; b.len = 0; b.cap = 0;
+  if (std::buf_init(&b, 0) == 0) {
+    char *s0 = std::buf_s(&b);
+    if (s0 != 0 && s0[0] == 0 && std::strlen(s0) == 0) { f = f | 1; }
+  }
+  if (std::buf_add(&b, "hello") == 5) {
+    if (std::streq(std::buf_s(&b), "hello") == 1) { f = f | 2; }
+  }
+  if (std::buf_addc(&b, ',') == 6) {
+    if (std::streq(std::buf_s(&b), "hello,") == 1) { f = f | 4; }
+  }
+  if (std::buf_add(&b, " world") == 12) {
+    char *s3 = std::buf_s(&b);
+    if (s3 != 0 && std::streq(s3, "hello, world") == 1 && std::strlen(s3) == 12) { f = f | 8; }
+  }
+
+  struct Buf g;
+  g.p = 0; g.len = 0; g.cap = 0;
+  if (std::buf_init(&g, 1) == 0) {
+    int i = 0;
+    int ok = 1;
+    while (i < 300) {
+      if (std::buf_add(&g, "ab") != i * 2 + 2) { ok = 0; }
+      i = i + 1;
+    }
+    if (ok == 1) {
+      char *gs = std::buf_s(&g);
+      if (gs != 0 && std::strlen(gs) == 600 && gs[600] == 0) { f = f | 16; }
+      int same = 1;
+      int j = 0;
+      while (j < 600) {
+        int want = 'b';
+        if (j % 2 == 0) { want = 'a'; }
+        if (gs[j] != want) { same = 0; }
+        j = j + 1;
+      }
+      if (same == 1) { f = f | 32; }
+    }
+  }
+
+  struct Buf u;
+  u.p = 0; u.len = 0; u.cap = 0;
+  if (std::buf_add(&u, "x") < 0) {
+    if (std::buf_s(&u) == 0) {
+      if (std::buf_free(&u) == 0) { f = f | 64; }
+    }
+  }
+
+  int again = std::buf_init(&b, 0);
+  if (again < 0) {
+    if (std::buf_add(&b, "!") == 13) {
+      if (std::streq(std::buf_s(&b), "hello, world!") == 1) { f = f | 128; }
+    }
+  }
+
+  print(["f005_buf mask=", f, "\n"]);
+  if (f == 255) { return 42; }
+  return f;
+}

@@ -1,0 +1,17 @@
+// f007_charnul.fl -- fact probe: printing a char-typed 0 (the NUL byte) DIVERGES between the two compilers.
+//   real flint : the char segment writes exactly one byte -> the raw 0x00 goes to stdout
+//   boot       : the char segment is built into a NUL-terminated buffer and written as a string
+//                -> strlen()==0 -> nothing is written
+// Ledger row F-007 uses the "differs" predicate on the raw stdout bytes of the two ends, so it
+// stays green only while BOTH ends keep their current behaviour; fixing either end turns it red
+// on purpose (the ledger must then be re-recorded with a reason).
+// Run (never compile in place -- the runner mirrors into %TEMP%\dsh-assert\work):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File facts-run.ps1 -Probe f007_charnul -Compiler flint
+//   powershell -NoProfile -ExecutionPolicy Bypass -File facts-run.ps1 -Probe f007_charnul -Compiler boot
+// Self-check: the int segment (a real 0) must print "0" on both ends -- that is what makes the
+// difference a char-vs-int difference and not a general "zero prints nothing".
+int main() {
+  char z = 0;
+  print(["head[", z, "] tail int=", 0, "\n"]);
+  return 0;
+}

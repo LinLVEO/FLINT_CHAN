@@ -50,6 +50,7 @@ static void print_tokens(Token *tok) {
     switch (tok->kind) {
       case TK_IDENT: printf("IDENT  %.*s\n", tok->len, tok->loc); break;
       case TK_NUM:   printf("NUM    %d\n", tok->val); break;
+      case TK_NUM64: printf("NUM64  %lld\n", tok->lval); break;   // v1.7.0：64 位整数字面量
       case TK_STR:   printf("STR    %.*s\n", tok->slen, tok->sval); break; // v0.7.3
       case TK_DBL:   printf("DBL    %.17g\n", tok->dval); break;  // v1.1.0 浮点字面量
       case TK_PUNCT: printf("PUNCT  %.*s\n", tok->len, tok->loc); break;
@@ -86,11 +87,13 @@ static void usage(void) {
   fprintf(stderr, "  -admin     产物内嵌 manifest（requireAdministrator）：双击即请求管理员权限（v1.4.6，用于读 MSR 这类要提权的程序）\n");
   fprintf(stderr, "  -gui       产物为 GUI 子系统（Subsystem=2，v1.4.28）：双击不弹控制台黑窗（门面验收第 1 条）；默认 3=CONSOLE\n");
   fprintf(stderr, "  -stats     打印按函数的发射统计（账本：指令数/栈槽访问/调用；不改产物）\n");
-  fprintf(stderr, "  -strict    严格诊断档（v1.4.25）：把四类「静默」当编译错误拦下——\n");
+  fprintf(stderr, "  -strict    严格诊断档（v1.4.25）：把五类「静默」当编译错误拦下——\n");
   fprintf(stderr, "             ① int 值传给 int* 形参（E-T1-INTTOPTR）\n");
   fprintf(stderr, "             ② 读一个从没赋过值的局部量（E-STRICT-UNINIT）\n");
   fprintf(stderr, "             ③ 地址值(64位)经 int 形参/int 返回值被截断（E-STRICT-WIDTH）\n");
   fprintf(stderr, "             ④ 常量下标越界（E-STRICT-BOUNDS）\n");
+  fprintf(stderr, "             ⑤ 裸指针 '+/-' 整数用在非 1 字节元素指针上（元素宽 >1 时按字节步进"
+                 "是静默错值，E-STRICT-PTRSTEP，v1.6.4）\n");
   fprintf(stderr, "             默认关：不加这个开关，产物与从前逐字节相同。\n");
   fprintf(stderr, "  -debug     产物携带「源码行 → 机器码地址」对照（v1.4.11）：\n");
   fprintf(stderr, "             ① 标准腿 = 三个 DWARF5 节（.debug_line + 最小 CU 的 .debug_info/.debug_abbrev）\n");
@@ -212,10 +215,22 @@ static bool is_api_decl_start(Token *t) {
 // 机器层 = kernel32 GetStdHandle(-11=STD_OUTPUT_HANDLE) + WriteFile 直写 stdout；
 // FLINT 无用户态缓冲（WriteFile 即写即达）。换行字节 \n(0x0A)：控制台换行实测可行，
 // 重定向文件字节原样。注入源码的 api 声明在最前 → collect_apis 扫头部可见。
-static const char *PRINT_LIB_SRC =
+// —— v1.5.0 str 内建：同一个库多一条「缓冲腿」（**复用同一批格式化函数**，两套必分叉 → 只有一套）——
+// str([...]) 与 print 走的正是 `_flint_out_str/_char/_int/_dbl`；唯一的分派点在最底层的
+// `_flint_out_bytes`：_flint_sink == 0 → stdout（print 的老路，逐字节不变）；
+// == 1 → 追加注入库里的静态缓冲 `_flint_buf[FLINT_STRBUF_CAP]`（str 的路）。
+// ⚠️ 只有**真正用到 str([...])** 的编译单元才注入 sink 分派 + 缓冲全局 + `_flint_str_*`
+//    ⇒ 只用 print 的程序注入源码逐字节不变、产物 PE 逐字节不变（判据 = tmp\strkit\base 老基线 SHA256）。
+static const char *LIB_HEAD_SRC =   // 头部：api 声明 + _flint_out_bytes 开头（sink 分派紧接其后）
   "api kernel32 ptr GetStdHandle(int);\n"
   "api kernel32 int WriteFile(int, int, int, int, int);\n"
-  "int _flint_out_bytes(char *s, int len) {\n"
+  "int _flint_out_bytes(char *s, int len) {\n";
+static const char *LIB_SINK_HOOK_SRC =
+  "  if (_flint_sink == 1) {\n"
+  "    if (_flint_pending == 0) { _flint_bufovf = 1; return 0; }\n"   // 段表达式里间接跑了 print()：响亮失败，不把它的字节静默混进缓冲
+  "    return _flint_bufput(s, len);\n"
+  "  }\n";
+static const char *LIB_TAIL_SRC =
   "  int *h = GetStdHandle(-11);\n"
   "  if (h == 0) { return 0; }\n"
   "  int w = 0;\n"
@@ -226,15 +241,19 @@ static const char *PRINT_LIB_SRC =
   "  while (s[n] != 0) { n = n + 1; }\n"
   "  return _flint_out_bytes(s, n);\n"
   "}\n"
+  // v1.6.3 缺陷修复（print(INT_MIN)）：**负数域取余**，全程不取反 —— 同 lib\\dstr_lib.fl 的
+  //   std::str_addint（:174-205）口径。旧写法 `if (n < 0) { neg = 1; n = -n; }` 对 INT_MIN
+  //   (0x80000000) 取反**溢出**，n 仍是负数 ⇒ C 的 % 给负余数 ⇒ '0' + 负值 打出 10 个 0x2A..0x2F
+  //   的垃圾字节（且长度恰好等于正确文本的 54 字节，长度判据骗得过）。负数域里 % 与 / 都安全。
   "int _flint_out_int(int n) {\n"
   "  char tmp[12];\n"
   "  char out[12];\n"
   "  int i = 0;\n"
   "  int j = 0;\n"
   "  int neg = 0;\n"
-  "  if (n < 0) { neg = 1; n = -n; }\n"
+  "  if (n < 0) { neg = 1; }\n"     // ← 不取反：INT_MIN 取反溢出
   "  if (n == 0) { tmp[0] = '0'; i = 1; }\n"
-  "  while (n != 0) { tmp[i] = '0' + n % 10; n = n / 10; i = i + 1; }\n"
+  "  while (n != 0) { int d = n % 10; if (d < 0) { d = 0 - d; } tmp[i] = '0' + d; n = n / 10; i = i + 1; }\n"
   "  if (neg != 0) { out[0] = '-'; j = 1; }\n"
   "  while (i > 0) { i = i - 1; out[j] = tmp[i]; j = j + 1; }\n"
   "  return _flint_out_bytes(out, j);\n"
@@ -271,6 +290,143 @@ static const char *PRINT_LIB_SRC =
   "  return 0;\n"
   "}\n";
 
+// ===== v1.7.0：int_64 的十进制格式化器（**按需注入**，D4）=====
+// 与 _flint_out_int（上面）逐条同形，只有两处不同：
+//   ① 缓冲从 12 → 24（19 位数字 + 符号 + 余量）；
+//   ② 取位用 64 位 `% 10` / `/ 10` —— 59 这条依赖正是"打印必须包含 64 位除法/取模"的原因。
+// 口径（§2.9）：十进制、有符号、无前导 0；**负数域取余**（全程不取反 —— 对 INT64_MIN 取反会溢出，
+//   与 _flint_out_int 修 INT_MIN 那次同一条纪律，见上面 :243-246 的注释原文）。
+// 注意 `to_int32(...)` 是**必须显式写**的：`'0' + d`（d 是 int_64）会得到 int_64，
+//   再赋给 char 就是 64→8 位静默截断 —— 本编译器的收窄是硬错，所以这里必须显式收窄。
+static const char *LIB_I64_OUT_SRC =
+  "int _flint_out_i64(int_64 n) {\n"
+  "  char tmp[24];\n"
+  "  char out[24];\n"
+  "  int i = 0;\n"
+  "  int j = 0;\n"
+  "  int neg = 0;\n"
+  "  if (n < 0) { neg = 1; }\n"                     // ← 不取反：INT64_MIN 取反溢出
+  "  if (n == 0) { tmp[0] = '0'; i = 1; }\n"
+  "  while (n != 0) {\n"
+  "    int d = to_int32(n % 10);\n"                  // 64 位取余（余数在 ±9 内，收窄无损）
+  "    if (d < 0) { d = 0 - d; }\n"                  // 负数域取余 ⇒ d 可能是负的
+  "    tmp[i] = '0' + d;\n"
+  "    n = n / 10;\n"                                // 64 位除法（向零截断，负数域安全）
+  "    i = i + 1;\n"
+  "  }\n"
+  "  if (neg != 0) { out[0] = '-'; j = 1; }\n"
+  "  while (i > 0) { i = i - 1; out[j] = tmp[i]; j = j + 1; }\n"
+  "  return _flint_out_bytes(out, j);\n"
+  "}\n";
+// str 腿的 int_64 追加器（只在 with_str **且** with_i64 时注入）——与 _flint_str_put_int 同形
+static const char *LIB_I64_STR_SRC =
+  "int _flint_str_put_i64(int_64 n) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_i64(n);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n";
+
+// —— v1.5.0 str 腿的注入片段（只在用到 str([...]) 时拼接进注入源码）——
+// 缓冲全局放在**最前**：注入库自己的函数体在后面引用它（FLINT 是按 token 顺序解析的）。
+// 上限常量取自 flint.h 的 FLINT_STRBUF_CAP_S（字符串形式）——单点定义，main() 有同步自检。
+static const char *LIB_STR_GLOBALS_SRC =
+  "int _flint_sink = 0;\n"        // 1 = 现在往静态缓冲里拼（一次 str() 的动态范围）
+  "int _flint_pending = 0;\n"     // >0 = 这些字节确实来自 str 的段（print 混进来要被判为响亮失败）
+  "int _flint_buflen = 0;\n"      // 缓冲里已有的内容字节数（不含结尾 0）
+  "int _flint_bufovf = 0;\n"      // 超限/重入标记：1 = 本次 str() 失败（_flint_str_end 返回 0）
+  "int _flint_nest = 0;\n"        // >0 = 已「闩住」几个重入的内层 str()（它们不许碰 sink/缓冲）
+  "char _flint_buf[" FLINT_STRBUF_CAP_S "];\n";
+
+// 语义（文档口径，探针 tmp\strkit 钉住）：
+// ① `_flint_out_bytes` 是所有输出字节的**唯一**出口：sink==0 → stdout（print 的老路，逐字节不变）；
+//    sink==1 → 追加到 _flint_buf（str 的路）。这是"两条腿只有一套格式化实现"的落点。
+// ② `_flint_str_begin()` 开一次拼接（sink=1、长度归零、超限标记清零）并返回缓冲地址。
+// ③ `_flint_str_put_*` 是段的链式追加器：**只调** print 那一批 `_flint_out_*`，所以段类型分派与
+//    print 逐条一致（不存在第二套格式化）。_flint_pending 期间 >0 用来把"段自己的字节"与
+//    "段表达式里间接跑出来的 print 的字节"区分开——后者一律判为本次 str() 失败（响亮，不静默混内容）。
+// ④ `_flint_str_end()` 关掉 sink（回到 stdout）并把缓冲地址（或失败时的 0）交给表达式。
+// ⑤ 重入（段表达式里间接又跑到 str()）：内层 begin 发现 sink==1 ⇒ 闩住 _flint_nest++、置失败标记、
+//    返回 0；内层 put 全跳过、内层 end 只把闩减一（不碰 sink）；最外层 end 于是返回 0 —— 响亮失败，
+//    且一个字节都不会漏到 stdout。
+// ⑥ 超限：内容会超过 CAP-1 字节 ⇒ 置失败标记、停止追加、str() 返回 0（**不静默截断**）。
+// ⑦ 缓冲是**唯一一个**静态数组 ⇒ 两次 str() 的结果互相覆盖（别名语义，见 SPEC「str」行）。
+static const char *LIB_STR_SRC =
+  "int _flint_bufput(char *s, int len) {\n"
+  "  int i = 0;\n"
+  "  while (i < len) {\n"
+  "    if (_flint_buflen >= " FLINT_STRBUF_CAP_S " - 1) { _flint_bufovf = 1; _flint_buf[_flint_buflen] = 0; return 0; }\n"
+  "    _flint_buf[_flint_buflen] = s[i];\n"
+  "    _flint_buflen = _flint_buflen + 1;\n"
+  "    i = i + 1;\n"
+  "  }\n"
+  "  _flint_buf[_flint_buflen] = 0;\n"
+  "  return 0;\n"
+  "}\n"
+  "char *_flint_str_begin() {\n"
+  "  if (_flint_sink == 1) { _flint_bufovf = 1; _flint_nest = _flint_nest + 1; return 0; }\n"
+  "  _flint_sink = 1;\n"
+  "  _flint_pending = 0;\n"
+  "  _flint_buflen = 0;\n"
+  "  _flint_bufovf = 0;\n"
+  "  _flint_buf[0] = 0;\n"
+  "  return _flint_buf;\n"
+  "}\n"
+  "char *_flint_str_end() {\n"
+  "  if (_flint_nest > 0) { _flint_nest = _flint_nest - 1; return 0; }\n"
+  "  _flint_sink = 0;\n"
+  "  _flint_pending = 0;\n"
+  "  if (_flint_bufovf != 0) { return 0; }\n"
+  "  return _flint_buf;\n"
+  "}\n"
+  "int _flint_str_put_str(char *s) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  if (s == 0) { _flint_bufovf = 1; return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_str(s);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n"
+  "int _flint_str_put_char(int c) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_char(c);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n"
+  "int _flint_str_put_int(int n) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_int(n);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n"
+  "int _flint_str_put_dbl(double v) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_dbl(v);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n";
+
+// 组装注入源码：with_str = 0 时**逐字节等于 v1.0.8 的老注入库**（只用 print 的程序产物不变）。
+// —— v1.7.0（D4）：int_64 的格式化器**按需注入**（with_i64），且只在真的用到 int_64 时 ——
+//   无条件塞 ⇒ 每一个用 print 的程序注入源都变 ⇒ 等价门指纹整批位移
+//   （main.c 上面那条"with_str=0 时逐字节等于老注入库"的不变量正是为此立的）。
+static char *lib_src_build(bool with_str, bool with_i64) {
+  const char *g = with_str ? LIB_STR_GLOBALS_SRC : "";
+  const char *h = with_str ? LIB_SINK_HOOK_SRC : "";
+  const char *e = with_str ? LIB_STR_SRC : "";
+  const char *i64 = with_i64 ? LIB_I64_OUT_SRC : "";
+  const char *i64s = (with_i64 && with_str) ? LIB_I64_STR_SRC : "";
+  size_t n = strlen(g) + strlen(LIB_HEAD_SRC) + strlen(h) + strlen(LIB_TAIL_SRC) + strlen(e)
+           + strlen(i64) + strlen(i64s) + 1;
+  char *s = malloc(n);
+  snprintf(s, n, "%s%s%s%s%s%s%s", g, LIB_HEAD_SRC, h, LIB_TAIL_SRC, e, i64, i64s);
+  return s;
+}
+
 // 探测：是否用了内建 print 形态（print ( [ ）——普通 print 函数调用/变量不触发注入
 static bool uses_print(Token *head) {
   for (Token *t = head; t->kind != TK_EOF; t = t->next) {
@@ -281,11 +437,32 @@ static bool uses_print(Token *head) {
   return false;
 }
 
+// v1.5.0：是否用了内建 str 形态（str ( [ ）——决定注入库要不要带「缓冲腿」
+static bool uses_str(Token *head) {
+  for (Token *t = head; t->kind != TK_EOF; t = t->next) {
+    if (is_ident_tok(t, "str") && t->next && is_punct_tok(t->next, '(')
+        && t->next->next && is_punct_tok(t->next->next, '['))
+      return true;
+  }
+  return false;
+}
+
+// v1.7.0：是否用了 int_64（决定注入源要不要带 _flint_out_i64）——
+//   判据 = token 流里出现 int_64 类型词 **或** 64 位字面量。保守但精确：
+//   只在 print/str 已成立时才问这一条（没 print 的 int_64 程序不需要格式化器）。
+static bool uses_int64(Token *head) {
+  for (Token *t = head; t->kind != TK_EOF; t = t->next) {
+    if (t->kind == TK_NUM64) return true;
+    if (is_ident_tok(t, "int_64")) return true;
+  }
+  return false;
+}
+
 // 注入：把内置输出库源码 token 化后插到 token 流头部。
-// collect_funcs 预扫即登记 _flint_out_*（print 展开的 ND_CALL 能找到）；
+// collect_funcs 预扫即登记 _flint_out_*/_flint_str_*（展开出的 ND_CALL 能找到）；
 // api 声明在注入源码最前，collect_apis 扫头部可见。
-static Token *inject_print_lib(Token *head) {
-  Token *lib = tokenize(strdup(PRINT_LIB_SRC), "<builtin print>");
+static Token *inject_print_lib(Token *head, bool with_str, bool with_i64) {
+  Token *lib = tokenize(lib_src_build(with_str, with_i64), with_str ? "<builtin print+str>" : "<builtin print>");
   Token *tail = lib;
   while (tail->next->kind != TK_EOF) tail = tail->next;   // tail = EOF 前一节点
   tail->next = head;      // 内置库（去 EOF）接原流（原流以 EOF 收尾）
@@ -412,6 +589,12 @@ static Token *hoist_apis(Token *head) {
 
 int main(int argc, char **argv) {
   if (argc < 2) { usage(); return 1; }
+  // v1.5.0 自检：str 缓冲上限的「数值宏 vs 字面量宏」必须同步（单点定义的防漂移哨兵）
+  if (atoi(FLINT_STRBUF_CAP_S) != FLINT_STRBUF_CAP) {
+    fprintf(stderr, "FLINT: 内部错误：FLINT_STRBUF_CAP(%d) 与 FLINT_STRBUF_CAP_S(\"%s\") 不同步\n",
+            FLINT_STRBUF_CAP, FLINT_STRBUF_CAP_S);
+    return 1;
+  }
 
   bool tok_only = false;
   bool mode_safe = false;
@@ -469,7 +652,8 @@ int main(int argc, char **argv) {
   // 必须放 hoist_apis 之前：注入源码自带 api 声明（GetStdHandle/WriteFile），若在 hoist 后注入，
   // 注入的函数定义会把用户源码自己的 api 声明（如 CreateFileA）隔到"函数之后"→ parse 报
   // "api 声明必须放在文件最顶部"。hoist 前注入则注入 api 与用户 api 一起被前移。
-  if (uses_print(all)) all = inject_print_lib(all);
+  if (uses_print(all) || uses_str(all))
+    all = inject_print_lib(all, uses_str(all), uses_int64(all));
 
   // api 声明统一前移（多文件合并后 parse 前置条件）
   all = hoist_apis(all);

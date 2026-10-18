@@ -1,0 +1,69 @@
+// f033_ptr_add_byte_step.fl -- WIDTH FAMILY #5: RAW pointer addition steps in BYTES, one byte per
+// unit -- NOT 4, NOT 8. `(a + 4) - a == 4` and it lands exactly on a[1] (reads 22).
+//
+// 2026-10-17 v1.6.5 (int4 ABI): int elements are now 4 bytes, so byte offset 4 = a[1] and byte
+// offset 8 = a[2]. The file name is kept for ledger-anchor stability; expectations re-recorded.
+//
+// MEASURED 2026-10-17 v1.6.5: prints
+//   `add p8d=8 p80=33 p1d=1 p4d=4 p40=22 pp1d=1`
+// and exits 42.
+//
+// WHY THE POINTER DIFFERENCE IS A REAL DISCRIMINATOR: FLINT returns the RAW BYTE difference from
+// address subtraction (no C-style division by element size) -- pinned by ledger F-031.
+// Byte stepping => 1 / 4 / 8. Element scaling (decision 40 reverted) => 4 / 16 / 32.
+//
+// WHAT IS DELIBERATELY *NOT* PINNED: `(a + 1)[0]` / `(a + 2)[0]` read a 4-byte window that starts
+// inside a slot's middle; that window was never written by a 32-bit store, so it is frame garbage
+// (it happened to read 0 on both ends earlier -- an accident, not a semantic).
+// Reads are only taken at slot-aligned offsets (0, 4, 8).
+//
+// AUTHORITY: SPEC.md ("raw pointer +/- = byte stepping") + PROGRESS.md decision 40 +
+// src\parse.c add/sub level (no scaling).
+//
+// WHEN THIS ROW TURNS RED:
+//   - p1d becomes 8 (or p8d becomes 64) => raw + was turned into element scaling: decision 40
+//     reverted. Re-record with a reason AND expect audit7 / b2k4 / F-030 to be red too.
+//   - p80 stops being 33 / p40 stops being 22 => the int element geometry changed (see f032).
+//
+// REVIEW COMMAND (both legs must exit 42):
+//   powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f033_ptr_add_byte_step -Compare flint,boot -ExpectExit 42
+//   criterion: contains -> add p8d=8 p80=33 p1d=1 p4d=4 p40=22 pp1d=1
+// DEPENDENCIES:
+//   E:\FLINT-lab\test\facts\f033_ptr_add_byte_step.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
+//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
+//   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\SPEC.md;E:\FLINT-lab\PROGRESS.md;
+//   E:\FLINT-lab\test\samples\audit7.fl;E:\FLINT-lab\boot\samples\b2k4.fl
+//
+// ASCII only, no BOM. No includes. No pointer value is printed (only differences and slot reads).
+int main() {
+  int a[3];
+  a[0] = 11; a[1] = 22; a[2] = 33;
+
+  int *q8 = a + 8;
+  int d8 = q8 - a;
+  int *q1 = a + 1;
+  int d1 = q1 - a;
+  int *q4 = a + 4;
+  int d4 = q4 - a;
+
+  int *p = a;
+  p = p + 1;
+  int pp1d = p - a;
+
+  print(["add p8d=", d8, " p80=", q8[0],
+         " p1d=", d1, " p4d=", d4, " p40=", q4[0], " pp1d=", pp1d, "\n"]);
+
+  if (d8 == 8) {
+    if (q8[0] == 33) {
+      if (d1 == 1) {
+        if (d4 == 4) {
+          if (q4[0] == 22) {
+            if (pp1d == 1) { return 42; }
+          }
+        }
+      }
+    }
+  }
+  return 7;
+}
