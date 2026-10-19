@@ -56,7 +56,7 @@ docs/语言边界.md               export-ignore
 docs/快速上手-真实项目.md      export-ignore
 docs/真实项目.md               export-ignore
 docs/图片/                     export-ignore
-apps/*/验收.md                 export-ignore
+apps/*/验收*.md                export-ignore
 apps/m2_float/浮窗规格-对C#逐细节.md  export-ignore
 libcs/hwbridge/部署说明.md     export-ignore
 test/boot缺口归因.md           export-ignore
