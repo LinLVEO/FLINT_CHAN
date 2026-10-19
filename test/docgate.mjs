@@ -480,7 +480,25 @@ const routeIncomplete = [], routePathsMissing = [];
   }
 }
 
-const bad = drift.length + unclosed.length + snapMissing.length + metaMissing.length + unclassified.length + linkIssues.length + ps1Issues.length + numMix.length + routeIncomplete.length + routePathsMissing.length;
+// ---- 错误台账：源码里的报错点 vs 基线（tools\错误台账.mjs）----
+// 为什么放在文档门：这份台账是「文档/探针说的错误文案」与「源码里实际报什么」之间的对账，
+// 产物 tools\错误台账.md 本身也是机器生成的文档。新增/删除/改文案都必须显式重录基线。
+const ledgerIssues = [];
+{
+  const tool = path.join(ROOT, 'tools', '错误台账.mjs');
+  if (!fs.existsSync(tool)) {
+    ledgerIssues.push('tools/错误台账.mjs 不存在（错误台账无法对账）');
+  } else {
+    try {
+      execFileSync(process.execPath, [tool, '--check'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+    } catch (e) {
+      const txt = String((e && e.stdout) || '').trim().split('\n').slice(0, 6).join(' ｜ ');
+      ledgerIssues.push('错误台账漂移（重录：node tools\\错误台账.mjs --update 后复查）: ' + (txt || (e && e.message)));
+    }
+  }
+}
+
+const bad = drift.length + unclosed.length + snapMissing.length + metaMissing.length + unclassified.length + linkIssues.length + ps1Issues.length + numMix.length + routeIncomplete.length + routePathsMissing.length + ledgerIssues.length;
 for (const s of drift) console.log('DRIFT   ' + s);
 for (const s of ps1Issues) console.log('PS1-BOM ' + s);
 for (const s of unclosed) console.log('MARKER  ' + s);
@@ -491,6 +509,7 @@ for (const s of linkIssues) console.log('LINK    ' + s);
 for (const s of numMix) console.log('NUM-MIX      ' + s);
 for (const s of routeIncomplete) console.log('ROUTE-MAP    ' + s);
 for (const s of routePathsMissing) console.log('ROUTE-PATH   ' + s);
+for (const s of ledgerIssues) console.log('LEDGER  ' + s);
 if (FIX) {
   // Report the repaired and the un-repairable separately: "1 value fixed" and "2 issues remain"
   // are different facts, and lumping them together is what made the old exit code unreadable.
@@ -505,6 +524,7 @@ if (FIX) {
   if (numMix.length) remaining.push(numMix.length + ' num-mix');
   if (routeIncomplete.length) remaining.push(routeIncomplete.length + ' route-map-incomplete');
   if (routePathsMissing.length) remaining.push(routePathsMissing.length + ' route-path-missing');
+  if (ledgerIssues.length) remaining.push(ledgerIssues.length + ' error-ledger');
   console.log('FIXED   ' + fixedCount + ' marker value(s) rewritten from the meter' +
     (recheckedAfterFix ? '; re-checked after fix: ' + (remaining.length === 0 ? 'GREEN' : 'still RED -- ' + remaining.join(', ')) : ''));
   if (recheckedAfterFix && fixedCount > 0) console.log('FIXED   REPAIRED: ' + fixedCount + ' marker value(s) (those DRIFT lines are absent from the list above)');
@@ -513,7 +533,8 @@ if (FIX) {
 console.log('DOCGATE files=' + scanned + ' markers=' + markerCount + ' drift=' + drift.length + ' unclosed=' + unclosed.length +
   ' snapshot-missing=' + snapMissing.length + ' meta-missing=' + metaMissing.length +
   ' unclassified=' + unclassified.length + ' link-issues=' + linkIssues.length + ' ps1-bom=' + ps1Issues.length +
-  ' num-mix=' + numMix.length + ' routes-incomplete=' + routeIncomplete.length + ' route-paths-missing=' + routePathsMissing.length);
+  ' num-mix=' + numMix.length + ' routes-incomplete=' + routeIncomplete.length + ' route-paths-missing=' + routePathsMissing.length +
+  ' error-ledger=' + ledgerIssues.length);
 if (bad === 0) {
   console.log('DOCGATE GREEN');
   console.log('DOCGATE documents ' + scanned + ' / issues ' + bad);
