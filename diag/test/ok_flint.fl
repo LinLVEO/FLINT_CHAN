@@ -1,0 +1,10 @@
+api fltdiag int flt_diag_init(int);
+api fltdiag int flt_checkpoint(int);
+api fltdiag int flt_err_set(int, int);
+
+int main() {
+  int r = flt_diag_init("ok-flint-test");
+  r = r + flt_checkpoint("checkpoint-ok");
+  r = r + flt_err_set(7, "hello from flint");
+  return r;
+}

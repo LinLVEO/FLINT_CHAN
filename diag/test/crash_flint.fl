@@ -1,0 +1,15 @@
+// crash_flint.fl -- FLINT 侧自测：用 api 调 fltdiag.dll，然后空指针写
+// 注意：FLINT 的 api 声明只写类型、不写参数名；参数类型只能 int/double（指针用 int 承接）
+// 依赖：fltdiag.dll 与编出来的 exe 同目录（或 PATH 里）
+api fltdiag int flt_diag_init(int);
+api fltdiag int flt_checkpoint(int);
+api fltdiag int flt_err_set(int, int);
+
+int main() {
+  flt_diag_init("crash-flint-test");
+  flt_checkpoint("准备空指针写");
+  flt_err_set(42, "FLINT 自测：故意制造访问违例");
+  int *p = 0;
+  *p = 1;
+  return 0;
+}
