@@ -1,8 +1,8 @@
 {
     "Schema":  1,
     "Tool":  "budget-gate",
-    "Recorded":  "2026-10-13 20:27:28",
-    "Reason":  "first recording: pre-existing at-limit state (m2_float 96/96 imports, 8/8 modules; boot table 512/512 headroom 0), pending budget re-layout",
+    "Recorded":  "2026-10-14 21:35:54",
+    "Reason":  "v1.5.0 str([...]) builtin: the boot-injected print/str support library gains one function (_flint_bufput, the sink writer) =\u003e boot function-table occupancy for the heaviest chain 506 -\u003e 507 (headroom 6 -\u003e 5). Flint side unchanged (str adds no api declarations); print-only flint products stay byte-identical (eqgate green).",
     "ImportCaps":  {
                        "MaxImports":  96,
                        "MaxGroups":  8,
@@ -11,7 +11,7 @@
     "Products":  [
                      {
                          "Artifact":  "apps\\enginesnap\\enginesnap.exe",
-                         "Imports":  50,
+                         "Imports":  48,
                          "Groups":  3,
                          "Modules":  "kernel32.dll user32.dll gdi32.dll"
                      },
@@ -35,13 +35,13 @@
                      },
                      {
                          "Artifact":  "apps\\m2_float\\m2_float.exe",
-                         "Imports":  96,
+                         "Imports":  90,
                          "Groups":  8,
                          "Modules":  "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
                      },
                      {
                          "Artifact":  "apps\\m2_float\\main.exe",
-                         "Imports":  96,
+                         "Imports":  90,
                          "Groups":  8,
                          "Modules":  "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
                      },
@@ -65,18 +65,18 @@
                      },
                      {
                          "Artifact":  "apps\\winpanel\\winpanel.exe",
-                         "Imports":  83,
+                         "Imports":  79,
                          "Groups":  7,
                          "Modules":  "kernel32.dll user32.dll gdi32.dll dwmapi.dll ws2_32.dll advapi32.dll shell32.dll"
                      }
                  ],
     "BootTable":  {
                       "App":  "apps\\m2_float\\main.fl",
-                      "Occupied":  512,
+                      "Occupied":  507,
                       "Limit":  512,
-                      "Headroom":  0,
-                      "Api":  102,
-                      "Func":  410,
-                      "LimitSource":  "boot\\lib_parse.fl:1399,1526"
+                      "Headroom":  5,
+                      "Api":  96,
+                      "Func":  411,
+                      "LimitSource":  "boot\\lib_parse.fl:1434,1561"
                   }
 }

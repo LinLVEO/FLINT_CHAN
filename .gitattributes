@@ -33,3 +33,4 @@ PROGRESS-归档.md         export-ignore
 *.bak-*                  export-ignore
 tmp/                     export-ignore
 test/tmp/                export-ignore
+tools/同步开源版.ps1     export-ignore

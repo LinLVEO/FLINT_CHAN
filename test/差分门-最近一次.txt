@@ -71,13 +71,13 @@ ctrl8	OK	exit=
 ctrl9	OK	exit=
 dbgcond	OK	exit=
 dblcmp1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.exe' parse err=-183 token=0 pos=903 text='double' line 10: double half(double x) { return x / 2.0; } compile FAIL err=2
-dblcompound1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.exe' parse err=-183 token=291 pos=1840 text='double' line 51: double half(double x) { return x / 2.0; } compile FAIL err=2
-dblconst1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.exe' parse err=-183 token=506 pos=2899 text='double' line 88: double half() { return 0.5; } compile FAIL err=2
-dblfield1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblfield1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblfield1.exe' parse err=-183 token=291 pos=1700 text='double' line 50: double half(double x) { return x / 2.0; } compile FAIL err=2
-dblparam1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblparam1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblparam1.exe' parse err=-183 token=291 pos=2300 text='double' line 55: double half(double x) { return x / 2.0; } // 单 double 形参 compile FAIL err=2
-dblprint1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.exe' parse err=-183 token=291 pos=1784 text='double' line 50: double half(double x) { return x / 2.0; } // 定义在 main 之后 → 顺带钉住前向调用 compile FAIL err=2
+dblcompound1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.exe' parse err=-183 token=447 pos=4042 text='double' line 85: double half(double x) { return x / 2.0; } compile FAIL err=2
+dblconst1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.exe' parse err=-183 token=662 pos=5101 text='double' line 122: double half() { return 0.5; } compile FAIL err=2
+dblfield1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblfield1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblfield1.exe' parse err=-183 token=447 pos=3902 text='double' line 84: double half(double x) { return x / 2.0; } compile FAIL err=2
+dblparam1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblparam1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblparam1.exe' parse err=-183 token=447 pos=4502 text='double' line 89: double half(double x) { return x / 2.0; } // 单 double 形参 compile FAIL err=2
+dblprint1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.exe' parse err=-183 token=447 pos=3986 text='double' line 84: double half(double x) { return x / 2.0; } // 定义在 main 之后 → 顺带钉住前向调用 compile FAIL err=2
 dblptr1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblptr1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblptr1.exe' parse err=-137 token=3 pos=823 text='double' line 8: struct Box { double *p; double v; } compile FAIL err=2
-dblret1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.exe' parse err=-183 token=291 pos=1679 text='double' line 50: double half() { return 0.5; } // 直接返回 double 字面量 compile FAIL err=2
+dblret1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.exe' parse err=-183 token=447 pos=3881 text='double' line 84: double half() { return 0.5; } // 直接返回 double 字面量 compile FAIL err=2
 decl1	OK	exit=
 demo1	SKIP	排除清单
 edge1	OK	exit=

@@ -55,7 +55,8 @@
 #   * if the merged source CALLS print( -> boot PREPENDS <exe dir>\lib_print.fl
 #     (b1_emit.fl:3071-3091; reader at :3080, detection at :3073 via src_has_print
 #     :2419-2451, which needs the identifier `print` followed by optional SPACE/TAB and `(`).
-#     boot\lib_print.fl bills 5 entries: 2 api (:5,:6) + 3 function definitions (:8,:16,:23).
+#     boot\lib_print.fl bills 6 entries: 2 api (:8,:9) + 4 function definitions (:19,:31,:43,:55).
+#     (v1.5.0, commit cc06233, added the 4th function _flint_bufput -> this was 5 entries until 2026-10-14.)
 #   * if the merged source mentions new / own / share (src_has_ident :2455-2490, word
 #     boundaries, comments and strings skipped) AND does not already mention
 #     VirtualAlloc / VirtualFree, boot APPENDS the matching builtin api declaration
@@ -76,8 +77,8 @@
 # RED / GREEN line (deliberate, argued in the report that introduced this script):
 #   * exit 1 (RED) ONLY when headroom < 0. That is the only state in which the app cannot
 #     be compiled by boot at all; it is a genuine regression, not a tight budget.
-#   * headroom <= 8 exits 0 with a loud WARN. The measured headroom on 2026-10-13 is 0 --
-#     i.e. the very next library function overflows -- but a tight budget is the status quo,
+#   * headroom <= 8 exits 0 with a loud WARN. The measured headroom on 2026-10-13 was 0
+#     (2026-10-15: 5, see the log line below); a tight budget is the status quo,
 #     not a regression. Reporting green-but-loud keeps the gate honest: painting the gate red
 #     for the status quo is how a gate gets "temporarily" loosened. The WARN line is
 #     greppable: `WARN BOOT-TABLE-TIGHT`.
@@ -87,6 +88,9 @@
 # Cross-check: tmp\m19\dynamic-headroom.ps1 measures the same number the hard way (append N
 # stub functions in a throwaway worktree, bisect the largest N boot still compiles).
 # 2026-10-13: static headroom 0 and dynamic max N = 0 agree.
+# 2026-10-15: static occupied 507/512 (headroom 5) and dynamic max N = 5 agree.
+#   The library moved on 2026-10-14: be65f5c removed 6 zero-call api declarations (512 -> 506),
+#   cc06233 added the injected boot\lib_print.fl function _flint_bufput (506 -> 507).
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\boot[headroom].ps1

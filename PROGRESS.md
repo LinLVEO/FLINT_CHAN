@@ -47,6 +47,12 @@
 >     **查细节**：`grep -n "<关键词>" PROGRESS-归档.md`（本次搬入的那一批：`grep -n "搬入：PROGRESS.md 历史区 2026-09-18" PROGRESS-归档.md`）。
 >   查细节：`grep -n "B2h" PROGRESS-归档.md`（按步骤名/版本号/任务卡号/日期均可）。
 >
+> ## 📎 交接要点（最新 · 2026-10-19 19:5x —— **开源前六项对外口径已拍板 ＋ 公开仓库清洗**：① 名字 FLINT ② 一句话＝以 Windows 桌面开发为核心的发展中语言，目标 Zig/C++/Rust ③ 中英双语（中文正文＋英文摘要）④ 只收工单（issue）、暂不收外部 PR ⑤ AI 直接摊牌 ⑥ 源码 MIT ＋ 文档 CC BY 4.0；`E:\FLINT_CHAN` 清掉 **41 个乱码名重复文件**＋2 个垃圾文件，改用 **UTF-8 zip 同步**（tar 会按本地码页解包——那正是乱码来源））
+> - ✅ **落点**：`docs\协作协议.md` §7（六项逐条，带原话）＋ `README.md` 首屏「一句话」与事实表（双语／只收工单／MIT+CC／AI 披露）；新增 `tools\同步开源版.ps1`（zip ＋ Expand-Archive，`export-ignore` 不随包发布）；CHAN 现 **749 个跟踪文件**，`chan-only=0`（相对 lab 只缺 `export-ignore` 的内部过程件）。
+> - 🧪 **自证**：CHAN 从零重建（`gcc -O2 src\*.c`）→ hello 输出 `hello, flint` / `2 + 3 = 5`；`git status` 干净；CHAN 里 0 个乱码名文件。
+> - ⏸ **开源前还剩（按优先级）**：① 英文摘要（双语口径下每份对外文档要补 Abstract）② 示例 5 件套（`工单-对外可跑示例5件套.md`）③ 语言边界表标「适用版本 ＋ 有效期」（`docs\语言边界.md`）④ **B1-2「局部 struct 字段不清零」**——修掉或写进边界表（D13 说的人因清单最后一笔）。
+> - 🛡️ **口径不变**：D13「不追求多人用／开源保留但不投生态」仍有效 —— 上面「只收工单、不收 PR」正是它的落地；工具链/生态不排期。
+>
 > ## 📎 交接要点（最新 · 2026-10-19 00:1x —— **按所有者排序推进四刀并收网**：① master 合并＋FLINT_CHAN 同步 ② 差分门退出码盲区修复（暴露并修掉 6 条 boot 真分岔）＋标量槽探针 ③ `int_64` P1（位运算/移位/`++`/`--` ＋ 复合赋值）④ 取数器排除 `test\tmp`；**主检出 `verify-all` ALL GREEN 14/14**；master 已 ff 到本轮末提交，FLINT_CHAN 已同步）
 > - 🧭 **续接入口**：① `git checkout int4-abi`（master 与本分支同点）；② 读本块；③ 要数字先取数（`tools\文档事实.ps1 -Key`）；④ 改文档跑 `node test\docgate.mjs`，改编译器/库跑 `test\verify-all.ps1`（14 步，约 10 分钟；**在主检出跑**最稳 —— 新 worktree 缺 gitignore 产物会让 wx/budget/loop 假红）。
 > - ✅ **本会话交付（按所有者「就按排序推进 开多几个子代理」）**：

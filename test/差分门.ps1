@@ -49,6 +49,11 @@ if (-not $Baseline) { $Baseline = Join-Path $PSScriptRoot '差分门-baseline.tx
 
 # 排除清单：开窗 / 依赖窗口环境 / 长跑 / stdout 口径特殊的样本（GUI 由 wx 门与浮窗自检覆盖）
 $SKIP = @('demo1','m1_float','m2_float','ui_seg','ui_text','ui_widgets','stack1','stack2','console1','print1')
+# 2026-10-18：**非确定样本** —— 退出码由时间/系统状态决定，双端先后跑必然不同（不是编译器分岔）。
+#   sys_probe = Sleep(1000) 采两次 GetSystemTimes，退出码 = cpu%*100 + mem%（实测同一编译器两次跑
+#   给 -655 / -355 等不同值）。对这类样本只比 stdout、不判退出码；**样本本身仍在门里跑**（编译+运行
+#   仍要成功 ⇒ 产物能跑这件事照样被验）。
+$NONDET = @('sys_probe')
 
 # ⚠️ **整目录副本**：样本里有大量 `include "xxx_lib.fl"`（同目录相对路径）—— 只拷单个 .fl 到孤立目录
 #    会让 include 全部失效 ⇒ 23 个样本报"编译错误"的**假红**（2026-09-19 踩过）。
@@ -67,12 +72,35 @@ if (-not (Test-Path $libLink)) {
   cmd /c mklink /J "$libLink" "$root\lib" | Out-Null
 }
 
+# 2026-10-18（卡：**退出码盲区**）——本函数原先 `return @{ code = $p.ExitCode }`，而 PS 5.1 下
+#   `Start-Process -PassThru` 的 `.ExitCode` 在这里**恒为空**（同下方 Invoke-Compile 注释记的坑；基线里
+#   每行 `OK exit=` 那个空值就是它）。后果：`$rb.code -eq $rf.code` 变成 `$null -eq $null` **恒真** ⇒
+#   纯退出码样本（str1/str2/str3/str6 这类 stdout 为空、分歧只在退出码的）分岔被整片吞掉，门照报 0/236。
+#   （2026-10-18 标量槽 4 字节实验就是这个盲区被手动复跑抓到的：flint 乱值 vs boot=3/52/4/12。）
+#   修法 = 与 Invoke-Compile **同一套哨兵行**：写临时 .bat，子进程跑完把 `%errorlevel%` 落到 `<stdout>.rc`，
+#   再从那行取码；**不用 .ExitCode**。哨兵落在**独立文件**里 ⇒ stdout 口径一字不变（还是逐字节比原文件）。
+#   ⚠️ 保留的语义：① 超时仍按 $sec 计时（WaitForExit 毫秒超时）；② 超时**杀整棵进程树** —— 现在子进程是
+#   cmd 的孙子，只 Kill cmd 会漏下真挂住的产物继续吃 CPU、占着 stdout 文件（所以用 taskkill /T）；③ 拿不到
+#   哨兵 = 当作挂住（与 Invoke-Compile 同口径），交给调用方的"重试 4 倍预算"再判一次。
 function Run-WithTimeout([string]$exe, [string]$workdir, [int]$sec, [string]$stdoutPath) {
-  # 用 Start-Process：真退出码 + 重定向 stdout；**不走管道**（避免"卡在控制台句柄"的假挂）
-  $p = Start-Process -FilePath $exe -WorkingDirectory $workdir -NoNewWindow -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError (Join-Path $workdir 'stderr.txt')
-  if (-not $p.WaitForExit($sec * 1000)) { try { $p.Kill() } catch { }; return @{ hang = $true; code = $null } }
-  return @{ hang = $false; code = $p.ExitCode }
+  $rcPath = $stdoutPath + '.rc'
+  Remove-Item $rcPath -Force -ErrorAction SilentlyContinue
+  $tag = [IO.Path]::GetFileNameWithoutExtension($stdoutPath)
+  # ⚠️ 与 Invoke-Compile 同因：不把长命令塞进 `cmd /c`（Start-Process 的 ArgumentList 会被嵌套引号解析坏），
+  #    改成写 .bat 再跑，引号原样进文件，行为确定。
+  $line = ('"' + $exe + '" > "' + $stdoutPath + '" 2> "' + (Join-Path $workdir 'stderr.txt') + '"') +
+          "`r`necho __RC=%errorlevel% > `"$rcPath`""
+  $bat = Join-Path $work ("_run-$tag.bat")
+  Set-Content -Path $bat -Value ("@echo off`r`n" + $line) -Encoding Ascii
+  $p = Start-Process -FilePath $bat -WorkingDirectory $workdir -NoNewWindow -PassThru
+  if (-not $p.WaitForExit($sec * 1000)) {
+    try { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null } catch { }
+    try { $p.Kill() } catch { }
+    return @{ hang = $true; code = $null }
+  }
+  $ec = Get-SentinelRc $rcPath
+  if ($null -eq $ec) { return @{ hang = $true; code = $null } }   # 无哨兵 = 没跑到终点，按挂住处理
+  return @{ hang = $false; code = $ec }
 }
 
 # 2026-09-20（卡 T-20260920-001345 本轮实测暴露的真缺口）：
@@ -173,8 +201,10 @@ foreach ($n in $names) {
   $of = (Get-Content (Join-Path $outDir "f-$n.stdout.txt") -Raw -ErrorAction SilentlyContinue)
   if ($null -eq $ob) { $ob = '' }
   if ($null -eq $of) { $of = '' }
-  if ($rb.code -eq $rf.code -and $ob -eq $of) {
-    $results += [pscustomobject]@{ name=$n; verdict='OK'; detail="exit=$($rf.code)" }
+  $exitCompared = -not ($NONDET -contains $n)
+  if ((-not $exitCompared -or $rb.code -eq $rf.code) -and $ob -eq $of) {
+    $detail = if ($exitCompared) { "exit=$($rf.code)" } else { "exit 不判（非确定样本）" }
+    $results += [pscustomobject]@{ name=$n; verdict='OK'; detail=$detail }
   } else {
     $d = "exit boot=$($rb.code) flint=$($rf.code)"
     if ($ob -ne $of) { $d += (" | stdout 不同 boot='" + ($ob -replace '\s+',' ').Trim() + "' flint='" + ($of -replace '\s+',' ').Trim() + "'") }

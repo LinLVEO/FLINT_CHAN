@@ -1,4 +1,4 @@
-# 一键构建.ps1 -- rebuild HwBridge.dll (LibreHardwareMonitor C# -> native DLL for FLINT) from a clean tree.
+﻿# 一键构建.ps1 -- rebuild HwBridge.dll (LibreHardwareMonitor C# -> native DLL for FLINT) from a clean tree.
 #
 # ASCII-ONLY on purpose: PS 5.1 reads a .ps1 as ANSI(GBK) when it has no UTF-8 BOM, so CJK in a
 # non-BOM script gets mangled into fake parse errors. Keep this file ASCII (same rule as tools\gen-altnames.ps1).
