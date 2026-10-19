@@ -57,7 +57,9 @@
 > - 🛡️ **口径不变**：D13「不追求多人用／开源保留但不投生态」仍有效 —— 上面「只收工单、不收 PR」正是它的落地；工具链/生态不排期。
 > - ✅ **2026-10-19 23:3x 剩余两件收口（本块续记）**：① **摘要判定 = 不补**（`FLINT明细.md` 借用台账／`开源前-人类可用性缺口.md`／`可用性路线图-人机两条线.md`／`方向-对外一席之地（2026-10-13 用户口径变更）.md` 均非入口文档；双语口径只覆盖 9 份入口：README／SPEC／索引／快速上手／真实项目／语言边界／协作协议／设计决策／PROGRESS。要补再单开一刀）。② **3 处矛盾已清**：`README.md` §5 许可行改「文档 **CC BY 4.0**（2026-10-19 已定，见 `docs\协作协议.md` §7 第 6 项）」；`docs\索引.md` 两处「未定项」→「已定项（六项于 2026-10-19 拍板）／已定项」；SPEC 三处参数上限 2026-10-16 已是活标记，无需再动。`node test\docgate.mjs` = **GREEN**（markers=296、drift=0）。
 > - 🧾 **引擎侧（本块续记）**：所有者指示「候选全丢了」⇒ 待确认候选清空、全部不入档（本次作废 1 条 GitHub 加速候选，原文留底 `C:\Users\20838\Desktop\.dsh-tools\task-engine\memory-candidates.md.bak-20261019-233400-候选清空`）；启动汇总 `[3]` 复跑 = 0。
-> - ⏭ **下一刀（等所有者拍板）**：开源前清单已空 ⇒ 建议 **发布**（Gitee 镜像路线：Gitee 导入/镜像实测 2.2 MB/s；GitHub 直连需 Steam++ 反代，单文件走 ghproxy）。发布 = 公开外发 ＋ 要账号/远端，**拍板后才动**。
+> - 🚀 **2026-10-19 23:46 已发布到 GitHub 公开仓库**：<https://github.com/LinLVEO/FLINT_CHAN> —— public、默认分支 `main`、topics = `flint`/`programming-language`/`compiler`/`windows`/`pe-format`、issues 开、wiki/projects 关；推送 = `git -C E:\FLINT_CHAN push`，**Steam++ 在跑时 GitHub 直连可用**（凭据走 Windows 凭据管理器 `git:https://github.com`，token scopes = gist/repo/workflow）。自证：远端 HEAD `49ca3b6` 与本地一致、API `/repos/LinLVEO/FLINT_CHAN` 返回 public。⚠️ 后续每次同步后要 `push`，推送前确认 Steam++ 在跑。
+> - ⏭ **下一刀（等所有者拍板）**：开源发布已完成 ⇒ ① 首日自查公开页（README 渲染/中英摘要/示例跑通）；② 4 份非入口文档要不要补摘要；③ 老账：4 张任务卡关卡。
+> - ⏭ **历史建议**：~~建议发布（Gitee 镜像路线…）~~ 2026-10-19 23:46 已按所有者「用 Steam++ 走直连」直接推 GitHub，Gitee 镜像未启用。
 > - 🛑 **封盘（2026-10-19 20:4x，所有者「新会话再继续」）**：无运行中子代理、无残留进程、工作区干净；下一会话直接从本块读起，**下一步 = 上面「还剩」四项**（开源前四项已全部收口 ⇒ 剩余见本块末条）。
 >
 > ## 📎 交接要点（最新 · 2026-10-19 00:1x —— **按所有者排序推进四刀并收网**：① master 合并＋FLINT_CHAN 同步 ② 差分门退出码盲区修复（暴露并修掉 6 条 boot 真分岔）＋标量槽探针 ③ `int_64` P1（位运算/移位/`++`/`--` ＋ 复合赋值）④ 取数器排除 `test\tmp`；**主检出 `verify-all` ALL GREEN 14/14**；master 已 ff 到本轮末提交，FLINT_CHAN 已同步）
