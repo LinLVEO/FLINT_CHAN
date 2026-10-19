@@ -23,6 +23,17 @@
 | 许可 | 源码 **MIT**（`LICENSE`）；文档 **CC BY 4.0** |
 | AI 参与 | 代码主要由 AI 编写，所有者定方向与验收（如实披露，见 `docs\协作协议.md` §6） |
 
+## Abstract (English)
+
+FLINT_CHAN, called FLINT for short, is an in-development language centered on Windows
+desktop development, aiming at Zig, C++, and Rust. This page is the project's front
+door: it states what the compiler and its GUI library are today, and it is just as
+explicit about what they are not. It covers the shortest path to a working build, the
+traps we have already hit, a map of the repository, the honest account of current
+abilities and gaps, the participation rules, and the license split between source and
+documentation. Read it first, then follow its links into the other outward documents
+when you need depth.
+
 ---
 
 ## 1. 30 秒跑起来（这三条我实测过，照抄即可）

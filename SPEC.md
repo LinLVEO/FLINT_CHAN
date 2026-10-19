@@ -97,6 +97,16 @@
 > 利好：mc01 已证明纯机器码开窗画字可行；8080 数据接口现成。
 > 参照源码：`E:\HardwareMonitor\`（Program/MonitorForm/HardwareReader/DataApi…）
 
+## Abstract (English)
+
+This file is the language specification of FLINT and the authority for design questions.
+FLINT_CHAN, called FLINT for short, is an in-development language centered on Windows
+desktop development, aiming at Zig, C++, and Rust. The specification states the design
+principles, the language scope the compiler targets, the standard library layout, the
+self-drawn window mode, the compilation modes, the staged plan, and the token design.
+Where documents disagree, these principles are the reference; when you propose a
+language change, cite the principle you are arguing against.
+
 ## 设计原则
 
 1. **语法 = C 子集**：int 类型 + 函数 + 指针 + 控制流。不玩花活，先解决「怎么把代码变成机器码」。
