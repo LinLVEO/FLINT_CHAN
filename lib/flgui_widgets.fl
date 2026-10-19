@@ -38,6 +38,10 @@ int gui_button(struct GuiCtx *c, char *s) {
   int kind = 2;
   int clicked = 0;
   int fo = 0;
+  int ix = 0;
+  int iy = 0;
+  int iw = 0;
+  int ih = 0;
   gui_text_put(c, s);
   gui_item_rect(c, w, c->btn_h);
   fo = gui_focus_reg(c, id);                 // M4o：登记进焦点链（返回 1 = 当前焦点是它）
@@ -46,6 +50,22 @@ int gui_button(struct GuiCtx *c, char *s) {
   if (c->active == id) { kind = 4; }
   if (gui_clip_visible(c)) {
     gui_push(c, kind);
+    // 2026-10-20 修复（按钮标题）：**按钮标题 = 控件自己补发的一条 `kind 5`**。
+    //   为什么必须在这里补：平台层**唯一**的 `TextOutA` 在 `k == 5` 分支（`flgui_win32.fl` 的
+    //   `gui_win_render` 里），`kind 2/3/4` 只画底色 ⇒ 旧写法的按钮标题**永远不上屏**。
+    //   勾选框 / 滑块 / 单选钮 / 菜单项早就各自补了一条 `kind 5`，只有按钮漏了（同一族写法，照抄结构）。
+    //   几何：文字区 = 按钮内左侧 `pad` 起、垂直居中一行；宽度按 `gui_text_w`（布局同一把尺子）。
+    //   顺序：先发底色 → 再发标题 → **还原整个按钮矩形之后**才发焦点圈（`kind 16` 要圈住整个按钮）。
+    //   ⚠️ 不重复 `gui_text_put`：`gui_push` 只消费 `scratch_col`、**不碰** `scratch_off/len`
+    //      （见 `flgui.fl` 的 `gui_push`）⇒ 上面那次 put 落的文本区间原样喂给这条 kind 5，
+    //      arena 里因此**不会多存一份字节**（无头 dump 的 `textn=` 不变）。
+    ix = c->cur_ix; iy = c->cur_iy; iw = c->cur_iw; ih = c->cur_ih;
+    c->cur_ix = ix + c->pad;
+    c->cur_iy = iy + (ih - c->line_h) / 2;
+    c->cur_iw = gui_text_w(s);
+    c->cur_ih = c->line_h;
+    gui_push(c, 5);
+    c->cur_ix = ix; c->cur_iy = iy; c->cur_iw = iw; c->cur_ih = ih;   // 还原"当前项"矩形
     if (fo == 1) { gui_focus_mark(c); }      // M4o：焦点圈标记（渲染端按 `theme_focus` 逐像素画）
   }
   return clicked;

@@ -1,0 +1,657 @@
+// ui_lib.fl — FLINT-UI 库（2026-09-17 由 apps\m2_float\flint_ui.fl **提到 lib\**）
+//   「门面武器不该长在某个 app 里」——提法见 E:\FLINT-lab\概念池.md；原名 flint_ui.fl（v1.0.3 自 m2_float 抽出）
+// 内容：自绘窗口工厂 + 通用 WNDPROC + 无边框拖动 + 数字/文本/矩形原语 + 图层表面（Surf）
+// 用法：应用顶部 `include "ui_lib.fl"`（免相对路径：先找本文件目录，再回退编译器自带 lib\ 与 ..\lib\）
+//   ⚠️ 本文件自己的 api 声明放在本文件顶部（实测可被 include 正常收集）；但 **app 专属**的 api 声明
+//      （如 HwBridge 那批）仍挂在主文件绝对顶部——见 apps\m2_float\main.fl 顶部说明
+// ⚠️ 历史边界（v1.0.6 已拆）：函数曾不能返回指针（返回值 32 位 eax）→ 句柄用 struct 指针字段承接
+//    （v0.9.2 S2：ptr 返回 API 直写字段 64 位）；v1.0.6 起自产函数可 int*/char*/struct* 直返——
+//    本库字段承接写法仍可用（更早兼容），新库可直返
+// v1.0.5 char 应用消化：文本原语升级 = std::itoa/字节拼进 char 缓冲 → 整串一次 TextOutA
+//    （替代旧 ui_ch 逐字画；ui_text 量宽一次 + 画一次 + 推进 x）
+include "num_lib.fl"
+
+// —— api 声明（user32/gdi32/kernel32 窗口基础集，全单元共用）——
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 int FillRect(int, int, int);
+api user32 int FrameRect(int, int, int);   // v1.4.1：1px 描边（图层表面用）
+api user32 int SetLayeredWindowAttributes(int, int, int, int);
+api user32 int GetCursorPos(int);
+api user32 int GetWindowRect(int, int);
+api user32 int MoveWindow(int, int, int, int, int, int);
+api user32 ptr SetCapture(int);
+api user32 int ReleaseCapture();
+api user32 ptr LoadCursorA(int, int);
+api user32 ptr SetCursor(int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int SetBkMode(int, int);
+api gdi32 int SetTextColor(int, int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api gdi32 int GetTextExtentPoint32A(int, int, int, int);   // v1.0.4：精确量宽（排版用）
+// v1.4.0 字形层：真字体（此前全仓只有 stock font）。CreateFontA 是 **14 参**——
+//   正是它逼着 API 实参上限从 12 提到 16（REG 747/747 含 apifont1.fl 逐参读回验证）。
+api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, int);
+api gdi32 ptr SelectObject(int, int);
+
+// —— Win32 / UI 结构体（真实 C 布局）——
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct RECT { int l; int t; int r; int b; }
+struct P { int x; int y; }
+struct C { int ch; }
+struct SZ { int cx; int cy; }   // v1.0.4：GetTextExtentPoint32A 尺寸
+
+// —— v1.0.4.1 精确文本原语（C# 版排版）——
+// 字符宽缓存表（w[128] 首次 GetTextExtentPoint32A 后查表）——v1.0.4 曾因编译器
+// 「ptr 字段 32 位写残留」bug（伪装成大帧崩溃）被迫去掉缓存逐字符量宽致 CPU 翻倍；
+// 编译器修复（决策 33/S2 补漏）后恢复缓存：每帧仅 ~40 次 TextOutA，无量宽调用
+struct Drw { int *dc; int *cw; }
+
+// 画单字符并推进 x（宽来自缓存；cw[ch]==0 表示未量过）
+int ui_ch(struct Drw *d, int *x, int y, int ch) {
+  struct C c;
+  struct SZ sz;
+  int *w;
+  int wc;
+  if (ch < 0 || ch > 127) return 0;
+  w = d->cw;
+  wc = w[ch];
+  if (wc == 0) {
+    c.ch = ch;
+    GetTextExtentPoint32A(d->dc, &c, 1, &sz);
+    wc = sz.cx;
+    if (wc <= 0) wc = 6;
+    w[ch] = wc;
+  }
+  c.ch = ch;
+  TextOutA(d->dc, *x, y, &c, 1);
+  *x = *x + wc;
+  return 0;
+}
+
+// v1.0.5 char 应用消化：整串文本原语（替代逐字 TextOutA 拼段）
+// 文本段 = 缓冲地址 + 字节长（自产函数 ≤4 参限制 → (s,len) 经 struct 指针传）
+struct Seg { int *p; int len; }
+int seg_mk(struct Seg *s, int *p, int len) { s->p = p; s->len = len; return 0; }
+// 画一段文本（量宽一次 + TextOutA 一次）并推进 x；s 可指字符串字面量/char 缓冲/缓冲中段
+int ui_text(struct Drw *d, struct Seg *sg, int *x, int y) {
+  struct SZ sz;
+  if (sg->len <= 0) return 0;
+  GetTextExtentPoint32A(d->dc, sg->p, sg->len, &sz);
+  TextOutA(d->dc, *x, y, sg->p, sg->len);
+  *x = *x + sz.cx;
+  return 0;
+}
+
+// 画无符号整数（std::itoa 进 char 缓冲 → 整串一次画；去前导零；n=0 画 0）并推进 x
+int ui_num(struct Drw *d, int *x, int y, int n) {
+  char b[8];
+  struct SZ sz;
+  int L = std::itoa(n, b);
+  GetTextExtentPoint32A(d->dc, b, L, &sz);
+  TextOutA(d->dc, *x, y, b, L);
+  *x = *x + sz.cx;
+  return 0;
+}
+
+// 居中画一段文本（v1.4.8 / 6d 小窗模式用）：先量宽高再算左上角
+int ui_text_center(int *dc, int cw, int ch, char *s) {
+  struct SZ sz;
+  int n = 0;
+  while (s[n] != 0) n = n + 1;
+  if (n <= 0) return 0;
+  GetTextExtentPoint32A(dc, s, n, &sz);
+  TextOutA(dc, (cw - sz.cx) / 2, (ch - sz.cy) / 2, s, n);
+  return 0;
+}
+
+// 居中画「无符号整数 + %」（小窗中央的 CPU 占用）
+int ui_num_center(int *dc, int cw, int ch, int n) {
+  char b[8];
+  int L = std::itoa(n, b);
+  b[L] = '%';
+  L = L + 1;
+  b[L] = 0;
+  return ui_text_center(dc, cw, ch, b);
+}
+
+// 通用自绘回调：吞 WM_PAINT（ValidateRect 清更新区防合成消息洪泛），
+// WM_SETCURSOR 自己设箭头（不等 DefWindowProc 兜圈，消掉「鼠标刚进窗口闪一下」），其余交 DefWindowProc
+int ui_wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  if (msg == 0x20) { SetCursor(LoadCursorA(0, 32512)); return 1; }   // WM_SETCURSOR → IDC_ARROW
+  // v1.4.8（第 6 步 6d）：WM_GETMINMAXINFO —— 不放开的话 Windows 按 SM_CXMIN/SM_CYMIN（≈136×39）
+  //   钳制最小尺寸，小窗模式的 34×34 会被顶回大尺寸。
+  //   MINMAXINFO 布局：ptMinTrackSize 在字节偏移 24 → int 下标 6(x)/7(y)。
+  if (msg == 0x24) {
+    lp[6] = 34;
+    lp[7] = 34;
+    return 0;
+  }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// 动态数字：最多 4 位逐位 TextOutA（char 替代 = 单 int 槽写 '0'+digit，&c 即 "d\0"）
+int ui_putnum(int *dc, int x, int y, int n) {
+  struct C c;
+  int k = n / 1000;
+  int h = (n / 100) % 10;
+  int t = (n / 10) % 10;
+  int o = n % 10;
+  int px = x;
+  if (k != 0) { c.ch = '0' + k; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  if (k != 0 || h != 0) { c.ch = '0' + h; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  if (k != 0 || h != 0 || t != 0) { c.ch = '0' + t; TextOutA(dc, px, y, &c, 1); px = px + 8; }
+  c.ch = '0' + o; TextOutA(dc, px, y, &c, 1);
+  return 0;
+}
+
+// 单字符输出（单位后缀 % / C / W 等）
+int ui_putch(int *dc, int x, int y, int ch) {
+  struct C c;
+  c.ch = ch;
+  TextOutA(dc, x, y, &c, 1);
+  return 0;
+}
+
+// 矩形填充（brush = GetStockObject 索引：4 = BLACK_BRUSH 等）
+int ui_fill(int *dc, struct RECT *r, int brush) {
+  return FillRect(dc, r, GetStockObject(brush));
+}
+
+// 无边框浮窗工厂参数（cls = 类名字符串地址；h 承接窗口句柄）
+struct WndSt { int *cls; int w; int ht; int alpha; int *h; }
+
+// 建窗：注册类（fn=ui_wndproc）→ CreateWindowExA（TOPMOST|LAYERED，无边框）→
+// 半透明 alpha → 显示。成功返回 1 且 w->h = 句柄；失败返回 0。
+// ⚠️ 类名每进程只注册一次（第二次 RegisterClassA 会失败）。
+// v1.0.9 修「鼠标移入就转圈」：类光标必须给（hCursor=NULL 时系统一直沿用启动期的忙光标
+//   IDC_WAIT → 鼠标一进本窗口就转圈）。IDC_ARROW = 32512（MAKEINTRESOURCE）。
+int ui_make(struct WndSt *w) {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &ui_wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = LoadCursorA(0, 32512); wc.brush = 0; wc.menu = 0;
+  wc.cls = w->cls;
+  if (RegisterClassA(&wc) == 0) return 0;
+  w->h = CreateWindowExA(0x00080008, w->cls, "", 0x80000000, 300, 180, w->w, w->ht, 0, 0, 0, 0);
+  if (w->h == 0) return 0;
+  SetLayeredWindowAttributes(w->h, 0, w->alpha, 2);
+  ShowWindow(w->h, 1);
+  SetCursor(LoadCursorA(0, 32512));   // 主动清掉 shell 启动期挂的忙光标（IDC_WAIT）
+  return 1;
+}
+
+// —— v1.4.1 图层表面：32bpp DIB + UpdateLayeredWindow（逐像素 alpha）——
+// 为什么不用 GDI+：用户口径「细节 = 用户层的」→ 只要**看起来一致**（圆角 6 / 暗底 / 1px 淡蓝描边 / 整体 60%），
+//   而逐像素 alpha 纯 GDI 也能做到：**RGB 交给 GDI 画，alpha 通道由我们按圆角掩码写**，再交给 ULW 合成。
+// 与 C# 对齐的口径（规格圣经 §2）：填充 ARGB(200,16,16,18) ｜ 描边 ARGB(70,130,200,255) 1px
+//   ｜ 常量 alpha = Opacity 60% → 153/255（WinForms 的 Opacity 正是走 ULW：最终 alpha = 逐像素 × 常量）。
+// ⚠️ 用 ULW 的窗口**不能**再调 SetLayeredWindowAttributes（两者混用结果未定义）→ 见 ui_make_top。
+api user32 int UpdateLayeredWindow(int, int, int, int, int, int, int, int, int);
+api gdi32 ptr CreateCompatibleDC(int);
+api gdi32 ptr CreateDIBSection(int, int, int, int, int, int);
+api gdi32 ptr CreateSolidBrush(int);
+
+struct BMIH { int size; int w; int h; char p1; char p2; char bc1; char bc2;
+              int comp; int szimg; int xppm; int yppm; int clrused; int clrimp; }
+struct PT { int x; int y; }
+struct SZS { int cx; int cy; }
+struct BF { char op; char flags; char alpha; char fmt; }   // BLENDFUNCTION（4 字节）
+
+// 图层表面：h=窗口 ｜ dc=内存 DC（**所有绘制都画到这里**）｜ bits=DIB 像素（BGRA）｜
+//   **bw/bh = DIB 位图尺寸（一次分配到位，之后不再重建）** ｜ **cw/ch = 当前窗口/面板尺寸（≤ bw/bh）**
+//   ｜ r=圆角半径 ｜ fill_a/ring_a=面板/描边逐像素 alpha ｜ const_a=整窗常量 alpha(0..255)
+// 为什么固定大 DIB：尺寸会随读数变化（FPS 位数一变窗口就变），每次重建 DIB/DC 会攒 GDI 对象；
+//   固定分配 + 每次只推 cw×ch 区域（ULW 的 psize）既无泄漏也不用管回收。
+struct Surf { int *h; int *dc; int *dib; int *bits; int bw; int bh; int cw; int ch;
+              int r; int fill_a; int ring_a; int const_a;
+              int *br_fill; int *br_ring;
+              int *ft0; int *ft1; int *ft2; }  // M4q：**三档字体句柄**（档 0 标题 / 1 正文 / 2 说明）
+//   ^ 为什么挂在 Surf 上（而不是改 `gui_win_render` 的参数表）：**老 app 一个字都不用改**
+//     （`gui_win_surf` 已经把它们清 0；0 = "这档没建字体" ⇒ 渲染端回落到 `gui_win_render` 收的那个 `hf`）。
+//     渲染端**只在命令流里出现 `kind 22/23` 时才读这三个字段**（老 app 一条都不发 ⇒ 连读都不读）。
+//   ⚠️ 局部 struct 字段**不会被清零**（见 flgui_win32.fl 的 `GuiWin.kbd` 注记）⇒ `surf_init` 必须显式清 0
+//     （本文件 line 243 那两条画笔注释就是同一个坑）。
+
+// 建表面（按 bw×bh 分配 DIB）。成功 1 / 失败 0。
+int surf_init(struct Surf *s) {
+  struct BMIH bmi;
+  int *screen = GetDC(0);
+  int *b = 0;
+  if (screen == 0) return 0;
+  s->dc = CreateCompatibleDC(screen);
+  ReleaseDC(0, screen);
+  if (s->dc == 0) return 0;
+  bmi.size = 40; bmi.w = s->bw; bmi.h = 0 - s->bh;   // h 取负 = 顶朝下（内存第 0 行 = 屏幕最上一行）
+  bmi.p1 = 1; bmi.p2 = 0;                            // biPlanes = 1
+  bmi.bc1 = 32; bmi.bc2 = 0;                         // biBitCount = 32（BGRA）
+  bmi.comp = 0; bmi.szimg = 0; bmi.xppm = 0; bmi.yppm = 0; bmi.clrused = 0; bmi.clrimp = 0;
+  s->dib = CreateDIBSection(s->dc, &bmi, 0, &b, 0, 0);
+  if (s->dib == 0) return 0;
+  s->bits = b;
+  if (s->bits == 0) return 0;
+  SelectObject(s->dc, s->dib);
+  s->br_fill = 0;                                    // 画笔延迟到 surf_paint 首次用时建（并长期复用）
+  s->br_ring = 0;
+  s->ft0 = 0; s->ft1 = 0; s->ft2 = 0;                // M4q：三档字体句柄（**必须显式清** —— 局部 struct 不清零）
+  return 1;
+}
+
+// 圆角矩形内判定（矩形 (1,1)-(cw-2,ch-2)，四角半径 r；圆心在 (1+r,1+r) 等四处）
+int surf_inside(struct Surf *s, int x, int y) {
+  int dx; int dy; int r; int rr;
+  if (x < 1 || y < 1 || x > s->cw - 2 || y > s->ch - 2) return 0;
+  r = s->r;
+  rr = r * r;
+  if (x < 1 + r && y < 1 + r) { dx = 1 + r - x; dy = 1 + r - y; if (dx * dx + dy * dy > rr) return 0; }
+  if (x > s->cw - 2 - r && y < 1 + r) { dx = x - (s->cw - 2 - r); dy = 1 + r - y; if (dx * dx + dy * dy > rr) return 0; }
+  if (x < 1 + r && y > s->ch - 2 - r) { dx = 1 + r - x; dy = y - (s->ch - 2 - r); if (dx * dx + dy * dy > rr) return 0; }
+  if (x > s->cw - 2 - r && y > s->ch - 2 - r) { dx = x - (s->cw - 2 - r); dy = y - (s->ch - 2 - r); if (dx * dx + dy * dy > rr) return 0; }
+  return 1;
+}
+
+// 写 alpha 掩码（只覆盖当前 cw×ch）：圆角外 0 ｜ 1px 描边圈 ring_a ｜ 内部 fill_a（RGB 已由 GDI 画好）
+// ⚠️ 2026-09-16 实测修正（**ULW 源位图必须预乘**）：UpdateLayeredWindow 在 `AC_SRC_ALPHA` 下按
+//   「源已预乘」解释数据 —— 即 out = src*const + dst*(1 - srcA*const)。我们原来只写 alpha、RGB 不预乘，
+//   于是**源色按整份 const 加上去**：描边实测黑底 (78,120,153)（= (130,200,255)×0.6）而正确值应是
+//   (21,33,42)（= (130,200,255)×0.275×0.6）⇒ 描边比 C# 参考版亮 3 倍多（红底标定：我们 α_eff=0.165
+//   与参考 0.18 **本来就一致**，错的只是源项）。修法 = 写完 alpha 后把 RGB 按 a/255 预乘。
+//   判据（三底法，与背景无关）：A = 1-(out_white-out_black)/255；参考版描边灰底实测 ≈ (127,36,45) over red。
+// ⚡ 2026-10-10（M4r 性能刀）**逐字节同输出的快路径**。旧实现对每个像素：调一次 `surf_inside`
+//   （内含最多 4 次「平方和 > r²」）＋ 3 次「乘 a 再整除 255」。1024×736（75.4 万像素）实测该函数
+//   **≈40ms/帧**（占面板整帧 57ms 的 70%，用户报"滑动很卡"）。改两条，**数学上与旧实现等值**：
+//   ① **行扫描跨距**：圆角只影响最上/最下各 r 行的左右两端 ⇒ 每行先算"内部跨距 [xa,xb]"，
+//      角上那几行用**与 `surf_inside` 同一套圆心/半径判据**从左往右、从右往左各收一次
+//      （`dx²+dy² > r²` 在行内对 x 单调 ⇒ 左判据的通过集是后缀、右判据是前缀 ⇒ 交集就是跨距）；
+//   ② **整除换等值移位**：`v*a/255` ⇒ `(t+1+(t>>8))>>8`（t=v*a ∈ [0,65025]，v,a ≤ 255）。
+//      该恒等式已**穷举验证 t ∈ [0,65025] 零反例**；省掉每像素 3 次整数除法（实测那部分是 22.6ms/帧）。
+//   判据：`tmp\m4r\alpha-ab.fl` —— 同一份确定性像素图案，**旧实现副本 vs 本实现逐字节比对 = 0 差异**
+//   （多种 尺寸/圆角/alpha 组合），再加真窗像素门（`test\flgui-verify.ps1` 的 199 项）。
+//   ⚠️ 动这个函数的纪律：它是**所有 FLGUI app 的共享上屏路径**，改完必须跑全批门。
+int surf_alpha(struct Surf *s) {
+  char *px = s->bits;
+  int cw = s->cw; int ch = s->ch; int bw = s->bw;
+  int r = s->r; int rr = r * r;
+  int fa = s->fill_a; int ra = s->ring_a;
+  int y = 0; int x = 0; int i = 0; int a = 0;
+  int xa = 0; int xb = 0; int t = 0; int dx = 0; int dy = 0;
+  int yr = 0;
+  while (y < ch) {
+    // ---- 本行的内部跨距 [xa,xb]（含两端；xa > xb ⇒ 本行一个"内部"像素都没有）----
+    xa = 1; xb = cw - 2;
+    if (y < 1) { xa = 1; xb = 0; }
+    if (y > ch - 2) { xa = 1; xb = 0; }
+    if (xa <= xb) {
+      if (r > 0) {
+        if (y < 1 + r) {
+          dy = 1 + r - y;
+          x = 1;
+          while (x < 1 + r) {
+            if (x > cw - 2) { break; }
+            dx = 1 + r - x;
+            if (dx * dx + dy * dy <= rr) { break; }
+            x = x + 1;
+          }
+          if (x > xa) { xa = x; }
+          x = cw - 2;
+          while (x > cw - 2 - r) {
+            if (x < 1) { break; }
+            dx = x - (cw - 2 - r);
+            if (dx * dx + dy * dy <= rr) { break; }
+            x = x - 1;
+          }
+          if (x < xb) { xb = x; }
+        }
+        if (y > ch - 2 - r) {
+          dy = y - (ch - 2 - r);
+          x = 1;
+          while (x < 1 + r) {
+            if (x > cw - 2) { break; }
+            dx = 1 + r - x;
+            if (dx * dx + dy * dy <= rr) { break; }
+            x = x + 1;
+          }
+          if (x > xa) { xa = x; }
+          x = cw - 2;
+          while (x > cw - 2 - r) {
+            if (x < 1) { break; }
+            dx = x - (cw - 2 - r);
+            if (dx * dx + dy * dy <= rr) { break; }
+            x = x - 1;
+          }
+          if (x < xb) { xb = x; }
+        }
+      }
+    }
+    // ---- 按跨距写这一行：左边距全 0 ｜ 内部按 ring/fill 预乘 ｜ 右边距全 0 ----
+    i = y * bw * 4;
+    yr = 0;
+    if (y == 1) { yr = 1; }
+    if (y == ch - 2) { yr = 1; }
+    x = 0;
+    while (x < xa) {                       // 左侧圆角外
+      px[i] = 0; px[i + 1] = 0; px[i + 2] = 0; px[i + 3] = 0;
+      i = i + 4; x = x + 1;
+    }
+    while (x <= xb) {                      // 内部（含 1px 描边圈那两个点）
+      a = fa;
+      if (yr == 1) { a = ra; } else { if (x == 1) { a = ra; } if (x == cw - 2) { a = ra; } }
+      if (a < 255) {
+        // 预乘：RGB × a/255（与旧实现同值：`% 256` 当无符号字节读；整除换成等值移位）
+        t = (px[i] & 255) * a;         px[i]     = (t + 1 + (t >> 8)) >> 8;   // B
+        t = (px[i + 1] & 255) * a;     px[i + 1] = (t + 1 + (t >> 8)) >> 8;   // G
+        t = (px[i + 2] & 255) * a;     px[i + 2] = (t + 1 + (t >> 8)) >> 8;   // R
+      }
+      px[i + 3] = a;                       // A
+      i = i + 4; x = x + 1;
+    }
+    while (x < cw) {                       // 右侧圆角外
+      px[i] = 0; px[i + 1] = 0; px[i + 2] = 0; px[i + 3] = 0;
+      i = i + 4; x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 画面板底：整块填充 fill + 1px 描边 ring（都是 COLORREF 0x00BBGGRR）
+// ⚠️⚠️ 2026-09-16 实测教训（**真事故，别再犯**）：原实现每帧 `CreateSolidBrush` 两次却从不 `DeleteObject`
+//   → 实测 **GDI 对象每秒涨 65 个**（判据：`GetGuiResources(hProcess, 0)` 采样），到 10000 配额被系统杀掉
+//   （事件日志 `Windows Error Reporting / GDIObjectLeak`），**窗口活不过约 2 分钟**：
+//   现象是"跑着跑着就没了/数据不刷新"，很容易误判成数据源或刷新逻辑的问题。
+//   → 现在画笔**建一次、缓存复用**（面板/描边两色恒定；颜色若真要变，得先 DeleteObject 再重建）。
+int surf_paint(struct Surf *s, int fill, int ring) {
+  struct RECT full;
+  struct RECT fr;
+  if (s->br_fill == 0) s->br_fill = CreateSolidBrush(fill);
+  if (s->br_ring == 0) s->br_ring = CreateSolidBrush(ring);
+  full.l = 0; full.t = 0; full.r = s->cw; full.b = s->ch;
+  FillRect(s->dc, &full, s->br_fill);
+  fr.l = 1; fr.t = 1; fr.r = s->cw - 1; fr.b = s->ch - 1;
+  FrameRect(s->dc, &fr, s->br_ring);
+  return 0;
+}
+
+// 推上屏：ULW 用**当前窗口位置**（GetWindowRect 取，不移动窗口）+ 当前 cw×ch；返回 ULW 的成败
+int surf_flush(struct Surf *s) {
+  struct RECT wr;
+  struct PT dst;
+  struct SZS sz;
+  struct PT src;
+  struct BF bf;
+  int ok;
+  int *screen = GetDC(0);
+  if (screen == 0) return 0;
+  GetWindowRect(s->h, &wr);
+  dst.x = wr.l; dst.y = wr.t;
+  sz.cx = s->cw; sz.cy = s->ch;
+  src.x = 0; src.y = 0;
+  bf.op = 0; bf.flags = 0; bf.alpha = s->const_a; bf.fmt = 1;   // AC_SRC_OVER + 常量 alpha + AC_SRC_ALPHA
+  ok = UpdateLayeredWindow(s->h, screen, &dst, &sz, s->dc, &src, 0, &bf, 2);   // ULW_ALPHA = 2
+  ReleaseDC(0, screen);
+  return ok;
+}
+
+// 建窗（**图层版**）：TOPMOST|LAYERED，无边框；⚠️ 不调 SetLayeredWindowAttributes（与 ULW 互斥）
+int ui_make_top(struct WndSt *w) {
+  struct WNDCLASS wc;
+  wc.style = 8;   // CS_DBLCLKS（6c：双击 = 锁定/解锁，收不到 WM_LBUTTONDBLCLK 就是这里没开）
+  wc.fn = &ui_wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = LoadCursorA(0, 32512); wc.brush = 0; wc.menu = 0;
+  wc.cls = w->cls;
+  if (RegisterClassA(&wc) == 0) return 0;
+  // ⚠️ 2026-09-16：exstyle 加 WS_EX_NOACTIVATE(0x08000000) —— 与 C# 参考版对齐
+  //   （实测参考窗 exstyle=0x08090008 含该位、我们是 0x00080008 ⇒ 点浮窗会抢焦点；本函数是浮窗在用的那个）
+  w->h = CreateWindowExA(0x08080008, w->cls, "", 0x80000000, 300, 180, w->w, w->ht, 0, 0, 0, 0);
+  if (w->h == 0) return 0;
+  ShowWindow(w->h, 1);
+  SetCursor(LoadCursorA(0, 32512));
+  return 1;
+}
+
+// —— v1.4.0 字形层：Consolas 16px（对齐 C# 侧 `new Font("Consolas", 16, GraphicsUnit.Pixel)`）——
+// 参数对齐 C#：px = 像素高度（C# FontSize=16）；weight 400 = Normal；
+//   charset 1 = DEFAULT_CHARSET；quality 5 = CLEARTYPE_QUALITY
+//   （C# 侧 Graphics.TextRenderingHint = ClearTypeGridFit，见规格圣经 §2）。
+// 建字失败返回 0：调用方判空后按 stock font 继续画（字体层坏掉不该让浮窗变黑屏）。
+int *ui_font_make(int px) {
+  return CreateFontA(px, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Consolas");
+}
+
+// —— 真实平均字宽（2026-09-23 M4c 收尾：位置类计算要和"画字"用同一把尺子）——
+// 背景：FGUI 可编辑文本域的光标条原按 **8px/字节估算**定位，而字是 GDI 按真实字形宽度画的
+//   （Consolas 14px 实测 **7px/字符**，见 tmp\m4c\font-advance.ps1）⇒ **每打一个字光标多偏 1px、
+//   逐字累加**（用户描述"打几个字后光标会往后移好几个位置，就是不准"）。
+// 为什么量宽放在 ui_lib：`GetTextExtentPoint32A` / `GetDC` / `ReleaseDC` / `SelectObject` 都在这层声明，
+//   且**借用屏幕 DC 选中字体测量、量完 ReleaseDC** ⇒ 不新建 DC（**零新增导入、零 GDI 泄漏**）。
+// 口径：本函数只负责"量"，不持有状态 —— 结果由调用方（平台层 `gui_win_font_init`）写进
+//   内核层的 `gui_char_adv`（见 flgui.fl），这样**控件层与样本（只 include 控件层）都看得见**。
+// ⚠️ 是**平均**字宽（"MMMMMMMMMM" 总宽 / 10）：等宽字体（Consolas）下即精确值；换比例字体时
+//   "光标 / 裁切 / 换行"要改成逐字符宽度表。⚠️ 中文（GBK 双字节）不适用本模型（本 app 目前只进 ASCII）。
+// 返回：>0 真实字宽；0 = 量不到（调用方保留兜底值，行为与从前一致）
+int ui_font_adv(int *hf) {
+  struct SZ sz;
+  int *dc = 0;
+  int a = 0;
+  if (hf == 0) { return 0; }
+  dc = GetDC(0);
+  if (dc == 0) { return 0; }
+  SelectObject(dc, hf);
+  GetTextExtentPoint32A(dc, "MMMMMMMMMM", 10, &sz);
+  ReleaseDC(0, dc);
+  a = sz.cx / 10;
+  if (a < 1) { return 0; }
+  return a;
+}
+
+// 把字选进 DC。⚠️ 字体是**DC 的状态**（不是进程级）：每帧 GetDC 之后都要选一次，
+//   不选就还是 DC 默认的 stock 字体（这正是本层之前"字看着不像 C#"的根因）。
+// 返回被换下的旧对象（stock 字体由系统持有，不需要 DeleteObject）。
+int *ui_font_use(int *dc, int *hf) {
+  if (hf == 0) return 0;
+  return SelectObject(dc, hf);
+}
+
+// —— 无边框拖动（主循环手动，别用 WM_NCHITTEST 假标题栏——会吞右键/客户区消息）——
+// v1.0.9 修「粘手」bug：快拖时光标会冲到窗口外面，松手的 WM_LBUTTONUP 落到别的窗口 →
+//   标志清不掉 → 窗口一直跟着光标。双保险：① SetCapture 抓鼠标（消息必达本窗口）
+//   ② 每帧查物理左键状态兜底（消息真丢了也自愈）。⚠️ `&` 优先级低于 `==`，必须加括号。
+struct DragSt { int *h; int on; int sx; int sy; int wx; int wy; int w; int ht; }
+
+// 左键按下：抓鼠标 + 记光标 + 窗口原点
+int ui_drag_begin(struct DragSt *d) {
+  struct P pt;
+  struct RECT wr;
+  d->on = 1;
+  SetCapture(d->h);
+  GetCursorPos(&pt); d->sx = pt.x; d->sy = pt.y;
+  GetWindowRect(d->h, &wr); d->wx = wr.l; d->wy = wr.t;
+  return 0;
+}
+
+// 每帧调用：拖动中按位移 MoveWindow（bRepaint=0，内容由本帧自绘接管）
+int ui_drag_frame(struct DragSt *d) {
+  struct P pt;
+  if (!d->on) return 0;
+  GetCursorPos(&pt);
+  MoveWindow(d->h, d->wx + pt.x - d->sx, d->wy + pt.y - d->sy, d->w, d->ht, 0);
+  return 0;
+}
+
+// 左键抬起：放掉鼠标捕获
+int ui_drag_end(struct DragSt *d) {
+  d->on = 0;
+  ReleaseCapture();
+  return 0;
+}
+
+// =====================================================================================
+// 即时模式组件层（2026-09-17 新增 · 步 3：按钮 / 勾选 / 滚动条 / 裁剪）
+// 口径跟既有层一致：**无全局变量** → 状态由**调用方**持有；组件每帧「直画直返」（immediate mode）。
+// 输入：调用方每帧填一个 struct UiIn（客户区坐标 + 左键状态；clicked = 本帧"在客户区内按下并抬起"）。
+// 配色：GDI 的 COLORREF 是 **0x00BBGGRR**（跟 RGB(r,g,b) 反着写，别搞错顺序）。
+// ⚠️ 颜色填充**不用** CreateSolidBrush —— 本文件 295 行记着那条真事故（每帧 Create 不 Delete 会漏 GDI 对象）。
+//    改走 **SetDCBrushColor + DC_BRUSH 库存对象（GetStockObject(18)）**：零对象创建、零泄漏。
+//    （FillRect/FrameRect 都吃「画刷」，所以描边也走同一招，不需要 DC_PEN。）
+// =====================================================================================
+api gdi32 int SetDCBrushColor(int, int);
+api gdi32 int SaveDC(int);
+api gdi32 int RestoreDC(int, int);
+api gdi32 int IntersectClipRect(int, int, int, int, int);
+
+// 输入状态（调用方每帧填）
+struct UiIn { int mx; int my; int down; int clicked; }
+// 通用盒：位置 + 标签 + 输出状态 + 滚动参数（字段只用 char/int/double/int*，见语言边界）
+struct UiBox { int l; int t; int r; int b; int *label; int len; int state; int total; int vis; }
+
+// 命中测试：光标是否在盒内（右下开区间，与 Windows 习惯一致）
+int ui_hit(struct UiIn *in, struct UiBox *x) {
+  if (in->mx < x->l) return 0;
+  if (in->mx >= x->r) return 0;
+  if (in->my < x->t) return 0;
+  if (in->my >= x->b) return 0;
+  return 1;
+}
+
+// 任意 RGB 填矩形（DC_BRUSH 路线；rgb 按 COLORREF 口径 0x00BBGGRR 传）
+int ui_fill_rgb(int *dc, struct RECT *rc, int rgb) {
+  SetDCBrushColor(dc, rgb);
+  FillRect(dc, rc, GetStockObject(18));
+  return 0;
+}
+
+// 任意 RGB 画 1px 矩形描边（FrameRect 吃的也是画刷）
+int ui_frame_rgb(int *dc, struct RECT *rc, int rgb) {
+  SetDCBrushColor(dc, rgb);
+  FrameRect(dc, rc, GetStockObject(18));
+  return 0;
+}
+
+// 按钮：底 + 描边 + 居中标签。返回 1 = 本帧被点击；x->state 回填 0=常态 1=悬停 2=按下
+int ui_button(struct Drw *d, struct UiIn *in, struct UiBox *x) {
+  struct RECT rc;
+  struct SZ sz;
+  int hov = ui_hit(in, x);
+  int win = 0;
+  int bg = 0x00121010;                                  // RGB(16,16,18) 面板底
+  int tx = 0;
+  int ty = 0;
+  x->state = 0;
+  if (hov == 1) { x->state = 1; if (in->down == 1) { x->state = 2; } }
+  if (hov == 1 && in->clicked == 1) { win = 1; }
+  if (x->state == 1) { bg = 0x00201F1E; }                // RGB(30,31,32) 悬停
+  if (x->state == 2) { bg = 0x004A3A20; }                // RGB(32,58,74) 按下
+  rc.l = x->l; rc.t = x->t; rc.r = x->r; rc.b = x->b;
+  ui_fill_rgb(d->dc, &rc, bg);
+  ui_frame_rgb(d->dc, &rc, 0x00FFC882);                  // RGB(130,200,255) 淡蓝描边
+  if (x->len > 0) {
+    GetTextExtentPoint32A(d->dc, x->label, x->len, &sz);
+    tx = x->l + ((x->r - x->l) - sz.cx) / 2;
+    ty = x->t + ((x->b - x->t) - sz.cy) / 2;
+    TextOutA(d->dc, tx, ty, x->label, x->len);
+  }
+  return win;
+}
+
+// 勾选框：小方框（勾选时内填强调色）+ 右侧标签。返回**新的勾选态**（点击切换）
+int ui_check(struct Drw *d, struct UiIn *in, struct UiBox *x, int on) {
+  struct RECT rc;
+  struct RECT ic;
+  struct SZ sz;
+  int hov = ui_hit(in, x);
+  int side = x->b - x->t;
+  int m = side / 4;
+  rc.l = x->l; rc.t = x->t; rc.r = x->l + side; rc.b = x->b;
+  ui_fill_rgb(d->dc, &rc, 0x00121010);
+  ui_frame_rgb(d->dc, &rc, 0x00808080);                  // RGB(128,128,128) 灰框
+  if (on == 1) {
+    ic.l = x->l + m; ic.t = x->t + m; ic.r = x->l + side - m; ic.b = x->b - m;
+    ui_fill_rgb(d->dc, &ic, 0x00FFC882);
+  }
+  if (x->len > 0) {
+    GetTextExtentPoint32A(d->dc, x->label, x->len, &sz);
+    TextOutA(d->dc, x->l + side + 6, x->t + (side - sz.cy) / 2, x->label, x->len);
+  }
+  if (hov == 1 && in->clicked == 1) {
+    if (on == 1) { return 0; }
+    return 1;
+  }
+  return on;
+}
+
+// 竖向滚动条：轨 + 滑块（比例用 x->total / x->vis）。返回**新的起始位置 pos**。
+// 拖拽状态寄存在 x->state：0 = 没抓住；非 0 = 抓住滑块时的抓点偏移 **+1**（+1 是为了让 0 恒表示"没抓"）
+// 交互：拖滑块 / 点轨道空白处翻一页
+int ui_scroll(struct Drw *d, struct UiIn *in, struct UiBox *x, int pos) {
+  struct RECT rc;
+  struct RECT th;
+  int h = x->b - x->t;
+  int range = x->total - x->vis;
+  int thumb_h = 8;
+  int ty = 0;
+  int np = pos;
+  int grab = 0;
+  int want = 0;
+  if (range < 0) { range = 0; }
+  if (x->total > 0) {
+    if (x->vis > 0) { thumb_h = (h * x->vis) / x->total; }
+  }
+  if (thumb_h < 8) { thumb_h = 8; }
+  if (thumb_h > h) { thumb_h = h; }
+  if (range > 0) { ty = x->t + ((h - thumb_h) * pos) / range; }
+  else { ty = x->t; }
+  rc.l = x->l; rc.t = x->t; rc.r = x->r; rc.b = x->b;
+  ui_fill_rgb(d->dc, &rc, 0x00101010);
+  th.l = x->l; th.t = ty; th.r = x->r; th.b = ty + thumb_h;
+  ui_fill_rgb(d->dc, &th, 0x00606060);
+  if (in->down == 1) {
+    if (x->state == 0) {
+      if (in->mx >= x->l && in->mx < x->r && in->my >= ty && in->my < ty + thumb_h) {
+        x->state = in->my - ty + 1;
+      }
+    }
+    if (x->state != 0) {
+      grab = x->state - 1;
+      want = in->my - grab - x->t;
+      if (range > 0 && h - thumb_h > 0) { np = (want * range) / (h - thumb_h); }
+      if (np < 0) { np = 0; }
+      if (np > range) { np = range; }
+    }
+  } else {
+    if (x->state != 0) { x->state = 0; }
+    if (in->clicked == 1) {
+      if (in->mx >= x->l && in->mx < x->r && in->my >= x->t && in->my < x->b) {
+        np = np + x->vis;
+        if (np > range) { np = range; }
+      }
+    }
+  }
+  return np;
+}
+
+// 裁剪：把后续绘制限制在盒内（滚动列表用）。SaveDC/RestoreDC 配对，别只 push 不 pop。
+// 返回值 = IntersectClipRect 的区域类型（1=NULLREGION 空 / 2=SIMPLEREGION / 3=COMPLEXREGION / 0=ERROR）——
+//   调用方可以据此判断"这个盒在不在可视区里"（1 = 完全被裁掉，整块可以跳过不画）。
+int ui_clip_push(int *dc, struct UiBox *x) {
+  SaveDC(dc);
+  return IntersectClipRect(dc, x->l, x->t, x->r, x->b);
+}
+
+int ui_clip_pop(int *dc) {
+  RestoreDC(dc, 0 - 1);
+  return 0;
+}

@@ -16,7 +16,7 @@
 | 编译器版本 | v<!--fact:version-->1.7.0<!--/fact--> |
 | 产物 | 纯自产机器码 PE，无 CRT ／ 无运行时依赖；`hello` = <!--fact:product-hello-->3072<!--/fact--> B |
 | 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己，产物与真 flint 逐字节一致） |
-| 门（可自己跑） | 总门 <!--fact:gate-steps-->14<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->44<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->199/199<!--/fact--> |
+| 门（可自己跑） | 总门 <!--fact:gate-steps-->14<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->44<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->210/210<!--/fact--> |
 | 平台 | Windows 10 x64（明确放弃 Win7）；单目标、单平台 |
 | 参与方式 | **暂时只收工单（issue），不接受外部 PR** —— 语言大到能给别人开口子之前，方向不摊开 |
 | 许可 | 源码 **MIT**（`LICENSE`）；文档 **CC BY 4.0** |

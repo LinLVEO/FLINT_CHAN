@@ -1,75 +1,75 @@
-﻿align_probe	OK	exit=
-align2_probe	OK	exit=
-api1	HANG	boot产物+flint产物 超过 5s
-api2	OK	exit=
-api3	OK	exit=
+﻿align_probe	OK	exit=0
+align2_probe	OK	exit=0
+api1	HANG	boot产物+flint产物 超过 15s
+api2	OK	exit=1
+api3	OK	exit=0
 apiarg16	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.exe' parse err=-176 token=37 pos=658 text='as' line 7: api msvcrt int pf16(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int) as "printf"; compile FAIL err=2
-apifont1	OK	exit=
+apifont1	OK	exit=127
 apimod1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\apimod1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\apimod1.exe' parse err=-176 token=13 pos=841 text='as' line 10: api "msvcrt.dll" int prf(int, int, int, int) as "printf"; compile FAIL err=2
-apimod2	OK	exit=
-arith1	OK	exit=
-arith2	OK	exit=
-arith3	OK	exit=
-arith4	OK	exit=
-arr1	OK	exit=
-arr2	OK	exit=
-arr3	OK	exit=
-arr4	OK	exit=
-audit1	OK	exit=
+apimod2	OK	exit=42
+arith1	OK	exit=7
+arith2	OK	exit=9
+arith3	OK	exit=-3
+arith4	OK	exit=-1
+arr1	OK	exit=30
+arr2	OK	exit=10
+arr3	OK	exit=21
+arr4	OK	exit=30
+audit1	OK	exit=0
 audit2	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\audit2.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\audit2.exe' parse err=-45 token=261 pos=1505 text='=' line 42: int t = (m = 300); compile FAIL err=2
-audit3	OK	exit=
-audit4	OK	exit=
-audit5	OK	exit=
-audit7	OK	exit=
-audit8	OK	exit=
-audit9	OK	exit=
-bigarr1	OK	exit=
-bit1	OK	exit=
-bit10	OK	exit=
-bit11	OK	exit=
+audit3	OK	exit=0
+audit4	OK	exit=0
+audit5	OK	exit=0
+audit7	OK	exit=0
+audit8	OK	exit=0
+audit9	OK	exit=0
+bigarr1	OK	exit=42
+bit1	OK	exit=12
+bit10	OK	exit=30
+bit11	OK	exit=6
 bit12	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\bit12.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\bit12.exe' parse err=-41 token=11 pos=105 text='&' line 4: int &r = x; compile FAIL err=2
-bit13	OK	exit=
-bit14	OK	exit=
-bit15	OK	exit=
-bit16	OK	exit=
-bit2	OK	exit=
-bit3	OK	exit=
-bit4	OK	exit=
-bit5	OK	exit=
-bit6	OK	exit=
-bit7	OK	exit=
-bit8	OK	exit=
-bit9	OK	exit=
-bitop_probe	OK	exit=
-char_itotest	OK	exit=
-char1	OK	exit=
-char10	OK	exit=
-char2	OK	exit=
-char3	OK	exit=
-char4	OK	exit=
-char5	OK	exit=
-char6	OK	exit=
-char7	OK	exit=
-char8	OK	exit=
-char9	OK	exit=
-chrlib1	OK	exit=
-comp1	OK	exit=
-comp2	OK	exit=
-comp3	OK	exit=
+bit13	OK	exit=14
+bit14	OK	exit=49
+bit15	OK	exit=2
+bit16	OK	exit=14
+bit2	OK	exit=61
+bit3	OK	exit=49
+bit4	OK	exit=1024
+bit5	OK	exit=-16
+bit6	OK	exit=-262
+bit7	OK	exit=3
+bit8	OK	exit=8
+bit9	OK	exit=2
+bitop_probe	OK	exit=255
+char_itotest	OK	exit=0
+char1	OK	exit=131
+char10	OK	exit=15
+char2	OK	exit=200
+char3	OK	exit=255
+char4	OK	exit=300
+char5	OK	exit=86
+char6	OK	exit=237
+char7	OK	exit=8866
+char8	OK	exit=200
+char9	OK	exit=42
+chrlib1	OK	exit=42
+comp1	OK	exit=55
+comp2	OK	exit=1
+comp3	OK	exit=8
 comp4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\comp4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\comp4.exe' parse err=-55 token=20 pos=116 text='=' line 5: a += b += 4; compile FAIL err=2
-comp5	OK	exit=
+comp5	OK	exit=-3
 console1	SKIP	排除清单
-ctrl1	OK	exit=
-ctrl10	OK	exit=
-ctrl2	OK	exit=
-ctrl3	OK	exit=
-ctrl4	OK	exit=
-ctrl5	OK	exit=
-ctrl6	OK	exit=
-ctrl7	OK	exit=
-ctrl8	OK	exit=
-ctrl9	OK	exit=
-dbgcond	OK	exit=
+ctrl1	OK	exit=1
+ctrl10	OK	exit=1
+ctrl2	OK	exit=2
+ctrl3	OK	exit=55
+ctrl4	OK	exit=5050
+ctrl5	OK	exit=285
+ctrl6	OK	exit=5
+ctrl7	OK	exit=1
+ctrl8	OK	exit=1
+ctrl9	OK	exit=7
+dbgcond	OK	exit=6
 dblcmp1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.exe' parse err=-183 token=0 pos=903 text='double' line 10: double half(double x) { return x / 2.0; } compile FAIL err=2
 dblcompound1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.exe' parse err=-183 token=447 pos=4042 text='double' line 85: double half(double x) { return x / 2.0; } compile FAIL err=2
 dblconst1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.exe' parse err=-183 token=662 pos=5101 text='double' line 122: double half() { return 0.5; } compile FAIL err=2
@@ -78,159 +78,160 @@ dblparam1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblp
 dblprint1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblprint1.exe' parse err=-183 token=447 pos=3986 text='double' line 84: double half(double x) { return x / 2.0; } // 定义在 main 之后 → 顺带钉住前向调用 compile FAIL err=2
 dblptr1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblptr1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblptr1.exe' parse err=-137 token=3 pos=823 text='double' line 8: struct Box { double *p; double v; } compile FAIL err=2
 dblret1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblret1.exe' parse err=-183 token=447 pos=3881 text='double' line 84: double half() { return 0.5; } // 直接返回 double 字面量 compile FAIL err=2
-decl1	OK	exit=
+decl1	OK	exit=6
 demo1	SKIP	排除清单
-edge1	OK	exit=
-edge2	OK	exit=
-edge3	OK	exit=
+edge1	OK	exit=10
+edge2	OK	exit=-16
+edge3	OK	exit=16
 edge4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\edge4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\edge4.exe' parse err=-48 token=6 pos=76 text='+' line 3: return +5 - -3 + -2; compile FAIL err=2
-edge5	OK	exit=
-fa_probe	OK	exit=
-flgui1	OK	exit=
-flgui10	OK	exit=
-flgui11	OK	exit=
-flgui12	OK	exit=
-flgui13	OK	exit=
-flgui14	OK	exit=
-flgui15	OK	exit=
-flgui16	OK	exit=
-flgui17	OK	exit=
-flgui2	OK	exit=
-flgui3	OK	exit=
-flgui4	OK	exit=
-flgui5	OK	exit=
-flgui6	OK	exit=
-flgui7	OK	exit=
-flgui8	OK	exit=
-flgui9	OK	exit=
-fmtlib1	OK	exit=
-fn1	OK	exit=
-fn2	OK	exit=
-fn3	OK	exit=
-fn4	OK	exit=
-fn5	OK	exit=
-fn6	OK	exit=
-fn7	OK	exit=
-fn8	OK	exit=
-fn9	OK	exit=
+edge5	OK	exit=83810205
+fa_probe	OK	exit=0
+flgui1	OK	exit=42
+flgui10	OK	exit=42
+flgui11	OK	exit=42
+flgui12	OK	exit=42
+flgui13	OK	exit=42
+flgui14	OK	exit=42
+flgui15	OK	exit=42
+flgui16	OK	exit=42
+flgui17	OK	exit=42
+flgui18	OK	exit=42
+flgui2	OK	exit=42
+flgui3	OK	exit=42
+flgui4	OK	exit=42
+flgui5	OK	exit=42
+flgui6	OK	exit=42
+flgui7	OK	exit=42
+flgui8	OK	exit=42
+flgui9	OK	exit=42
+fmtlib1	OK	exit=42
+fn1	OK	exit=5
+fn2	OK	exit=5
+fn3	OK	exit=120
+fn4	OK	exit=10
+fn5	OK	exit=42
+fn6	OK	exit=9
+fn7	OK	exit=55
+fn8	OK	exit=33
+fn9	OK	exit=10
 fnptr1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\fnptr1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\fnptr1.exe' parse err=-183 token=83 pos=767 text='double' line 14: double half(double d) { return d / 2.0; } // double 形参与返回（XMM 通道） compile FAIL err=2
-fordecl1	OK	exit=
-freq_probe	OK	exit=
-global1	OK	exit=
+fordecl1	OK	exit=670
+freq_probe	OK	exit=2
+global1	OK	exit=255
 global2	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\global2.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\global2.exe' parse err=-183 token=11 pos=716 text='double' line 14: double gd = 1.5; compile FAIL err=2
 inc_cycle_a	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl 第 2 行第 1 列）: include "inc_cycle_a.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl
 inc_cycle_b	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl 第 3 行第 1 列）: include "inc_cycle_b.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl
 inc_err_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 1 列）: int bad(int x { return x; } ^ 缺少 main 函数（程序入口）
 inc_err_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 15 列）: int bad(int x { return x; } ^ 期望 ')'
 inc_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口）
-inc_main	OK	exit=
-inc1	OK	exit=
-inc2	OK	exit=
-inc3	OK	exit=
-inc4	OK	exit=
-inc5	OK	exit=
-inc6	OK	exit=
+inc_main	OK	exit=21
+inc1	OK	exit=5
+inc2	OK	exit=6
+inc3	OK	exit=8
+inc4	OK	exit=3
+inc5	OK	exit=55
+inc6	OK	exit=12
 incdup_a	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口）
 incdup_b	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口）
 incdup_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_lib.fl 第 2 行第 1 列）: int incdup_val() { return 42; } ^ 缺少 main 函数（程序入口）
-incdup_main	OK	exit=
-incdup_main2	OK	exit=
+incdup_main	OK	exit=42
+incdup_main2	OK	exit=42
 io_api_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\io_api_lib.fl 第 3 行第 1 列）: api kernel32 int GetTickCount(); ^ 缺少 main 函数（程序入口）
-io_api_main	OK	exit=
-iolib1	OK	exit=
-iolib2	OK	exit=
-libpath1	OK	exit=
-loopctl1	OK	exit=
+io_api_main	OK	exit=42
+iolib1	OK	exit=42
+iolib2	OK	exit=42
+libpath1	OK	exit=42
+loopctl1	OK	exit=255
 m1_float	SKIP	排除清单
 m2_float	SKIP	排除清单
-mathlib1	OK	exit=
-memlib1	OK	exit=
+mathlib1	OK	exit=42
+memlib1	OK	exit=42
 mf_api_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口）
 mf_api_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_main.fl 第 3 行第 11 列）: int s = lib_secs(1000); // 开机秒数（函数在 mf_api_lib.fl） ^ 使用了未声明的变量 'lib_secs'
 mf_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_lib.fl 第 2 行第 1 列）: int lib_add(int a, int b) { return a + b; } ^ 缺少 main 函数（程序入口）
 mf_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_main.fl 第 3 行第 11 列）: int x = lib_mul3(2, 3, 4); // 24（函数在 mf_lib.fl） ^ 使用了未声明的变量 'lib_mul3'
 mf_struct_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_lib.fl 第 2 行第 1 列）: struct PP { int x; int y; } ^ 缺少 main 函数（程序入口）
 mf_struct_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_main.fl 第 3 行第 10 列）: struct PP p; ^ 未定义的结构体类型 'PP'（struct 须先定义后使用）
-msr_probe	OK	exit=
-multi_init	OK	exit=
-new1	OK	exit=
-new2	OK	exit=
-new3	OK	exit=
-new4	OK	exit=
-nsname1	OK	exit=
-numlib1	OK	exit=
+msr_probe	OK	exit=2
+multi_init	OK	exit=6
+new1	OK	exit=0
+new2	OK	exit=77
+new3	OK	exit=0
+new4	OK	exit=0
+nsname1	OK	exit=42
+numlib1	OK	exit=42
 pow1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\pow1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\pow1.exe' parse err=-111 token=14 pos=249 text='^' line 5: if (2 ^^ 10 == 1024) r = r | 1; // bit0 基本幂 compile FAIL err=2
 print1	SKIP	排除清单
-ptr1	OK	exit=
-ptr2	OK	exit=
+ptr1	OK	exit=42
+ptr2	OK	exit=99
 ptr64_1	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\ptr64_1.fl 第 15 行第 22 列）: struct Holder { int *ptr; int n; } ^ 期望字段名
-ptr64a	OK	exit=
-ptr64b	OK	exit=
-rapl_probe	OK	exit=
+ptr64a	OK	exit=0
+ptr64b	OK	exit=0
+rapl_probe	OK	exit=2
 ref1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\ref1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\ref1.exe' parse err=-41 token=13 pos=37 text='&' line 4: int &r = x; compile FAIL err=2
 ref2	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\ref2.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\ref2.exe' parse err=-41 token=16 pos=47 text='&' line 5: int &r = a; compile FAIL err=2
 ref3	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\ref3.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\ref3.exe' parse err=-41 token=13 pos=37 text='&' line 4: int &r = n; compile FAIL err=2
 ref4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\ref4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\ref4.exe' parse err=-92 token=4 pos=14 text='&' line 1: &v) { compile FAIL err=2
 ref5	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\ref5.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\ref5.exe' parse err=-92 token=4 pos=14 text='&' line 1: &x) { compile FAIL err=2
-rev1	OK	exit=
-rev2	OK	exit=
-rev3	OK	exit=
-rev4	OK	exit=
-rev5	OK	exit=
-rtptr1	OK	exit=
-rtptr2	OK	exit=
-rtptr3	OK	exit=
+rev1	OK	exit=63
+rev2	OK	exit=7
+rev3	OK	exit=0
+rev4	OK	exit=127
+rev5	OK	exit=255
+rtptr1	OK	exit=42
+rtptr2	OK	exit=138
+rtptr3	OK	exit=5
 rtptr4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\rtptr4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\rtptr4.exe' parse err=-131 token=12 pos=130 text='*' line 3: struct P *gp(struct P *p) { return p; } compile FAIL err=2
-rtptr5	OK	exit=
-s1_probe	OK	exit=
-s1b_probe	OK	exit=
-s2_probe	OK	exit=
-s2b_probe	OK	exit=
-s2c_probe	OK	exit=
-s3_frame	OK	exit=
-sample1	OK	exit=
+rtptr5	OK	exit=7
+s1_probe	OK	exit=0
+s1b_probe	OK	exit=0
+s2_probe	OK	exit=0
+s2b_probe	OK	exit=0
+s2c_probe	OK	exit=0
+s3_frame	OK	exit=0
+sample1	OK	exit=44
 sample2	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\sample2.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\sample2.exe' parse err=-54 token=77 pos=267 text=';' line 14: x; compile FAIL err=2
-sarr1	OK	exit=
-sarr3	OK	exit=
-scopedecl1	OK	exit=
-sfield1	OK	exit=
-sh1	OK	exit=
-sh2	OK	exit=
-sh3	OK	exit=
-smoke1	OK	exit=
-st1	OK	exit=
-st2	OK	exit=
-st3	OK	exit=
+sarr1	OK	exit=59
+sarr3	OK	exit=15
+scopedecl1	OK	exit=1
+sfield1	OK	exit=63
+sh1	OK	exit=0
+sh2	OK	exit=0
+sh3	OK	exit=66
+smoke1	OK	exit=42
+st1	OK	exit=34
+st2	OK	exit=80
+st3	OK	exit=42
 st4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\st4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\st4.exe' parse err=-91 token=15 pos=52 text='&' line 2: void add1(struct Vec2 &v) { compile FAIL err=2
-st5	OK	exit=
-st6	OK	exit=
-st7	OK	exit=
+st5	OK	exit=5000
+st6	OK	exit=1118
+st7	OK	exit=5
 stack1	SKIP	排除清单
 stack2	SKIP	排除清单
-str1	OK	exit=
-str2	OK	exit=
-str3	OK	exit=
-str4	OK	exit=
-str5	OK	exit=
-str6	OK	exit=
-str7	OK	exit=
-strlib1	OK	exit=
+str1	OK	exit=3
+str2	OK	exit=52
+str3	OK	exit=4
+str4	OK	exit=261
+str5	OK	exit=2
+str6	OK	exit=12
+str7	OK	exit=65
+strlib1	OK	exit=42
 sw1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\sw1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\sw1.exe' parse err=-50 token=12 pos=401 text='switch' line 8: switch (n) { compile FAIL err=2
 swap	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\swap.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\swap.exe' parse err=-92 token=4 pos=14 text='&' line 1: &a, int &b) { compile FAIL err=2
-sys_probe	OK	exit=
-temp_probe	OK	exit=
+sys_probe	OK	exit 不判（非确定样本）
+temp_probe	OK	exit=2
 tern1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\tern1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\tern1.exe' parse err=-50 token=15 pos=395 text='?' line 7: return c ? a : b; // ① 三元当返回值（函数返回路径） compile FAIL err=2
 ui_seg	SKIP	排除清单
 ui_text	SKIP	排除清单
 ui_widgets	SKIP	排除清单
-ui1	OK	exit=
-ui2	OK	exit=
-var1	OK	exit=
-var2	OK	exit=
-var3	OK	exit=
+ui1	OK	exit=7
+ui2	OK	exit=7
+var1	OK	exit=12
+var2	OK	exit=20
+var3	OK	exit=13
 var4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\var4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\var4.exe' parse err=-55 token=15 pos=140 text='=' line 5: a = (b = 5) + 2; compile FAIL err=2
-var5	OK	exit=
-vec_big	OK	exit=
+var5	OK	exit=50
+vec_big	OK	exit=42
 vec1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.exe' parse err=-53 token=905 pos=6077 text='double' line 172: double d = -1.5; compile FAIL err=2
 voidfn	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\voidfn.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\voidfn.exe' parse err=-92 token=10 pos=31 text='&' line 3: void twice(int &x) { compile FAIL err=2
-wndproc_probe	OK	exit=
+wndproc_probe	OK	exit=42

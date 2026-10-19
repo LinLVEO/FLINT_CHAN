@@ -1,0 +1,4 @@
+// font-classic-new.fl — 用**本刀**的库编 font-classic-body.fl（见那边的说明）
+// ⚠️ include 路径里的分隔符一律用 `/` —— 字符串字面量会把 `\` 当转义（`\.` / `\f` 直接报"未知转义"）。
+include "../../lib/flgui_win32.fl"
+include "font-classic-body.fl"

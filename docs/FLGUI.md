@@ -272,7 +272,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\flgui-verify.ps1
 
 它编译并运行 `test\samples\flgui*.fl`（无头、合成输入、双端逐字节对账，老 dump 基线
 只许新增不许改动），并跑语义判据（光标条契约、输入灵敏度、UI 美术、焦点链、焦点可见性、
-多字体档等）。当前检查数：<!--fact:flgui-checks-->199/199<!--/fact-->。
+多字体档等）。当前检查数：<!--fact:flgui-checks-->210/210<!--/fact-->。
 
 确认变化有意义之后才重录基线：`... -WriteBaseline`。真输入（真鼠标拖动、真滚轮、真键盘）
 另有一组探针，不在无头门里；无头样本钉的是库内契约，真输入探针钉的是平台层，两层各留

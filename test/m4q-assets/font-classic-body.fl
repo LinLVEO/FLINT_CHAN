@@ -1,0 +1,143 @@
+// font-classic-body.fl — M4q「**不切档 ⇒ 老库/新库整块表面逐像素相等**」的取证体（"关就是真关"的机械证据）。
+//
+// 为什么要有它：本刀改的是**渲染热路径**（`gwb_render_range` 里多了一次"按档选字体"的分支）——
+//   命令表 dump 对"选了哪块字体"完全失明，唯一诚实的办法是：**同一份源码**分别用 M4p 的库（`b610942`）
+//   与本刀的库各编一次，把整块表面的像素摘要打出来，由外部脚本逐字节比。
+// 只许用**两边都有**的字段/API（不出现 `gui_font_push/pop`、`gui_win_font_tier`、`Surf.ft0/ft1/ft2`）——
+//   用了旧库就编不过，所以"共同子集"这条纪律是**机械保证**的。
+// ⚠️ 本文件**自己 include 库**（由两个包装文件按各自路径 include 进来）—— 这里再 include 一次会重复定义。
+// ⚠️ **不建窗**：表面自己搭（`surf_init` 只要 bw/bh/dc，不需要 hwnd；`surf_paint` 也不碰 hwnd），
+//   渲染只画到 DIB，不上屏 ⇒ 无窗口、无消息泵、跑几次都一样。
+// 三个场景（都是"没有切档"的形态）：
+//   base  = 深色默认主题 ＋ 14px 字体
+//   light = 蓝白预设（M4j）＋ 14px 字体      —— 另一个"同档不同主题"的形态
+//   small = 深色默认主题 ＋ **12px** 字体    —— 老的"换字号"唯一路子（`ui_font_make(12)` 换个句柄）
+//     ⇒ 它必须与 base **不同**：证明这份摘要**看得见字号变化**（不是一块瞎的哈希）
+int fc_h1 = 0;
+int fc_h2 = 0;
+int fc_px = 0;
+
+// 整块表面 [0,cw)×[0,ch) 的两个独立滚动摘要
+int fc_hash(struct Surf *s) {
+  char *p = s->bits;
+  int x = 0;
+  int y = 0;
+  int i = 0;
+  int v = 0;
+  fc_h1 = 1;
+  fc_h2 = 0;
+  fc_px = 0;
+  y = 0;
+  while (y < s->ch) {
+    x = 0;
+    while (x < s->cw) {
+      i = (y * s->bw + x) * 4;
+      v = (p[i] % 256) + (p[i + 1] % 256) * 256 + (p[i + 2] % 256) * 65536;
+      fc_h1 = (fc_h1 * 31 + v) & 0x7FFFFFFF;
+      fc_h2 = (fc_h2 * 131 + v + x + y) & 0x7FFFFFFF;
+      fc_px = fc_px + 1;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+int fc_box(struct GuiCtx *c, int x, int y, int w, int h, int kind) {
+  struct GuiRect r;
+  r.x = x; r.y = y; r.w = w; r.h = h;
+  gui_item_at(c, &r);
+  gui_text_put(c, "");
+  gui_push(c, kind);
+  return 0;
+}
+
+int fc_rect(struct GuiCtx *c, int x, int y, int w, int h) {
+  struct GuiRect r;
+  r.x = x; r.y = y; r.w = w; r.h = h;
+  gui_next_rect(c, &r);
+  return 0;
+}
+
+int fc_in(struct GuiInput *in) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0;
+  in->wheel = 0; in->key = 0; in->ms = 0;
+  return 0;
+}
+
+// 一帧画面：文本（含"每字节 8px"的布局口径）＋ 控件 ＋ 裁剪段 ＋ 不透明度层
+int fc_scene(struct GuiCtx *c) {
+  struct GuiRect cl;
+  int i = 0;
+  fc_box(c, 4, 4, 192, 72, 1);                        // 面板
+  fc_rect(c, 12, 12, 176, 14);
+  gui_label(c, "MMMMMMMMMM");                        // 文本（kind 5）
+  fc_rect(c, 12, 32, 176, 14);
+  gui_textfield(c, "field");                         // 只读文本域（kind 14 + 5）
+  fc_rect(c, 12, 52, 80, 14);
+  gui_checkbox(c, "C1");                             // 勾选框（kind 8/9）
+  cl.x = 100; cl.y = 10; cl.w = 90; cl.h = 22;
+  gui_clip_push(c, &cl);                             // 裁剪压栈/出栈（kind 6/7）
+  fc_box(c, 96, 12, 100, 18, 2);
+  gui_clip_pop(c);
+  gui_alpha_push(c, 160);                            // 不透明度层（kind 20/21）
+  fc_box(c, 100, 36, 90, 12, 12);
+  gui_alpha_pop(c);
+  i = 0;
+  while (i < 3) { fc_box(c, 12 + i * 30, 58, 24, 12, 3); i = i + 1; }
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct Surf sf;
+  int *hf = 0;
+  int *hs = 0;
+  int cmdn = 0;
+  int b1 = 0; int b2 = 0;
+  int l1 = 0; int l2 = 0;
+  int s1 = 0; int s2 = 0;
+  int sens = 0;
+
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 80;
+  gui_win_dpi_apply(&c);
+  hf = gui_win_font_init(14);          // 基准字体（两边都有）
+  hs = ui_font_make(12);               // 老口径的"换字号"：换句柄（两边都有）
+  sf.h = 0;
+  sf.bw = 200; sf.bh = 80; sf.cw = 200; sf.ch = 80;
+  sf.r = 0; sf.fill_a = 200; sf.ring_a = 70; sf.const_a = 255;
+  if (surf_init(&sf) == 0) { return 91; }
+  fc_in(&in);
+
+  // ---- base ----
+  gui_begin(&c, &in); fc_scene(&c); gui_end(&c);
+  cmdn = gui_cmd_n;
+  gui_win_render(&sf, &c, hf); fc_hash(&sf);
+  b1 = fc_h1; b2 = fc_h2;
+  print(["FONTCLASSIC case=base h1=", b1, " h2=", b2, " cmdn=", cmdn, " px=", fc_px, "\n"]);
+
+  // ---- light（蓝白预设：同字体、不同主题）----
+  gui_theme_light_blue(&c);
+  gui_begin(&c, &in); fc_scene(&c); gui_end(&c);
+  cmdn = gui_cmd_n;
+  gui_win_render(&sf, &c, hf); fc_hash(&sf);
+  l1 = fc_h1; l2 = fc_h2;
+  print(["FONTCLASSIC case=light h1=", l1, " h2=", l2, " cmdn=", cmdn, " px=", fc_px, "\n"]);
+
+  // ---- small（12px 字体：老口径下"字号"唯一能变的地方）----
+  gui_theme_default(&c);
+  gui_begin(&c, &in); fc_scene(&c); gui_end(&c);
+  cmdn = gui_cmd_n;
+  gui_win_render(&sf, &c, hs); fc_hash(&sf);
+  s1 = fc_h1; s2 = fc_h2;
+  print(["FONTCLASSIC case=small h1=", s1, " h2=", s2, " cmdn=", cmdn, " px=", fc_px, "\n"]);
+
+  // 自检（内部）：摘要**看得见字号**（base ≠ small）与**看得见主题**（base ≠ light）
+  if (b1 != s1) { if (b1 != l1) { sens = 1; } }
+  print(["FONTCLASSIC self sensitive=", sens, " base=", b1, " small=", s1, " light=", l1, "\n"]);
+  if (sens == 1) { return 42; }
+  return 1;
+}

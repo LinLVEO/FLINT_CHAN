@@ -1,0 +1,279 @@
+// font-tier-probe.fl — M4q（2026-09-28）：**真 DC 量宽对账 ＋ 三档渲染差异**探针（真 GDI，无窗口）。
+//
+// 三件事（全部由外部裁判 `test\flgui-verify.ps1` 第 8 段复算，本探针的自报不算判据）：
+//   ① `CV` 行：三档字体由 `gui_win_font_tier(c, 14, 档)` 现建，打印
+//        ext = 探针自己用 `GetTextExtentPoint32A` 量的 **10 字符总宽**（真 DC、真字体）
+//        reg = **库登记的字宽**（档 1 = 全局 `gui_char_adv`；档 0/2 = 状态池 k=2/k=3）
+//        delta = reg − 该档单字符实测宽（库内部自洽；对外的账在门里那条现算里）
+//   ② `TPX` 行：三种档各渲染一帧到一个**离屏 DIB**，打印整面摘要 ＋ 文字**墨迹 x 范围**
+//        （"字号真的三档"这件事只有像素看得见 —— dump 对字号失明）
+//   ③ 自检：三档 ext 与墨迹宽**严格递减**、压基准档与不压**逐像素相同**、三档互不相同、池登记值 = GDI 值
+//
+// ⚠️ **不建窗**：表面自己搭（`surf_init` 只需要 bw/bh，`surf_paint` 不碰 hwnd），只画 DIB、不上屏。
+// ⚠️ `theme_border = theme_bg` ⇒ 边框与底同色，"墨迹"统计里只剩文字（不然 1px 描边会被算成墨迹）。
+include "../../lib/flgui_win32.fl"
+
+int tp_h1 = 0;
+int tp_h2 = 0;
+int tp_px = 0;
+int tp_ink0 = 0;                 // 墨迹最左 x（-1 = 没有墨迹）
+int tp_ink1 = 0;                 // 墨迹最右 x
+int tp_cnt = 0;                  // 墨迹像素数
+int tp_inkw = 0;                 // 墨迹宽 = ink1 - ink0 + 1（没墨迹 = 0）
+int tp_bg = 1052688;             // 深色底 = 0x101010（COLORREF 0x00101010 在 DIB 里就是这三个字节）
+
+int tp_hash(struct Surf *s) {
+  char *p = s->bits;
+  int x = 0;
+  int y = 0;
+  int i = 0;
+  int v = 0;
+  tp_h1 = 1;
+  tp_h2 = 0;
+  tp_px = 0;
+  y = 0;
+  while (y < s->ch) {
+    x = 0;
+    while (x < s->cw) {
+      i = (y * s->bw + x) * 4;
+      v = (p[i] % 256) + (p[i + 1] % 256) * 256 + (p[i + 2] % 256) * 65536;
+      tp_h1 = (tp_h1 * 31 + v) & 0x7FFFFFFF;
+      tp_h2 = (tp_h2 * 131 + v + x + y) & 0x7FFFFFFF;
+      tp_px = tp_px + 1;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+int tp_ink(struct Surf *s) {
+  char *p = s->bits;
+  int x = 0;
+  int y = 0;
+  int i = 0;
+  int v = 0;
+  tp_ink0 = 0 - 1;
+  tp_ink1 = 0 - 1;
+  tp_cnt = 0;
+  tp_inkw = 0;
+  y = 0;
+  while (y < s->ch) {
+    x = 0;
+    while (x < s->cw) {
+      i = (y * s->bw + x) * 4;
+      v = (p[i] % 256) + (p[i + 1] % 256) * 256 + (p[i + 2] % 256) * 65536;
+      if (v != tp_bg) {
+        if (tp_ink0 < 0) { tp_ink0 = x; }
+        tp_ink1 = x;
+        tp_cnt = tp_cnt + 1;
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  if (tp_ink0 >= 0) { tp_inkw = tp_ink1 - tp_ink0 + 1; }
+  return 0;
+}
+
+// 探针自己的 GDI 量宽（借屏幕 DC 选中字体、量完 ReleaseDC —— 与 ui_lib 的 ui_font_adv 同一手法的**独立一份**）
+int tp_ext10(int *hf) {
+  struct SZ sz;
+  int *dc = 0;
+  if (hf == 0) { return 0; }
+  dc = GetDC(0);
+  if (dc == 0) { return 0; }
+  SelectObject(dc, hf);
+  GetTextExtentPoint32A(dc, "MMMMMMMMMM", 10, &sz);
+  ReleaseDC(0, dc);
+  return sz.cx;
+}
+
+// M4q：**字号**的锐尺子 = GDI 的**文本高度**（`GetTextExtentPoint32A` 的 cy）。
+//   为什么不能只用宽度：Consolas 在这套 GDI 映射下**字宽是按 2px 台阶量化的**（实测 px=16/17/18 的
+//   10 字符宽全是 80、px=13 与 12 全是 60）⇒ 宽度分辨不出"17 还是 18"；而 **cy 与请求的 px 一一对应**
+//   （实测 12→12 … 18→18）⇒ "三档字号各对"这条判据靠它才钉得死（见门里那条外部现算）。
+int tp_cy(int *hf) {
+  struct SZ sz;
+  int *dc = 0;
+  if (hf == 0) { return 0; }
+  dc = GetDC(0);
+  if (dc == 0) { return 0; }
+  SelectObject(dc, hf);
+  GetTextExtentPoint32A(dc, "M", 1, &sz);
+  ReleaseDC(0, dc);
+  return sz.cy;
+}
+
+int tp_in(struct GuiInput *in) {
+  in->mx = 0; in->my = 0; in->down = 0; in->pressed = 0; in->released = 0;
+  in->wheel = 0; in->key = 0; in->ms = 0;
+  return 0;
+}
+
+// 一帧：只画一行 10 个 M（不带面板 ⇒ 墨迹就是字本身）
+int tp_frame(struct GuiCtx *c, struct GuiInput *in, int mode) {
+  gui_begin(c, in);
+  if (mode == 0) { gui_font_push(c, 0); }
+  if (mode == 1) { gui_font_push(c, 1); }
+  if (mode == 2) { gui_font_push(c, 2); }
+  if (mode != 9) { gui_label(c, "MMMMMMMMMM"); }
+  if (mode == 0) { gui_font_pop(c); }
+  if (mode == 1) { gui_font_pop(c); }
+  if (mode == 2) { gui_font_pop(c); }
+  gui_end(c);
+  return 0;
+}
+
+// M4q 的**唯一一处"渲染端要维护状态"**：`RestoreDC` 会把 DC 的字体一起回滚（`SaveDC` 那一刻的）
+//   ⇒ 渲染端在 `kind 7`（裁剪出栈）之后**必须重选一次**当前档的字体，否则"压档 ⇒ 开裁剪 ⇒ 出裁剪"
+//   之后的文字会退回基准字体（小一号）。本帧：压标题档 ⇒ 裁剪压栈 ＋ 立刻出栈 ⇒ **出栈之后**画那行字。
+//   裁剪区把整行字包住 ⇒ 与 `tier0` 那一帧**应当逐像素相同**（裁剪本身不画东西、不动布局）。
+int tp_clip_frame(struct GuiCtx *c, struct GuiInput *in) {
+  struct GuiRect cl;
+  gui_begin(c, in);
+  gui_font_push(c, 0);
+  cl.x = 0; cl.y = 0; cl.w = 240; cl.h = 40;
+  gui_clip_push(c, &cl);
+  gui_clip_pop(c);
+  gui_label(c, "MMMMMMMMMM");
+  gui_font_pop(c);
+  gui_end(c);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct Surf sf;
+  int *hf0 = 0;
+  int *hf1 = 0;
+  int *hf2 = 0;
+  int a0 = 0; int a1 = 0; int a2 = 0;
+  int e0 = 0; int e1 = 0; int e2 = 0;
+  int y0 = 0; int y1 = 0; int y2 = 0;
+  int px0 = 0; int px1 = 0; int px2 = 0;
+  int r0 = 0; int r1 = 0; int r2 = 0;
+  int fk = 0;
+  int base_h = 0; int t0_h = 0; int t1_h = 0; int t2_h = 0; int bl_h = 0; int tc_h = 0;
+  int base_iw = 0; int t0_iw = 0; int t1_iw = 0; int t2_iw = 0; int bl_iw = 0; int tc_iw = 0;
+  int base_cn = 0; int t0_cn = 0; int t1_cn = 0; int t2_cn = 0;
+  int n22 = 0;
+  int ok = 1;
+
+  fk = gui_hash("__flgui_font") ^ 0x464F4E54;
+
+  gui_init(&c);
+  c.lay_w = 240;
+  c.lay_h = 40;
+  c.theme_border = c.theme_bg;            // 边框与底同色 ⇒ 墨迹统计只剩文字
+  gui_win_dpi_apply(&c);                  // 真 DPI 读回（本机 96 ⇒ 档字号 18/14/12）
+
+  hf0 = gui_win_font_tier(&c, 14, 0);     // 标题（基准 +4）
+  hf1 = gui_win_font_tier(&c, 14, 1);     // 正文（基准，不动）
+  hf2 = gui_win_font_tier(&c, 14, 2);     // 说明（基准 −2）
+  a0 = ui_font_adv(hf0);
+  a1 = ui_font_adv(hf1);
+  a2 = ui_font_adv(hf2);
+  e0 = tp_ext10(hf0);
+  e1 = tp_ext10(hf1);
+  e2 = tp_ext10(hf2);
+  y0 = tp_cy(hf0);
+  y1 = tp_cy(hf1);
+  y2 = tp_cy(hf2);
+  // 探针自己按**政策**现算期望 px（基准 14 ＋ 档偏移，过 gui_dpi_scale）—— 只用于自检；门外还要另算一遍
+  px0 = gui_dpi_scale(&c, 14 + 4);
+  px1 = gui_dpi_scale(&c, 14);
+  px2 = gui_dpi_scale(&c, 14 - 2);
+  r0 = gui_pool_at(fk, 2);
+  r1 = gui_char_adv;
+  r2 = gui_pool_at(fk, 3);
+  print(["CV tier=0 base=14 px=", px0, " ext=", e0, " adv=", a0, " cy=", y0, " reg=", r0, " delta=", r0 - a0, " dpi=", c.dpi, "\n"]);
+  print(["CV tier=1 base=14 px=", px1, " ext=", e1, " adv=", a1, " cy=", y1, " reg=", r1, " delta=", r1 - a1, " dpi=", c.dpi, "\n"]);
+  print(["CV tier=2 base=14 px=", px2, " ext=", e2, " adv=", a2, " cy=", y2, " reg=", r2, " delta=", r2 - a2, " dpi=", c.dpi, "\n"]);
+  print(["CV font_ok=", gui_char_adv_ok, " fk=", fk, " dpi=", c.dpi, "\n"]);
+
+  sf.h = 0;
+  sf.bw = 240; sf.bh = 40; sf.cw = 240; sf.ch = 40;
+  sf.r = 0; sf.fill_a = 200; sf.ring_a = 70; sf.const_a = 255;
+  if (surf_init(&sf) == 0) { return 91; }
+  sf.ft0 = hf0; sf.ft1 = hf1; sf.ft2 = hf2;
+  tp_in(&in);
+
+  // ---- base：**不压档**（渲染端用收到的那块 hf1）----
+  gui_begin(&c, &in); gui_label(&c, "MMMMMMMMMM"); gui_end(&c);
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); base_h = tp_h1; tp_ink(&sf); base_iw = tp_inkw; base_cn = tp_cnt;
+  print(["TPX tag=base hash1=", base_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", n22, " cmdn=", gui_cmd_n, "\n"]);
+
+  // ---- 空场景（对照组）：一条命令都没有 ⇒ 墨迹必须 0 ----
+  gui_begin(&c, &in); gui_end(&c);
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); bl_h = tp_h1; tp_ink(&sf); bl_iw = tp_inkw;
+  print(["TPX tag=blank hash1=", bl_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", 0, " cmdn=", gui_cmd_n, "\n"]);
+
+  // ---- 三档各一帧（命令流里带 kind 22/23；渲染端按档换字体）----
+  tp_frame(&c, &in, 0);
+  n22 = 0;
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); t0_h = tp_h1; tp_ink(&sf); t0_iw = tp_inkw; t0_cn = tp_cnt;
+  print(["TPX tag=tier0 hash1=", t0_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", 1, " cmdn=", gui_cmd_n, "\n"]);
+
+  tp_frame(&c, &in, 1);
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); t1_h = tp_h1; tp_ink(&sf); t1_iw = tp_inkw; t1_cn = tp_cnt;
+  print(["TPX tag=tier1 hash1=", t1_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", 1, " cmdn=", gui_cmd_n, "\n"]);
+
+  tp_frame(&c, &in, 2);
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); t2_h = tp_h1; tp_ink(&sf); t2_iw = tp_inkw; t2_cn = tp_cnt;
+  print(["TPX tag=tier2 hash1=", t2_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", 1, " cmdn=", gui_cmd_n, "\n"]);
+
+  // ---- 档 ＋ 裁剪压栈/出栈（RestoreDC 会把字体一起回滚 ⇒ 这一段专钉"出栈之后重选"）----
+  tp_clip_frame(&c, &in);
+  gui_win_render(&sf, &c, hf1);
+  tp_hash(&sf); tc_h = tp_h1; tp_ink(&sf); tc_iw = tp_inkw;
+  print(["TPX tag=clip hash1=", tc_h, " inkx0=", tp_ink0, " inkx1=", tp_ink1, " inkw=", tp_inkw,
+         " cnt=", tp_cnt, " n22=", 1, " cmdn=", gui_cmd_n, "\n"]);
+
+  // ================= 自检（门外还要再算一遍；这一层只是"别产出坏账"）=================
+  // ① 三档字号/字宽**严格递减**（18 > 14 > 12；96dpi 下必然）
+  if (e0 > e1) { } else { ok = 0; }
+  if (e1 > e2) { } else { ok = 0; }
+  if (a0 > a1) { } else { ok = 0; }
+  if (a1 > a2) { } else { ok = 0; }
+  // ①b **字号锐尺子**：GDI 文本高度 cy 必须 = 政策现算的 px（宽度按 2px 台阶量化，钉不死字号）
+  if (y0 == px0) { } else { ok = 0; }
+  if (y1 == px1) { } else { ok = 0; }
+  if (y2 == px2) { } else { ok = 0; }
+  // ② 墨迹宽同序（"字号真的三档"只有像素看得见）
+  if (t0_iw > t1_iw) { } else { ok = 0; }
+  if (t1_iw > t2_iw) { } else { ok = 0; }
+  // ③ 压基准档那一帧（tier1）与"完全不压"那一帧**逐像素相同**；三档渲染互不相同
+  if (t1_h == base_h) { } else { ok = 0; }
+  if (t0_h == base_h) { ok = 0; }
+  if (t2_h == base_h) { ok = 0; }
+  if (t0_h == t2_h) { ok = 0; }
+  // ④ 池登记值 = GDI 现量（库内部自洽）
+  if (r0 != a0) { ok = 0; }
+  if (r1 != a1) { ok = 0; }
+  if (r2 != a2) { ok = 0; }
+  // ⑤ 空场景没有墨迹（墨迹统计不是把底色/边框算进来的瞎数）
+  if (bl_iw != 0) { ok = 0; }
+  if (base_cn < 1) { ok = 0; }
+  // ⑥ 压档 ＋ 裁剪压栈/出栈 ⇒ **出栈之后仍是标题档**（裁剪区包住整行字 ⇒ 与 tier0 那一帧逐像素相同）
+  //    ⚠️ 这条钉的是渲染端唯一那处状态活儿：`RestoreDC` 会把 DC 的字体回滚 ⇒ 出栈后必须重选当前档。
+  if (tc_h == t0_h) { } else { ok = 0; }
+  if (tc_iw == t0_iw) { } else { ok = 0; }
+
+  print(["TPROBE ok=", ok, " base_h=", base_h, " t1_h=", t1_h, " t0_h=", t0_h, " t2_h=", t2_h,
+         " clip_h=", tc_h, " inks=", t0_iw, ",", t1_iw, ",", t2_iw, " exts=", e0, ",", e1, ",", e2,
+         " cys=", y0, ",", y1, ",", y2, " px=", px0, ",", px1, ",", px2, "\n"]);
+  if (ok == 1) { return 42; }
+  return 1;
+}

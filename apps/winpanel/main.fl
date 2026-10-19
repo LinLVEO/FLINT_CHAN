@@ -2549,13 +2549,9 @@ int wp_btn(struct GuiCtx *c, int x, int y, int w, int h, char *s) {
 // delivery as well (its tabs / title buttons / Probe were blank boxes): this is an app-side fix of
 // a library-level gap, which the hard boundary of this round leaves untouched.
 int wp_btn_label(struct GuiCtx *c, int x, int y, int w, int h, char *s, int col) {
-  int tw = gui_text_w(s);
-  int tx = x + (w - tw) / 2;
-  int ty = y + (h - c->line_h) / 2;
-  if (tw > w) { tx = x; }
-  if (tx < x) { tx = x; }
-  if (ty < y) { ty = y; }
-  return wp_label_col(c, tx, ty, tw, s, col);
+  // 2026-10-20：库修好「按钮不画标题」之后，这里**不再补画**（否则库的左对齐标题与这里
+  // 的居中标题叠字）。保留函数与签名方便回退；对齐口径统一由库负责，app 不各画一份。
+  return 0;
 }
 
 int wp_bar(struct GuiCtx *c, int x, int y, int w, int h, int v, int mx) {

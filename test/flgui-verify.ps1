@@ -59,9 +59,13 @@
 #   ⚠️ **像素那半不在这道门里**（dump 对形状完全失明）：`tmp\artprobe\art-probe.fl`（24 位）＋
 #     `tmp\artprobe\run-art-classic.ps1`（老库/新库整块表面逐像素比 —— "关就是真关"的机械证据）。
 #   本门第 5 段是同一份口径的**外部裁判**：期望值用 PowerShell 现算，不信样本自己的结论。
+# 2026-10-20 新增（按钮标题）：样本 `flgui18` = **按钮补发 `kind 5`** 的无头契约（14 位全亮）：
+#   三态各发"底色 `2/3/4` ＋ 标题 `5`"、文字区 rect/tlen、焦点圈仍圈**整个按钮**、按钮后布局游标照常前进、
+#   arena 里只有一份标题字节（没有重复 put）。第 9 段是外部裁判：期望值按库的**默认常量**（pad 6 /
+#   spacing 4 / line_h 14 / btn_h 20 / "OK" 2 字节）在 PowerShell 里独立算，不抄 dump 里的数。
 param(
     [switch]$WriteBaseline,
-    [string[]]$Samples = @('flgui1', 'flgui2', 'flgui3', 'flgui4', 'flgui5', 'flgui6', 'flgui7', 'flgui8', 'flgui9', 'flgui10', 'flgui11', 'flgui12', 'flgui13', 'flgui14', 'flgui15', 'flgui16', 'flgui17'),
+    [string[]]$Samples = @('flgui1', 'flgui2', 'flgui3', 'flgui4', 'flgui5', 'flgui6', 'flgui7', 'flgui8', 'flgui9', 'flgui10', 'flgui11', 'flgui12', 'flgui13', 'flgui14', 'flgui15', 'flgui16', 'flgui17', 'flgui18'),
     [switch]$SkipDemo
 )
 $ErrorActionPreference = 'Stop'
@@ -965,7 +969,7 @@ if (Test-Path $df16) {
 #   ① **无头那半**：逐行读 `flgui17` 的 dump（F17 …），按 `lib\FLGUI.md` 的契约**在 PowerShell 里重算**
 #      栈深 / 载荷序列 / err 位 / 光标 = 文本 x ＋ n × 当前档尺子（三档尺子 9 / 8 / 5：9 与 5 是样本注入的
 #      "实测宽"，8 是无头默认的基准 `gui_char_adv`）。
-#   ② **真 GDI 那半**：跑 `tmp\m4q\font-tier-probe.fl`（离屏、**不建窗**），把它的 `CV … ext=… delta=…`
+#   ② **真 GDI 那半**：跑 `test\m4q-assets\font-tier-probe.fl`（离屏、**不建窗**），把它的 `CV … ext=… delta=…`
 #      与**本脚本自己用 GDI 量的**三档字宽对拉；期望 px 由**政策**现算（基准 14 ⇒ 18 / 14 / 12，过 DPI），
 #      不看库的任何自报值（同族坑：判据里出现被测对象自己算出来的量就是自证）。
 Write-Output ""
@@ -1062,7 +1066,7 @@ if (-not (Test-Path $df17)) {
   } else { Chk17 $false "flgui17 没有 M4Q res= 的行" }
 
   # ================= ② 真 GDI 那半：三档字号/字宽对账（外部裁判）=================
-  $probeSrc = Join-Path $root 'tmp\m4q\font-tier-probe.fl'
+  $probeSrc = Join-Path $root 'test\m4q-assets\font-tier-probe.fl'
   $probeExe = Join-Path $work 'font-tier-probe.exe'
   if (-not (Test-Path $probeSrc)) {
     Chk17 $false "找不到真 DC 量宽探针 $probeSrc"
@@ -1124,7 +1128,7 @@ if (-not (Test-Path $df17)) {
   }
 
   # ================= ③ "关就是真关"：老库（b610942）vs 新库整块表面逐像素比 =================
-  $rcs = Join-Path $root 'tmp\m4q\run-font-classic.ps1'
+  $rcs = Join-Path $root 'test\m4q-assets\run-font-classic.ps1'
   if (-not (Test-Path $rcs)) {
     Chk17 $false "找不到 $rcs（老库/新库逐像素取证脚本）"
   } else {
@@ -1134,12 +1138,85 @@ if (-not (Test-Path $df17)) {
     if ($mrc.Success -and ([int]$mrc.Groups[2].Value -eq 0)) {
       Chk17 $true ("老库 git b610942 vs 新库：整块表面逐像素比 pass {0} / fail 0（三个场景 hash1＋hash2 全等）" -f $mrc.Groups[1].Value)
     } else {
-      Chk17 $false "老库/新库逐像素比有失败 —— 见 tmp\m4q\run-font-classic.ps1 的输出"
+      Chk17 $false "老库/新库逐像素比有失败 —— 见 test\m4q-assets\run-font-classic.ps1 的输出"
       $rout | Select-Object -Last 8 | ForEach-Object { Write-Output "       $_" }
     }
   }
 
   Write-Output ("  M4q 契约小结：OK $m4qPass ｜ FAIL $m4qFail")
+}
+
+# ---- 9. 2026-10-20 **按钮标题命令流契约**（语义判据，外部裁判：期望值在这里现算）----
+# 为什么单列一段：样本 `flgui18` 自己已经断言过一遍（内部位掩码 14 位），这里换另一门语言/另一套算式
+#   再判一次 —— 与第 3~8 段同一条口径：**判据的期望值不许只活在样本里**（同族坑：基线会把旧值锁死）。
+# 逐行读 `F18 tag=…` 与其后的 `gui_dump` CMD 行；期望值按库的**默认常量独立重写**：
+#   pad 6 / spacing 4 / line_h 14 / btn_h 20 / "OK" = 2 字节 ⇒ 按钮 28×20、文字区 16×14 @ (12,9)。
+#   ⚠️ 这些数**不是**从 dump 里抄的：dump 只提供"实际发了什么"，裁判自己算"该发什么"。
+Write-Output ""
+Write-Output "----- 按钮标题命令流契约（外部裁判：PowerShell 现算）-----"
+$df18 = Join-Path $work 'dump-flgui18-flint.txt'
+if (Test-Path $df18) {
+  $s18 = @{}
+  $txn18 = @{}
+  $tag18 = ''
+  foreach ($l in (Get-Content $df18)) {
+    $mt = [regex]::Match([string]$l, '^F18 tag=(\w+)')
+    if ($mt.Success) {
+      $tag18 = $mt.Groups[1].Value
+      $s18[$tag18] = New-Object System.Collections.ArrayList
+      $txn18[$tag18] = -1
+      continue
+    }
+    $mp = [regex]::Match([string]$l, '^\s*POOLSUM \d+ textn=(\d+)')
+    if ($mp.Success -and $tag18 -ne '') { $txn18[$tag18] = [int]$mp.Groups[1].Value; continue }
+    $mc = [regex]::Match([string]$l, '^\s*CMD \d+ kind=(-?\d+) rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) text=(-?\d+),(-?\d+)')
+    if ($mc.Success -and $tag18 -ne '' -and $s18.ContainsKey($tag18)) {
+      [void]$s18[$tag18].Add([pscustomobject]@{
+        k = [int]$mc.Groups[1].Value; x = [int]$mc.Groups[2].Value; y = [int]$mc.Groups[3].Value
+        w = [int]$mc.Groups[4].Value; h = [int]$mc.Groups[5].Value
+        off = [int]$mc.Groups[6].Value; len = [int]$mc.Groups[7].Value
+      })
+    }
+  }
+  $nrm = @($s18['normal'])
+  if ($nrm.Count -eq 2 -and $nrm[0].k -eq 2 -and $nrm[1].k -eq 5 -and
+      ("{0},{1},{2},{3}" -f $nrm[0].x, $nrm[0].y, $nrm[0].w, $nrm[0].h) -eq '6,6,28,20' -and
+      ("{0},{1},{2},{3}" -f $nrm[1].x, $nrm[1].y, $nrm[1].w, $nrm[1].h) -eq '12,9,16,14' -and
+      $nrm[1].off -eq 0 -and $nrm[1].len -eq 2) {
+    Ok "常态：kind2(6,6,28,20) + kind5(12,9,16,14) text=0,2 —— 文字区 = 内缩 pad / 垂直居中一行 / gui_text_w"
+  } else {
+    Bad ("常态命令流不对（期望 kind2 6,6,28,20 + kind5 12,9,16,14 text=0,2）：现在 " + (($nrm | ForEach-Object { "kind=$($_.k) $($_.x),$($_.y),$($_.w),$($_.h) text=$($_.off),$($_.len)" }) -join ' ／ '))
+  }
+  if ($txn18['normal'] -eq 2) { Ok "常态 arena 只有 2 字节（textn=2）⇒ kind5 复用了 put 好的 scratch，没有重复 put" }
+  else { Bad "常态 arena 应为 2 字节（textn），实际 $($txn18['normal']) —— 可能重复 put 了标题" }
+  $hov = @($s18['hover'])
+  if ($hov.Count -eq 2 -and $hov[0].k -eq 3 -and $hov[1].k -eq 5 -and $hov[1].len -eq 2 -and
+      ("{0},{1},{2},{3}" -f $hov[0].x, $hov[0].y, $hov[0].w, $hov[0].h) -eq '6,6,28,20') {
+    Ok "悬停：kind3(整个按钮) + kind5(标题 tlen=2)"
+  } else { Bad ("悬停命令流不对：期望 kind3 + kind5；实际 " + (($hov | ForEach-Object { "kind=$($_.k)" }) -join ',')) }
+  $dwn = @($s18['down'])
+  if ($dwn.Count -eq 2 -and $dwn[0].k -eq 4 -and $dwn[1].k -eq 5 -and $dwn[1].len -eq 2 -and
+      ("{0},{1},{2},{3}" -f $dwn[0].x, $dwn[0].y, $dwn[0].w, $dwn[0].h) -eq '6,6,28,20') {
+    Ok "按下：kind4(整个按钮) + kind5(标题 tlen=2)"
+  } else { Bad ("按下命令流不对：期望 kind4 + kind5；实际 " + (($dwn | ForEach-Object { "kind=$($_.k)" }) -join ',')) }
+  $foc = @($s18['focus'])
+  if ($foc.Count -eq 3 -and $foc[0].k -eq 2 -and $foc[1].k -eq 5 -and $foc[2].k -eq 16 -and
+      ("{0},{1},{2},{3}" -f $foc[2].x, $foc[2].y, $foc[2].w, $foc[2].h) -eq '6,6,28,20') {
+    Ok "焦点：命令序 = 底色(2) → 标题(5) → 焦点圈(16)，且圈的 rect = 整个按钮（不是文字区）"
+  } else { Bad ("焦点帧命令序/圈矩形不对：期望 2,5,16 且圈 6,6,28,20；实际 " + (($foc | ForEach-Object { "kind=$($_.k) $($_.x),$($_.y),$($_.w),$($_.h)" }) -join ' ／ ')) }
+  $lbl = @($s18['label'])
+  if ($lbl.Count -eq 3 -and $lbl[0].k -eq 2 -and $lbl[1].k -eq 5 -and $lbl[2].k -eq 5 -and
+      ("{0},{1},{2},{3}" -f $lbl[2].x, $lbl[2].y, $lbl[2].w, $lbl[2].h) -eq '6,30,16,14' -and $txn18['label'] -eq 4) {
+    Ok "按钮后接 label：命令 = 2,5,5；label 落在下一行 (6,30,16,14)（= 6+20+4）⇒ 还原矩形没弄坏布局游标"
+  } else { Bad ("按钮后接 label 不对：期望 2,5,5 且最后一条 6,30,16,14、textn=4；实际 " + (($lbl | ForEach-Object { "kind=$($_.k) $($_.x),$($_.y),$($_.w),$($_.h)" }) -join ' ／ ') + " textn=$($txn18['label'])") }
+  $resLine18 = Get-Content $df18 | Where-Object { $_ -like 'F18 res=*' } | Select-Object -First 1
+  $mres18 = [regex]::Match([string]$resLine18, 'F18 res=(-?\d+) want=(-?\d+)')
+  $wantMask18 = 16383
+  if ($mres18.Success -and ([int]$mres18.Groups[1].Value -eq $wantMask18) -and ([int]$mres18.Groups[2].Value -eq $wantMask18)) {
+    Ok "flgui18 内部位掩码全亮：res = $wantMask18（= 2^14−1）"
+  } else { Bad "flgui18 位掩码不满或没有 F18 res= 行" }
+} else {
+  Bad "没有 flgui18 的 dump（$df18）—— 按钮标题契约没在跑"
 }
 
 Write-Output ""

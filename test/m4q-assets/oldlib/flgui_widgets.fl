@@ -1,0 +1,647 @@
+// flgui_widgets.fl — FLGUI 控件层（M1：label / button / checkbox）
+//   每个控件一律三步：① gui_text_put 落文本 → ② gui_item_rect 定矩形并推进游标 → ③ gui_control 走状态机 → ④ 发命令。
+//   依赖内核 flgui.fl（include 进来）；本文件不含任何 api 声明与绘制调用（绘制是平台层的事）。
+include "flgui.fl"
+include "flgui_edit.fl"
+
+// ===================== M4o（2026-09-28）：焦点圈标记 =====================
+// 发一条 `kind 16`：**矩形就是"当前项"**（调用方刚定好的整个控件矩形），渲染端在这个矩形的**外沿**
+//   画 1px `theme_focus` 圈（与 M4n 那条"可编辑文本域"的圈同一套几何、同一个函数）。
+// 为什么是"一条标记命令"而不是"控件自己画圈"：
+//   ① 圈的颜色/开关是**主题**（`theme_focus`），属渲染端 —— 控件层不该知道颜色；
+//   ② 命令流里带上它，无头样本就能逐条钉住"圈挂在谁身上"（否则只能靠真窗像素）；
+//   ③ 它**只在焦点时发**（没有焦点 ⇒ 一条都不发）⇒ 13 条老 dump 基线的命令流一个字节不变。
+// ⚠️ 它不是"填充命令"：渲染端对 `kind 16` **只画圈、不填充**（见 `gwb_render_range` 里的分支）。
+// ⚠️ 显式清 `scratch_off/len`：`gui_push` 只清 `scratch_col`，不清文本偏移 ⇒ 不清的话这一条会带着
+//   上一条的文本区间（渲染端忽略，但 dump/判据里会看见一个无意义的 `text=`）。
+int gui_focus_mark(struct GuiCtx *c) {
+  if (gui_clip_visible(c) == 0) { return 0; }
+  c->scratch_off = 0;
+  c->scratch_len = 0;
+  gui_push(c, 16);
+  return 1;
+}
+
+// 只读标签（无交互、不进 hot/active）
+int gui_label(struct GuiCtx *c, char *s) {
+  gui_text_put(c, s);
+  gui_item_rect(c, gui_text_w(s), c->line_h);
+  if (gui_clip_visible(c)) { gui_push(c, 5); }
+  return 0;
+}
+
+// 按钮：返回 1 = 本帧被点击（"按下当帧不算、抬起且仍悬停才算"）
+// M4o：**可聚焦**（焦点链成员）。返回 1 = 本帧被点击 ｜ 焦点圈 = 本帧多一条 `kind 16`（rect = 整个按钮）
+int gui_button(struct GuiCtx *c, char *s) {
+  int id = gui_id(s);
+  int w = gui_text_w(s) + c->pad * 2;
+  int kind = 2;
+  int clicked = 0;
+  int fo = 0;
+  gui_text_put(c, s);
+  gui_item_rect(c, w, c->btn_h);
+  fo = gui_focus_reg(c, id);                 // M4o：登记进焦点链（返回 1 = 当前焦点是它）
+  clicked = gui_control(c, id);
+  if (c->hot == id) { kind = 3; }
+  if (c->active == id) { kind = 4; }
+  if (gui_clip_visible(c)) {
+    gui_push(c, kind);
+    if (fo == 1) { gui_focus_mark(c); }      // M4o：焦点圈标记（渲染端按 `theme_focus` 逐像素画）
+  }
+  return clicked;
+}
+
+// 分隔线（1px 横线，占满容器宽）
+int gui_separator(struct GuiCtx *c) {
+  gui_text_put(c, "");
+  gui_item_rect(c, c->lay_w, 1);
+  if (gui_clip_visible(c)) { gui_push(c, 10); }
+  return 0;
+}
+
+// 滑块：返回新值（调用方持有 = immediate mode）。拖动中跟手，越界夹到 [0,max]；
+// 点一下轨道也生效（active 令牌：按下即持有鼠标，抬手才交回 —— 拖到窗口外也不丢）
+// M4o：**可聚焦**（焦点圈 rect = 整条控件；不影响拖动那套锚点/倍率）。
+int gui_slider(struct GuiCtx *c, char *s, int value, int max) {
+  int id = gui_id(s);
+  int v = value;
+  int over = 0;
+  int fill = 0;
+  int iw = 0;
+  int toff = 0;
+  int tlen = 0;
+  int p0 = 0;                     // M4m：按下那一帧的光标 x（倍率锚点；住状态池字段 k=2）
+  int vx = 0;                     // M4m：虚拟光标（= 锚点 + 位移 × drag_scale / 100）
+  int fo = 0;                     // M4o：本帧焦点链是否选中它
+  if (max < 1) { max = 1; }
+  gui_text_put(c, s);
+  gui_item_rect(c, c->lay_w, c->line_h);
+  fo = gui_focus_reg(c, id);      // M4o：登记进焦点链
+  over = gui_hit(c);
+  if (over) {
+    c->hot = id;
+    if (c->pressed) { c->active = id; }
+  }
+  if (c->active == id) {
+    iw = c->cur_iw - 1;
+    if (iw < 1) { iw = 1; }
+    // M4m：**拖动倍率**（滑块）。按下那一帧把光标 x 记成锚点，之后喂进映射的是**虚拟光标**：
+    //   `虚拟 = 锚点 + (真光标 − 锚点) × drag_scale / 100`。
+    //   `drag_scale = 100` ⇒ 虚拟恒等于真光标 ⇒ **与 M4l 及以前的绝对映射逐像素相同**（硬判据，见 flgui13）。
+    //   ⚠️ 锚点住**状态池字段 k=2**（不是 k=0）—— `gui_pool_sum` 只摘字段 0 ⇒ **老 dump 基线（POOLSUM）零扰动**。
+    //   ⚠️ 为什么不用新 ctx 字段：字段是"每帧搬运/应用持有"的，而锚点必须**按控件跨帧存活** ⇒ 池正是它的家。
+    if (c->pressed == 1) { gui_pool_put(id, 2, c->mx); }
+    p0 = gui_pool_at(id, 2);
+    vx = p0 + (c->mx - p0) * c->drag_scale / 100;
+    v = (vx - c->cur_ix) * max / iw;
+    if (v < 0) { v = 0; }
+    if (v > max) { v = max; }
+    c->cur_clicked = 1;
+    if (c->released) { c->active = 0; }
+  }
+  if (gui_clip_visible(c)) {
+    toff = c->scratch_off;
+    tlen = c->scratch_len;
+    iw = c->cur_iw;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_push(c, 11);                                  // 轨道
+    fill = iw * v / max;
+    if (fill > 0) {
+      c->cur_iw = fill;
+      gui_push(c, 12);                                // 已选段
+      c->cur_iw = iw;
+    }
+    c->scratch_off = toff;
+    c->scratch_len = tlen;
+    gui_push(c, 5);                                   // 标签文字（叠在轨道上）
+    if (fo == 1) { gui_focus_mark(c); }               // M4o：焦点圈标记（rect = 整条控件）
+  }
+  return v;
+}
+
+// 进度条（只读）：底 + 按比例填充 + 文字
+int gui_progressbar(struct GuiCtx *c, char *s, int value, int max) {
+  int fill = 0;
+  int iw = 0;
+  int toff = 0;
+  int tlen = 0;
+  if (max < 1) { max = 1; }
+  gui_text_put(c, s);
+  gui_item_rect(c, c->lay_w, c->line_h);
+  fill = c->cur_iw * value / max;
+  if (fill < 0) { fill = 0; }
+  if (fill > c->cur_iw) { fill = c->cur_iw; }
+  if (gui_clip_visible(c)) {
+    toff = c->scratch_off;
+    tlen = c->scratch_len;
+    iw = c->cur_iw;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_push(c, 13);                                  // 底
+    if (fill > 0) {
+      c->cur_iw = fill;
+      gui_push(c, 12);                                // 填充
+      c->cur_iw = iw;
+    }
+    c->scratch_off = toff;
+    c->scratch_len = tlen;
+    gui_push(c, 5);
+  }
+  return 0;
+}
+
+// 只读文本域：带边框的盒子；文本按盒宽裁到能装下的字节数（不换行、不滚动；可编辑/IME 属 M4）
+int gui_textfield(struct GuiCtx *c, char *s) {
+  int fit = 0;
+  int toff = 0;
+  int tlen = 0;
+  int ix = 0;
+  gui_text_put(c, s);
+  toff = c->scratch_off;
+  tlen = c->scratch_len;
+  gui_item_rect(c, c->lay_w, c->line_h);
+  if (gui_clip_visible(c)) {
+    fit = (c->cur_iw - c->pad * 2) / 8;
+    if (fit < 0) { fit = 0; }
+    if (fit > tlen) { fit = tlen; }
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_push(c, 14);                                  // 盒
+    ix = c->cur_ix;
+    c->cur_ix = ix + c->pad;
+    c->scratch_off = toff;
+    c->scratch_len = fit;                             // 裁到装得下的字节数
+    gui_push(c, 5);
+    c->cur_ix = ix;
+  }
+  return 0;
+}
+
+// 勾选框：状态存在**每 ID 状态池**里（跨帧存活），返回勾选后状态（0/1）
+// M4o：**可聚焦**。焦点圈 = 本帧多一条 `kind 16`，rect = **整个控件**（方块 + 标签），不是只有方块。
+int gui_checkbox(struct GuiCtx *c, char *s) {
+  int id = gui_id(s);
+  int on = gui_pool_get(id) & 1;
+  int clicked = 0;
+  int fo = 0;
+  int tw = gui_text_w(s);
+  int ix = 0;
+  int iy = 0;
+  int iw = 0;
+  int ih = 0;
+  gui_text_put(c, s);
+  gui_item_rect(c, c->box_w + c->spacing + tw, c->line_h);
+  fo = gui_focus_reg(c, id);                 // M4o：登记进焦点链
+  clicked = gui_control(c, id);
+  if (clicked) {
+    on = 1 - on;
+    gui_pool_set(id, on);
+  }
+  if (gui_clip_visible(c)) {
+    ix = c->cur_ix; iy = c->cur_iy; iw = c->cur_iw; ih = c->cur_ih;
+    // 左端方块（勾选 = 亮块 9 / 未勾选 = 描边 8）
+    c->cur_iy = iy + (ih - c->box_w) / 2;
+    c->cur_iw = c->box_w;
+    c->cur_ih = c->box_w;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    if (on) { gui_push(c, 9); } else { gui_push(c, 8); }
+    // 右侧文字
+    c->cur_ix = ix + c->box_w + c->spacing;
+    c->cur_iy = iy;
+    c->cur_iw = tw;
+    c->cur_ih = ih;
+    gui_text_put(c, s);
+    gui_push(c, 5);
+    // 还原当前矩形（下一个控件/外部读 cur_* 时看到的还是整个控件）
+    c->cur_ix = ix; c->cur_iy = iy; c->cur_iw = iw; c->cur_ih = ih;
+    if (fo == 1) { gui_focus_mark(c); }       // M4o：焦点圈标记（rect = 整个控件）
+  }
+  return on;
+}
+
+// ===================== M4n（2026-09-28）：单选钮（新 API `gui_radio`）=====================
+// 组语义（**本刀定的口径** —— 样本 `flgui14` 与 `lib\FLGUI.md` §3 按这个写；拍板原话是"组语义由你定，
+//   但要在样本与文档里写清"）：
+//   · 一个"单选组" = 一个**组名**（字符串）。`gui_radio` 用**默认组 `""`**（空串）；
+//     要显式分组用 `gui_radio_g(c, "组名", "标签")`（FLINT 没有默认参数 ⇒ 两个入口，不是可选参数）。
+//   · **组内互斥**：任一时刻组里最多一个被选中。不是"点击时扫一圈清别人"，而是：
+//     **组槽里存"本组当前选中的控件 id + 1"**，某个钮的 `on` 就定义为"组槽 == 我 id+1"
+//     ⇒ **互斥由构造保证**（与"谁先画、谁后画"无关，跨帧也自然成立）。
+//   · **状态全住状态池**（`gui_pool_*`，与勾选框同一族载体）：
+//       控件自己的选中态 → `gui_pool_set(id, on)`（k = 0，与勾选框同一字段，老 dump 的 POOLSUM 看得见）
+//       本组选中的控件   → `gui_pool_put(组槽键, 3, id + 1)`（**+1** ⇒ 池里 0 天然表示"本组还没选过"）
+//     组槽键 = `gui_hash(组名) ^ 0x2C1B3D4F`（**异或一个常量**把"组名"与"控件标签"两套 key 分开：
+//     组名 `x` 与标签 `x` 因此落在不同槽；不同组名之间仍按既有 `id % 512` 口径接受碰撞）。
+//   · 池 = 512 组 × 4 字段（既有容量口径）⇒ **不需要"组表容量"与"满了怎么办"**：
+//     写的是池里同一张表，`gui_init` 已经清过它 ⇒ 生命周期也是白送的。
+//   · 老字段占用提醒（同族坑）：k=0 状态 / k=1 动画起始戳 / k=2 M4m 滑块拖动锚点 / k=3 动画"已起过"标志
+//     —— 本控件用 k=3 存"本组选中的 id+1"：与某个正在做动画的控件**撞 512 槽**时才会互相干扰，
+//     概率与既有设计（滑块锚点用 k=2）同一量级，如实记在 FLGUI.md 的诚实边界里。
+// 命令流形状（**零新 kind、零新导入**）：未选 = `kind 8`（圆环）+ `kind 5`（标签）；
+//   选中 = `kind 8` + `kind 9`（实心点，居中且更小）+ `kind 5`。圆是**渲染端逐像素**画的。
+//   ⚠️ **为什么必须带形状通道**：勾选框未选也发 `kind 8`（`box_w × box_w`）、选中也发 `kind 9`（同尺寸）
+//   ⇒ 与单选钮**逐字段完全相同**，渲染端无从判断"画方还是画圆"。`gui_cmd_col`（填充类命令上本来没人读）
+//   在这里当形状通道：`gui_shape_circle()`（见 `flgui.fl` 里"为什么是函数不是全局常量"那段）。
+int gui_radio_key(char *g) {
+  return (gui_hash(g) ^ 0x2C1B3D4F) & 0x7FFFFFFF;
+}
+
+// 显式分组的单选钮：同一 `g` 的钮互斥；返回选中态（0/1）
+// M4o：**可聚焦**（组语义不受影响：焦点链与选中态是两套正交状态）。
+int gui_radio_g(struct GuiCtx *c, char *g, char *s) {
+  int id = gui_id(s);
+  int gk = gui_radio_key(g);
+  int on = 0;
+  int clicked = 0;
+  int fo = 0;
+  int tw = gui_text_w(s);
+  int dot = 0;
+  int ix = 0;
+  int iy = 0;
+  int iw = 0;
+  int ih = 0;
+  gui_text_put(c, s);
+  gui_item_rect(c, c->box_w + c->spacing + tw, c->line_h);
+  fo = gui_focus_reg(c, id);                 // M4o：登记进焦点链
+  clicked = gui_control(c, id);
+  if (gui_pool_at(gk, 3) == id + 1) { on = 1; }     // 本组选中的就是我
+  if (clicked) {
+    on = 1;
+    gui_pool_put(gk, 3, id + 1);                    // 本组选中 = 我（别的钮下一帧自然读到"不是我"）
+  }
+  gui_pool_set(id, on);                             // 自己的选中态也写回池（跨帧存活；与勾选框同族）
+  if (gui_clip_visible(c)) {
+    ix = c->cur_ix; iy = c->cur_iy; iw = c->cur_iw; ih = c->cur_ih;
+    // 外圈（圆圈 = 渲染端按形状通道逐像素画；未选 = 只有这一条）
+    c->cur_iy = iy + (ih - c->box_w) / 2;
+    c->cur_iw = c->box_w;
+    c->cur_ih = c->box_w;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    c->scratch_col = gui_shape_circle();
+    gui_push(c, 8);
+    // 选中内实心点（更小、居中；同样走形状通道）
+    if (on) {
+      dot = c->box_w / 2;
+      if (dot < 2) { dot = 2; }
+      if (dot > c->box_w) { dot = c->box_w; }
+      c->cur_ix = ix + (c->box_w - dot) / 2;
+      c->cur_iy = iy + (ih - c->box_w) / 2 + (c->box_w - dot) / 2;
+      c->cur_iw = dot;
+      c->cur_ih = dot;
+      c->scratch_off = 0;
+      c->scratch_len = 0;
+      c->scratch_col = gui_shape_circle();
+      gui_push(c, 9);
+    }
+    // 右侧文字（与勾选框同一套偏移：`box_w + spacing`）
+    c->cur_ix = ix + c->box_w + c->spacing;
+    c->cur_iy = iy;
+    c->cur_iw = tw;
+    c->cur_ih = ih;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_text_put(c, s);
+    gui_push(c, 5);
+    c->cur_ix = ix; c->cur_iy = iy; c->cur_iw = iw; c->cur_ih = ih;
+    if (fo == 1) { gui_focus_mark(c); }       // M4o：焦点圈标记（rect = 整个控件）
+  }
+  return on;
+}
+
+// 默认组（`""`）的单选钮：同一屏上所有 `gui_radio` 共用一个组 ⇒ 彼此互斥
+int gui_radio(struct GuiCtx *c, char *s) { return gui_radio_g(c, "", s); }
+
+// ===================== M2：滚动视图 =====================
+// M3(b)：拖滑块的两个状态（按视口下标存；与 gui_sc_* 同一族，容量同 4）
+//   gui_sc_drag[i] = 1 表示"该视口的滑块正被拖"（拿住鼠标直到抬手，ui_lib 的 ui_scroll 同语义）
+//   gui_sc_grab[i] = 抓取偏移（按下点 − 滑块顶）⇒ 拖动时滑块跟手、不会跳到光标中心
+//   gui_sc_py[i]   = **M4m 新加**：按下那一帧的光标 y（拖动倍率的锚点；见 gui_scroll_end 里的虚拟光标式）
+int gui_sc_drag[4];
+int gui_sc_grab[4];
+int gui_sc_py[4];
+// 偏移按 ID 存在**池**里（跨帧存活，D1 定案载体）；滚轮只在光标悬停于视口内时被消费。
+// 内容照常走布局游标（起点 = 视口顶 - 偏移），裁剪由内核的裁剪栈承担；end 时把偏移夹到 [0, 内容高-视口高]。
+int gui_scroll_begin(struct GuiCtx *c, char *s, int view_h) {
+  struct GuiRect r;
+  int id = gui_id(s);
+  int off = 0;
+  int i = gui_sc_n;
+  if (i >= 4) { c->err = c->err | 4; return 0; }
+  if (view_h < 1) { view_h = 1; }
+  gui_text_put(c, "");
+  gui_item_rect(c, c->lay_w, view_h);
+  gui_sc_id[i] = id;
+  gui_sc_x[i] = c->cur_ix;
+  gui_sc_y[i] = c->cur_iy;
+  gui_sc_w[i] = c->cur_iw;
+  gui_sc_h[i] = c->cur_ih;
+  gui_sc_lx[i] = c->lay_x;
+  gui_sc_ly[i] = c->lay_y;
+  gui_sc_ry[i] = c->row_y;
+  gui_sc_rh[i] = c->row_h;
+  gui_sc_cx[i] = c->cur_x;
+  off = gui_pool_get(id);
+  if (c->wheel != 0) {
+    if (c->mx >= c->cur_ix) {
+      if (c->mx < c->cur_ix + c->cur_iw) {
+        if (c->my >= c->cur_iy) {
+          if (c->my < c->cur_iy + c->cur_ih) { off = off - c->wheel * c->wheel_step; }
+        }
+      }
+    }
+  }
+  if (off < 0) { off = 0; }
+  gui_sc_top[i] = off;
+  gui_pool_set(id, off);
+  r.x = c->cur_ix; r.y = c->cur_iy; r.w = c->cur_iw; r.h = c->cur_ih;
+  gui_clip_push(c, &r);
+  c->lay_x = c->cur_ix;
+  c->row_y = c->cur_iy - off - c->spacing;
+  c->row_h = 0;
+  c->cur_x = c->lay_x;
+  c->same_line = 0;
+  gui_sc_n = i + 1;
+  return 0;
+}
+
+// 收尾：算内容高、夹偏移（写回池）、内容超出视口时画滚动条（轨道 11 + 滑块 12），恢复外层布局
+int gui_scroll_end(struct GuiCtx *c) {
+  int i = gui_sc_n - 1;
+  int view = 0;
+  int off = 0;
+  int cont = 0;
+  int maxoff = 0;
+  int thumb = 0;
+  int bar_y = 0;
+  int tx = 0;
+  int nb = 0;
+  if (i < 0) { c->err = c->err | 8; return 0; }
+  view = gui_sc_h[i];
+  off = gui_sc_top[i];
+  cont = c->row_y + c->row_h - (gui_sc_y[i] - off);
+  if (cont < 0) { cont = 0; }
+  maxoff = cont - view;
+  if (maxoff < 0) { maxoff = 0; }
+  if (off > maxoff) {
+    off = maxoff;
+    gui_pool_set(gui_sc_id[i], off);
+  }
+  if (maxoff <= 0) { gui_sc_drag[i] = 0; }   // 内容不再溢出 ⇒ 拖拽状态作废（防陈旧抓取偏移）
+  if (maxoff > 0) {
+    thumb = view * view / cont;
+    if (thumb < 8) { thumb = 8; }
+    if (thumb > view) { thumb = view; }
+    bar_y = gui_sc_y[i] + (view - thumb) * off / maxoff;
+    // M3(b)：**拖滑块**（对齐 ui_lib 的 ui_scroll —— M2 只有滚轮，这条路径是补上的缺口）。
+    //   滑块矩形 = 视图右缘那条 4px 宽的轨道上的一段。maxoff>0 ⇒ cont>view ⇒ thumb<view
+    //   ⇒ 下面的 `(view - thumb)` 恒 ≥ 1（不会除零）。
+    //   M4m：① 命中区从"看得见的那 4px"放宽到 **12px**（`[tx−8, tx+4)`）—— **只改命中判定，绘制一字未动**；
+    //         ② 拖动改走"按下点锚定 ＋ 倍率"（`drag_scale`），`100` 时与老的"绝对跟手"逐像素相同。
+    tx = gui_sc_x[i] + gui_sc_w[i] - 4;
+    if (c->pressed == 1) {
+      if (c->mx >= tx - 8 && c->mx < tx + 4) {
+        if (c->my >= bar_y && c->my < bar_y + thumb) {
+          gui_sc_drag[i] = 1;                      // 命中滑块 ⇒ 拿令牌 + 记抓取偏移
+          gui_sc_grab[i] = c->my - bar_y;
+          gui_sc_py[i] = c->my;                    // M4m：倍率锚点 = 按下那一帧的光标 y
+        }
+      }
+    }
+    if (gui_sc_drag[i] == 1) {
+      if (c->down == 1) {
+        // M4m：**拖动倍率**。按下时的滑块顶 = `锚点y − 抓取偏移`（下面这行的第一项），
+        //   光标位移按 `drag_scale / 100` 折算成"虚拟光标位移"。
+        //   `drag_scale = 100` ⇒ 第一项 + (my − 锚点y) = my − 抓取偏移 ⇒ **与 M4l 及以前一字不差**。
+        nb = (gui_sc_py[i] - gui_sc_grab[i]) + (c->my - gui_sc_py[i]) * c->drag_scale / 100;
+        if (nb < gui_sc_y[i]) { nb = gui_sc_y[i]; }
+        if (nb > gui_sc_y[i] + view - thumb) { nb = gui_sc_y[i] + view - thumb; }
+        off = (nb - gui_sc_y[i]) * maxoff / (view - thumb);
+        if (off < 0) { off = 0; }
+        if (off > maxoff) { off = maxoff; }
+        gui_pool_set(gui_sc_id[i], off);           // 偏移立即写回池（跨帧存活）
+        bar_y = nb;
+      } else {
+        gui_sc_drag[i] = 0;                        // 抬手交回令牌
+      }
+    }
+    c->cur_ix = gui_sc_x[i] + gui_sc_w[i] - 4;
+    c->cur_iy = gui_sc_y[i];
+    c->cur_iw = 4;
+    c->cur_ih = view;
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_push(c, 11);
+    c->cur_iy = bar_y;
+    c->cur_ih = thumb;
+    gui_push(c, 12);
+  }
+  gui_clip_pop(c);
+  c->lay_x = gui_sc_lx[i];
+  c->lay_y = gui_sc_ly[i];
+  c->row_y = gui_sc_ry[i];
+  c->row_h = gui_sc_rh[i];
+  c->cur_x = gui_sc_cx[i];
+  c->cur_ix = gui_sc_x[i];
+  c->cur_iy = gui_sc_y[i];
+  c->cur_iw = gui_sc_w[i];
+  c->cur_ih = gui_sc_h[i];
+  gui_sc_n = i;
+  return maxoff;
+}
+
+// ===================== M2：弹层（右键菜单）=====================
+// 打开：状态写进池（跨帧存活），位置由调用方给（通常是光标处）
+int gui_popup_open(struct GuiCtx *c, char *s, int x, int y) {
+  int id = gui_id(s);
+  gui_pool_set(id, 1);
+  c->popup_id = id;
+  c->popup_x = x;
+  c->popup_y = y;
+  return 1;
+}
+
+// 返回 1 = 本帧显示（调用方随后逐条 gui_popup_item）；n_items 让面板底能先画出来
+int gui_pop_on;   // 本帧弹层是否真的开了（end 据此决定要不要 pop 裁剪，避免栈失衡）
+int gui_popup_begin(struct GuiCtx *c, char *s, int n_items) {
+  struct GuiRect r;
+  int id = gui_id(s);
+  int h = 0;
+  int w = 0;
+  if (gui_pool_get(id) == 0) { return 0; }
+  if (n_items < 1) { n_items = 1; }
+  w = c->popup_w;
+  h = c->pad * 2 + n_items * c->btn_h + (n_items - 1) * c->spacing;
+  gui_pop_x = c->popup_x;
+  gui_pop_y = c->popup_y;
+  gui_pop_w = w;
+  gui_pop_h = h;
+  c->popup_id = id;
+  c->scratch_off = 0;
+  c->scratch_len = 0;
+  c->cur_ix = gui_pop_x; c->cur_iy = gui_pop_y; c->cur_iw = w; c->cur_ih = h;
+  gui_push(c, 1);
+  c->cur_ih = 1;
+  gui_push(c, 8);
+  gui_pop_lx = c->lay_x;
+  gui_pop_ly = c->lay_y;
+  gui_pop_lw = c->lay_w;
+  gui_pop_ry = c->row_y;
+  gui_pop_rh = c->row_h;
+  gui_pop_cx = c->cur_x;
+  c->lay_x = gui_pop_x + c->pad;
+  c->lay_y = gui_pop_y + c->pad;
+  c->lay_w = w - c->pad * 2;
+  c->row_y = c->lay_y - c->spacing;
+  c->row_h = 0;
+  c->cur_x = c->lay_x;
+  c->same_line = 0;
+  r.x = gui_pop_x; r.y = gui_pop_y; r.w = w; r.h = h;
+  gui_clip_push(c, &r);
+  gui_pop_on = 1;
+  return 1;
+}
+
+// 菜单项（复用按钮语义）；点中即关掉弹层
+int gui_popup_item(struct GuiCtx *c, char *s) {
+  int clicked = gui_button(c, s);
+  if (clicked) { gui_pool_set(c->popup_id, 0); }
+  return clicked;
+}
+
+// 收尾：点在弹层外 → 关（"点外面关掉"是菜单的基本契约）；恢复外层布局
+int gui_popup_end(struct GuiCtx *c) {
+  int outside = 1;
+  if (gui_pop_on == 0) { return 0; }   // begin 没开（池里是 0）⇒ 没压过裁剪，别 pop
+  if (c->pressed == 1) {
+    if (c->mx >= gui_pop_x) {
+      if (c->mx < gui_pop_x + gui_pop_w) {
+        if (c->my >= gui_pop_y) {
+          if (c->my < gui_pop_y + gui_pop_h) { outside = 0; }
+        }
+      }
+    }
+    if (outside == 1) { gui_pool_set(c->popup_id, 0); }
+  }
+  gui_clip_pop(c);
+  c->lay_x = gui_pop_lx;
+  c->lay_y = gui_pop_ly;
+  c->lay_w = gui_pop_lw;
+  c->row_y = gui_pop_ry;
+  c->row_h = gui_pop_rh;
+  c->cur_x = gui_pop_cx;
+  gui_pop_on = 0;
+  return 0;
+}
+
+// ===================== M4b：可编辑文本域 =====================
+// 与只读 `gui_textfield` 的区别 = **有焦点概念**：点进去开始编辑、打字往末尾追加、退格删一个字符（GBK 整字）、
+// 回车确认（返回 1）、Esc 取消（内容回滚）、点盒子外面失焦（保留已输入内容）。
+// 文本住 flgui_edit.fl 的全局缓冲（见那里的载体纪律），本控件只负责"排版 + 画 + 把键盘喂给编辑状态"。
+// 返回：1 = 本帧按了回车（已确认）｜ 2 = 本帧按了 Esc（已取消）｜ 0 = 其它
+// M4o：**可聚焦**，而且它把"焦点链"与"编辑焦点（`c->edit_slot`）"**统一**起来（四条规则）：
+//   ① 链焦点落在它身上（`gui_focus_reg` 返回 1）⇒ `gui_edit_focus` 跟上（`kind 15` 光标条 ⇒ M4n 那条焦点圈）；
+//   ② 链焦点在**别人**身上 ⇒ 编辑焦点收回（否则会出现"链焦点在按钮上、文本域里还插着光标"的错位态）；
+//   ③ 鼠标点进来 ⇒ 编辑焦点 **和** 链焦点都指向它；点盒子外 ⇒ 两个一起收回；
+//   ④ **回车确认 / Esc 取消**（M4b 的老契约是"确认/取消后**失焦**"）⇒ **链焦点也一并收回**。
+//      ⚠️ 这条是本刀实测补上的真缺陷：只按 ① 写的话，回车 commit 之后**下一帧链焦点还在它身上**
+//      ⇒ `gui_edit_focus` 立刻又把它聚焦回来 ⇒ **"回车失焦"永远做不到**（真键盘探针 `kb-probe.ps1`
+//      的 `Enter committed (unfocused)` 当场红：F 从 -1 变回 0）。⇒ commit/cancel 那一帧顺手清链焦点。
+//   ⇒ 焦点圈因此**恒有唯一来源**：链焦点 = 渲染端画圈的那一个（文本框走 kind 15 那条老路，别的走 kind 16）。
+int gui_textfield_edit(struct GuiCtx *c, int slot, int maxlen) {
+  int fit = 0;
+  int n = 0;
+  int ix = 0;
+  int iy = 0;
+  int iw = 0;
+  int ih = 0;
+  int cx = 0;
+  int ret = 0;
+  int over = 0;
+  int eid = 0;                    // M4o：焦点链里的 id（按 slot 区分；文本域本来就没有 label）
+  int fo = 0;
+  if (gui_edit_slot_ok(slot) == 0) { return 0; }
+  if (gui_edit_on[slot] == 0) { gui_edit_init(slot, "", maxlen); }
+  else { gui_edit_setmax(slot, maxlen); }        // ⚠️ maxlen 每帧都要重新钉（否则改上限那一帧不生效 —— 判据会静默量到旧上限）
+  n = gui_edit_len[slot];
+  gui_item_rect(c, c->lay_w, c->line_h);
+  ix = c->cur_ix; iy = c->cur_iy; iw = c->cur_iw; ih = c->cur_ih;
+  eid = gui_id_in("__flgui_edit", slot);
+  fo = gui_focus_reg(c, eid);                    // M4o：登记进焦点链（按绘制顺序）
+  over = gui_hit(c);
+  if (c->pressed == 1) {
+    if (over) {
+      gui_edit_focus(c, slot);                   // 点进来 ⇒ 聚焦（光标 = 末尾）
+      // M4o：链焦点也指过来。**内联 `gui_focus_here`**（函数预算只剩 1 格，见 flgui.fl 上方那段）：
+      //   写 `k=1` = 本帧序号 + 1（`c->kbd` 刚被 `gui_focus_reg` 加过 1）、`k=3` = 我自己的 id。
+      //   ⚠️ 为什么不能让 `gui_focus_reg` 代写这格：**点进来那一帧**它跑的时候焦点还在别人身上
+      //     （或还没有焦点）⇒ 不会命中、也就不会写 id；这条路由"点击"事后补写。
+      gui_pool_put(gui_focus_key(), 1, c->kbd);
+      gui_pool_put(gui_focus_key(), 3, eid);
+    } else {
+      gui_edit_blur(c);                          // 点外面 ⇒ 失焦（内容保留）
+      // M4o：链焦点一并收回（否则会留下"焦点在文本域上、圈却没了"的错位态）
+      gui_pool_put(gui_focus_key(), 1, 0);
+      gui_pool_put(gui_focus_key(), 3, 0);
+    }
+  } else {
+    if (fo == 1) { gui_edit_focus(c, slot); }                            // ① 链焦点是它 ⇒ 编辑焦点跟上
+    else { if (gui_pool_at(gui_focus_key(), 1) > 0) { gui_edit_blur(c); } }  // ② 链焦点在别人身上 ⇒ 收回
+  }
+  if (gui_edit_focused(c) == slot) { ret = gui_edit_key(c); }
+  // M4o 规则④：**回车确认 / Esc 取消**那一帧（`gui_edit_key` 已经在里面 commit/rollback 并失焦）⇒
+  //   链焦点**一并收回**。不收的话下一帧 ① 又会把它聚焦回来 ⇒ M4b 那条"确认后失焦"的老契约失效
+  //   （真键盘探针 `kb-probe.ps1` 实测抓到；见函数头上面的注记）。
+  if (ret == 1) {
+    gui_pool_put(gui_focus_key(), 1, 0);
+    gui_pool_put(gui_focus_key(), 3, 0);
+  }
+  if (ret == 2) {
+    gui_pool_put(gui_focus_key(), 1, 0);
+    gui_pool_put(gui_focus_key(), 3, 0);
+  }
+  if (gui_clip_visible(c)) {
+    fit = (iw - c->pad * 2) / 8;                  // 盒内能装几个字节（8px/字节口径，与 gui_text_w 同一把尺子）
+    if (fit < 0) { fit = 0; }
+    c->scratch_off = 0;
+    c->scratch_len = 0;
+    gui_push(c, 14);                              // 盒
+    n = gui_edit_size(slot);
+    if (n > fit) { n = fit; }                     // 超宽按盒宽截断（与只读版同口径）
+    c->cur_ix = ix + c->pad;
+    // ⚠️⚠️ **M4c 真 bug 修复**（2026-09-23 用户手打验收抓到）：
+    //   原写法 `c->scratch_off = gui_edit_offset(slot);` 给的是**编辑缓冲的偏移**（槽 0 = 128），
+    //   而文本命令的 `text=` 字段是**arena 偏移**（渲染器 `gui_text_at(toff)` = `gui_text + toff`）
+    //   ⇒ 画出来的是 arena 里 128 号往后的**固定垃圾字节**：
+    //     症状 = **框里出现一个看不懂的字符、输入什么都一样**（而"我打的字跑到下一行"是 demo 那行镜像标签，
+    //     它走 `gui_label(c, gui_edit_text(0))`，那条路径是对的，所以字看着"跑到下一行"去了）。
+    //   dump 证据（修前）：只读框 `text=54,15`（arena 真偏移）vs 可编辑框 `text=128,0`（编辑缓冲偏移）。
+    //   ⇒ 正解：**先把实时区拷进 arena**（`gui_text_put_n` 顺带把 scratch_off/scratch_len 设好），再 push。
+    //   ⚠️ 教训：这条错**文字层判据抓不到** —— flgui6 的 20 位掩码与 dump 基线都只"记住了当时的值"
+    //      （基线把错值一并锁死），只有**真窗像素**才看得出来。修好后基线要按"有意变更"重录。
+    gui_text_put_n(c, gui_edit_text(slot), n);
+    gui_push(c, 5);                               // 文本
+    if (gui_edit_focused(c) == slot) {
+      // ⚠️⚠️ **2026-09-23 真 bug 修复**（用户手打抓到"打几个字后光标往后移好几个位置，就是不准"）：
+      //   原写法 `cx = ix + c->pad + n * 8;` 用的是**8px/字节的估算**，而字是 GDI 按真实字形宽度画的
+      //   （Consolas 14px 实测 **7px/字符**，`tmp\m4c\font-advance.ps1`）⇒ **每打一个字偏 +1px、逐字累加**：
+      //   dump 实测 n=2 光标 x=28 而字尾 26、n=3 光标 x=36 而字尾 33（偏差 = n）。
+      //   ⇒ 正解 = 用 `gui_char_adv`（**建字体时用 GDI 量一次**的真实字宽；内核层声明、平台层写入，见
+      //     `flgui.fl` 的说明与 `ui_lib.fl` 的 `ui_font_adv`）。
+      //   口径：**"算位置的尺子"必须和"画东西的尺子"同一把** —— 估算可以用，但要与真度量对齐并共用。
+      cx = ix + c->pad + n * gui_char_adv;        // 光标条 = 文本末尾那一列（真字宽，不是估算）
+      if (cx > ix + iw - 2) { cx = ix + iw - 2; } // 夹在盒内（别画到边框外面）
+      c->cur_ix = cx;
+      c->cur_iy = iy + 1;
+      c->cur_iw = 1;
+      c->cur_ih = ih - 2;
+      c->scratch_off = 0;
+      c->scratch_len = 0;
+      gui_push(c, 15);
+    }
+  }
+  c->cur_ix = ix; c->cur_iy = iy; c->cur_iw = iw; c->cur_ih = ih;   // 还原"当前项"矩形（外部读 cur_* 时看到整个控件）
+  return ret;
+}

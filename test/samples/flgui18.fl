@@ -1,0 +1,193 @@
+// flgui18.fl — FLGUI 按钮标题修复（2026-10-20）：**按钮标题 = 控件自己补发的一条 kind 5**（无头契约）
+// 为什么有这个样本：平台层**唯一**的 `TextOutA` 在 `lib\flgui_win32.fl` 的 `k == 5` 分支里；
+//   旧 `gui_button` 只发 `kind 2/3/4`（底色三态）⇒ 按钮标题**永远不上屏**。修法（方案 A）= 按钮在底色之后
+//   补发一条 `kind 5`（文字区 rect），与勾选框/滑块/单选钮/菜单项同一族写法。
+// 本样本**不建窗**：合成输入喂 gui_begin，命令表 dump 成文本走 stdout；双端（真 flint / boot）逐字节对账
+//   与本文件的基线在 `test\flgui-verify.ps1`（本样本同时进 `test\差分门.ps1` 的全量扫描）。
+// 判据（14 位全亮 = 16383 ⇒ exit 42；每位一格，不写成一个总和）：
+//   bit 0  常态帧 = 2 条命令：kind2（底色）＋ kind5（标题）
+//   bit 1  kind5 tlen == 标题字节数（"OK" = 2）
+//   bit 2  kind5 的 text 偏移 == 按钮 put 落的那一段（toff 0）**且** arena 只有 2 字节（textn 2）
+//          ⇒ 证明没有重复 put（gui_push 不消费 scratch_off/len）
+//   bit 3  文字区 rect = (按钮 x + pad, 按钮 y + (btn_h − line_h)/2, gui_text_w, line_h)
+//   bit 4  文字区宽 == gui_text_w（16）且 **小于** 按钮宽（28）—— 不是拿整按钮当文字区
+//   bit 5  悬停帧：kind3 ＋ 恰好 1 条 kind5 ＋ tlen 2
+//   bit 6  按下帧：kind4 ＋ 恰好 1 条 kind5 ＋ tlen 2
+//   bit 7  三态每帧 kind5 恰好 1 条（没有多发/漏发）
+//   bit 8  三态文字区 y 都是"垂直居中一行"
+//   bit 9  三态底色 rect 都还是**整个按钮**（文字区只是临时改，已还原）
+//   bit 10 焦点帧（Tab）：命令序 = kind2, kind5, kind16；kind16 rect = 整个按钮（圈不吃文字区）
+//   bit 11 按钮后的 label 落在下一行（还原矩形没弄坏布局游标）
+//   bit 12 label 帧：kind5 共 2 条（按钮标题 + label 自己），arena = 4 字节
+//   bit 13 焦点帧的 kind5 rect 与常态帧逐字段相同（焦点不改变文字区）
+include "flgui_widgets.fl"
+
+int f18_res = 0;
+int f18_n2 = 0;
+int f18_n3 = 0;
+int f18_n4 = 0;
+int f18_n5 = 0;
+int f18_n16 = 0;
+int f18_bx = 0;
+int f18_by = 0;
+int f18_bw = 0;
+int f18_bh = 0;
+int f18_tx = 0;
+int f18_ty = 0;
+int f18_tw = 0;
+int f18_th = 0;
+int f18_toff = 0;
+int f18_tlen = 0;
+int f18_mx = 0;
+int f18_my = 0;
+int f18_mw = 0;
+int f18_mh = 0;
+int f18_ntx = 0;              // 常态帧的文字区（bit 13 的对照）
+int f18_nty = 0;
+int f18_ntw = 0;
+int f18_nth = 0;
+int f18_states = 0;           // 三态里"kind5 恰好 1 条"的帧数
+int f18_centered = 0;         // 三态里"文字区垂直居中"的帧数
+int f18_fullbtn = 0;          // 三态里"底色 rect = 整个按钮"的帧数
+
+int f18_in(struct GuiInput *in, int mx, int my, int down, int pressed, int released, int key) {
+  in->mx = mx; in->my = my;
+  in->down = down; in->pressed = pressed; in->released = released;
+  in->wheel = 0; in->key = key; in->ms = 0;
+  return 0;
+}
+
+// 扫当前帧命令表：收三态底色 / 第一条 kind5 的文字区 / kind16 圈
+int f18_scan() {
+  int i = 0;
+  f18_n2 = 0; f18_n3 = 0; f18_n4 = 0; f18_n5 = 0; f18_n16 = 0;
+  f18_bx = 0; f18_by = 0; f18_bw = 0; f18_bh = 0;
+  f18_tx = 0; f18_ty = 0; f18_tw = 0; f18_th = 0;
+  f18_toff = 0; f18_tlen = 0;
+  f18_mx = 0; f18_my = 0; f18_mw = 0; f18_mh = 0;
+  while (i < gui_cmd_n) {
+    if (gui_cmd_kind[i] == 2) {
+      f18_n2 = f18_n2 + 1;
+      f18_bx = gui_cmd_x[i]; f18_by = gui_cmd_y[i];
+      f18_bw = gui_cmd_w[i]; f18_bh = gui_cmd_h[i];
+    }
+    if (gui_cmd_kind[i] == 3) {
+      f18_n3 = f18_n3 + 1;
+      f18_bx = gui_cmd_x[i]; f18_by = gui_cmd_y[i];
+      f18_bw = gui_cmd_w[i]; f18_bh = gui_cmd_h[i];
+    }
+    if (gui_cmd_kind[i] == 4) {
+      f18_n4 = f18_n4 + 1;
+      f18_bx = gui_cmd_x[i]; f18_by = gui_cmd_y[i];
+      f18_bw = gui_cmd_w[i]; f18_bh = gui_cmd_h[i];
+    }
+    if (gui_cmd_kind[i] == 5) {
+      f18_n5 = f18_n5 + 1;
+      if (f18_n5 == 1) {
+        f18_tx = gui_cmd_x[i]; f18_ty = gui_cmd_y[i];
+        f18_tw = gui_cmd_w[i]; f18_th = gui_cmd_h[i];
+        f18_toff = gui_cmd_toff[i]; f18_tlen = gui_cmd_tlen[i];
+      }
+    }
+    if (gui_cmd_kind[i] == 16) {
+      f18_n16 = f18_n16 + 1;
+      f18_mx = gui_cmd_x[i]; f18_my = gui_cmd_y[i];
+      f18_mw = gui_cmd_w[i]; f18_mh = gui_cmd_h[i];
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 120;
+
+  // ================= 帧 1：常态（鼠标在外）—— 底色 kind2 ＋ 标题 kind5 =================
+  f18_in(&in, 0, 0, 0, 0, 0, 0);
+  gui_begin(&c, &in);
+  gui_button(&c, "OK");
+  gui_end(&c);
+  print(["F18 tag=normal\n"]);
+  gui_dump(&c);
+  f18_scan();
+  if (gui_cmd_n == 2 && f18_n2 == 1 && f18_n5 == 1 && gui_cmd_kind[0] == 2 && gui_cmd_kind[1] == 5) { f18_res = f18_res | 1; }
+  if (f18_tlen == 2) { f18_res = f18_res | 2; }
+  if (f18_toff == 0 && gui_text_n == 2) { f18_res = f18_res | 4; }
+  if (f18_tx == f18_bx + c.pad && f18_ty == f18_by + (f18_bh - c.line_h) / 2 && f18_tw == gui_text_w("OK") && f18_th == c.line_h) { f18_res = f18_res | 8; }
+  if (f18_tw == gui_text_w("OK") && f18_tw < f18_bw) { f18_res = f18_res | 16; }
+  // bit 13 的对照快照
+  f18_ntx = f18_tx; f18_nty = f18_ty; f18_ntw = f18_tw; f18_nth = f18_th;
+  if (f18_n5 == 1) { f18_states = f18_states + 1; }
+  if (f18_ty == f18_by + (f18_bh - c.line_h) / 2) { f18_centered = f18_centered + 1; }
+  if (f18_bx == c.pad && f18_by == c.pad && f18_bw == gui_text_w("OK") + c.pad * 2 && f18_bh == c.btn_h) { f18_fullbtn = f18_fullbtn + 1; }
+
+  // ================= 帧 2：悬停 —— kind3 ＋ 标题 kind5 =================
+  f18_in(&in, 10, 10, 0, 0, 0, 0);
+  gui_begin(&c, &in);
+  gui_button(&c, "OK");
+  gui_end(&c);
+  print(["F18 tag=hover\n"]);
+  gui_dump(&c);
+  f18_scan();
+  if (f18_n3 == 1 && f18_n5 == 1 && f18_tlen == 2) { f18_res = f18_res | 32; }
+  if (f18_n5 == 1) { f18_states = f18_states + 1; }
+  if (f18_ty == f18_by + (f18_bh - c.line_h) / 2) { f18_centered = f18_centered + 1; }
+  if (f18_bx == c.pad && f18_by == c.pad && f18_bw == gui_text_w("OK") + c.pad * 2 && f18_bh == c.btn_h) { f18_fullbtn = f18_fullbtn + 1; }
+
+  // ================= 帧 3：按下 —— kind4 ＋ 标题 kind5 =================
+  f18_in(&in, 10, 10, 1, 1, 0, 0);
+  gui_begin(&c, &in);
+  gui_button(&c, "OK");
+  gui_end(&c);
+  print(["F18 tag=down\n"]);
+  gui_dump(&c);
+  f18_scan();
+  if (f18_n4 == 1 && f18_n5 == 1 && f18_tlen == 2) { f18_res = f18_res | 64; }
+  if (f18_n5 == 1) { f18_states = f18_states + 1; }
+  if (f18_ty == f18_by + (f18_bh - c.line_h) / 2) { f18_centered = f18_centered + 1; }
+  if (f18_bx == c.pad && f18_by == c.pad && f18_bw == gui_text_w("OK") + c.pad * 2 && f18_bh == c.btn_h) { f18_fullbtn = f18_fullbtn + 1; }
+
+  if (f18_states == 3) { f18_res = f18_res | 128; }
+  if (f18_centered == 3) { f18_res = f18_res | 256; }
+  if (f18_fullbtn == 3) { f18_res = f18_res | 512; }
+
+  // ================= 帧 4：Tab 聚焦 —— 次序必须是 底色 → 标题 → 焦点圈 =================
+  // released=1 先把第 3 帧的 active 令牌交回（否则这一帧仍是 kind4）；鼠标移到按钮外 ⇒ 不点击。
+  f18_in(&in, 0, 0, 0, 0, 1, 9);
+  gui_begin(&c, &in);
+  gui_button(&c, "OK");
+  gui_end(&c);
+  print(["F18 tag=focus\n"]);
+  gui_dump(&c);
+  f18_scan();
+  if (gui_cmd_n == 3 && gui_cmd_kind[0] == 2 && gui_cmd_kind[1] == 5 && gui_cmd_kind[2] == 16 && f18_n16 == 1) {
+    if (f18_mx == f18_bx && f18_my == f18_by && f18_mw == f18_bw && f18_mh == f18_bh) { f18_res = f18_res | 1024; }
+  }
+  if (f18_tx == f18_ntx && f18_ty == f18_nty && f18_tw == f18_ntw && f18_th == f18_nth) { f18_res = f18_res | 8192; }
+
+  // ================= 帧 5：按钮后接 label —— 布局游标照常前进（还原 rect 不动布局）=================
+  // 全新 ctx：第 4 帧的焦点还在（焦点跨帧存活），不清掉的话这一帧会多一条 kind16，把 label 挤到下标 3。
+  gui_init(&c);
+  c.lay_w = 200;
+  c.lay_h = 120;
+  f18_in(&in, 0, 0, 0, 0, 0, 0);
+  gui_begin(&c, &in);
+  gui_button(&c, "OK");
+  gui_label(&c, "AB");
+  gui_end(&c);
+  print(["F18 tag=label\n"]);
+  gui_dump(&c);
+  f18_scan();
+  // label 在下一行：y = 按钮 y + btn_h + spacing；x 回列首 = pad
+  if (gui_cmd_kind[2] == 5 && gui_cmd_y[2] == f18_by + f18_bh + c.spacing && gui_cmd_x[2] == c.pad) { f18_res = f18_res | 2048; }
+  if (f18_n5 == 2 && gui_text_n == 4) { f18_res = f18_res | 4096; }
+
+  print(["F18 res=", f18_res, " want=16383\n"]);
+  if (f18_res == 16383) { return 42; }
+  return f18_res;
+}

@@ -1,6 +1,6 @@
 ﻿# 差分门基线（真 flint vs boot）—— 由 差分门.ps1 -WriteBaseline 生成
 # 格式：样本名 <TAB> 判定 <TAB> 说明；判定取值 OK / DIFF / BOOT_FAIL / FLINT_FAIL / HANG / SKIP
-# 生成时间：2026-09-28 22:57 ｜ 样本数 236
+# 生成时间：2026-09-28 22:57 ｜ 样本数 237
 # 纪律：新增分岔（OK → DIFF/HANG）= 红；已列在此的 = 已知（boot 缺口，随开发逐条收敛）
 align_probe	OK	exit=
 align2_probe	OK	exit=
@@ -99,6 +99,7 @@ flgui14	OK	exit=
 flgui15	OK	exit=
 flgui16	OK	exit=
 flgui17	OK	exit=
+flgui18	OK	exit=42
 flgui2	OK	exit=
 flgui3	OK	exit=
 flgui4	OK	exit=
