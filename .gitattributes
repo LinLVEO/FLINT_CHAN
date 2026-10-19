@@ -1,9 +1,9 @@
 # .gitattributes -- 只影响"导出/打包"（git archive、GitHub 的源码压缩包），不影响仓库内容与日常提交。
 #
 # 为什么有它：本仓库里同时住着两类东西 ——
-#   ① 对外的：README / docs / SPEC / 编译器与库源码 / 门与探针 / 真实项目 / 缺口台账
-#   ② 内部的：给"已经知道上下文的人"看的过程记录（工单、待拍板、调研、开工简报、进度归档、方向备忘）
-# ② 留在仓库里对我们有用（交接、追溯），但会让外人第一眼看到的全是噪声。
+#   ① 对外的：README / 重写过的技术文档（docs/ 新文件）/ 编译器与库源码 / 门与探针 / 示例 / 真实项目
+#   ② 内部的：过程记录、设计权威、台账、验收单、规格说明（2026-10-19 所有者改口径：这些一律不发）
+# ② 留在仓库里对我们有用（交接、追溯），但不该占外人的第一屏。
 # 所以：**仓库照旧保留，导出给外人的包里去掉**。需要看过程记录的人，clone 仓库即可。
 #
 # 想改口径：删掉对应行 = 那一类重新进导出包。
@@ -34,3 +34,30 @@ PROGRESS-归档.md         export-ignore
 tmp/                     export-ignore
 test/tmp/                export-ignore
 tools/同步开源版.ps1     export-ignore
+
+# ---- 导出包只放源代码：构建产物与二进制驱动不进（2026-10-19） ----
+*.exe                          export-ignore
+driver/                        export-ignore
+
+# ---- 2026-10-19 所有者口径：公开仓库只放**源代码 ＋ 重写过的技术文档** ----
+#   过程记录 / 设计权威 / 台账 / 验收单 / 规格说明 / 旧文档树 一律不导出（仓库里照旧保留，只有导出包不要）。
+PROGRESS.md                    export-ignore
+SPEC.md                        export-ignore
+FLINT明细.md                   export-ignore
+人类试写-第一轮.md             export-ignore
+可用性路线图-*.md              export-ignore
+开源前-*.md                    export-ignore
+发布/                          export-ignore
+docs/协作协议.md               export-ignore
+docs/数字台账.md               export-ignore
+docs/索引.md                   export-ignore
+docs/设计决策.md               export-ignore
+docs/语言边界.md               export-ignore
+docs/快速上手-真实项目.md      export-ignore
+docs/真实项目.md               export-ignore
+docs/图片/                     export-ignore
+apps/*/验收.md                 export-ignore
+apps/m2_float/浮窗规格-对C#逐细节.md  export-ignore
+libcs/hwbridge/部署说明.md     export-ignore
+test/boot缺口归因.md           export-ignore
+lib/FLGUI.md                   export-ignore

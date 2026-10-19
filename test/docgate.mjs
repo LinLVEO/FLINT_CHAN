@@ -106,6 +106,8 @@ const OUTWARD = [
   '方向-对外一席之地（2026-10-13 用户口径变更）.md', 'lib/FLGUI.md',
   'docs/协作协议.md', 'docs/快速上手-真实项目.md', 'docs/真实项目.md', 'docs/索引.md',
   'docs/设计决策.md', 'docs/语言边界.md',
+  // 2026-10-19 重写的对外技术文档（公开仓库只发这批 ＋ 根 README）
+  'docs/README.md', 'docs/快速上手.md', 'docs/语言参考.md', 'docs/标准库.md', 'docs/FLGUI.md',
 ];
 const SNAP_PATTERNS = [
   /^工单-/, /^待拍板-/, /^开工简报/, /^调研/, /^帧节拍-/, /^任务-/, /^人类试写-/,
