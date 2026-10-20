@@ -1,0 +1,49 @@
+// f046_cast_dbl_from_int_i64.fl -- v1.8.0 C-style cast: `(double)x` where x is int / char / int_64.
+//
+// WHY THIS PROBE EXISTS: int -> double must use cvtsi2sd (32-bit form for int/char, 64-bit
+// REX.W form for int_64). A wrong implementation that reuses the 32-bit instruction for int_64
+// would convert the LOW HALF ONLY: 4294967296.0 would become 0.0 -- a silent wrong value.
+// The judge here is a ROUND TRIP: `(int_64)(double)x == r` where r is what IEEE-754
+// round-to-nearest-even produces for x. That needs no double literals (FLINT's printer refuses
+// |v| >= 2^31) and still catches both wrong-width and truncating converts:
+//   9007199254740993 (2^53+1, exactly representable as int_64) MUST round to ...992.
+//   INT64_MAX rounds to 2^63 as a double, which no longer fits int_64 -> 0x8000000000000000.
+// The last check `(double)7 * 0.5 == 3.5` proves the result really is a double (SSE path).
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\cast-exp.js        (section "== f046"; d2i64(Number(v)) = round-trip expectation)
+//   -> 7 -> 7 ｜ -5 -> -5 ｜ char 200 -> 200 ｜ 1234567890123 -> 1234567890123 ｜
+//      4294967296 -> 4294967296 ｜ -1 -> -1 ｜ 9007199254740993 -> 9007199254740992 ｜
+//      INT64_MAX -> -9223372036854775808 ｜ (double)7 * 0.5 -> 3.5
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 511 (all nine bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  int i0 = 7;
+  int i1 = 0 - 5;
+  char c0 = 200;
+  int_64 q0 = 1234567890123;
+  int_64 q1 = 4294967296;
+  int_64 q2 = 0 - 1;
+  int_64 q3 = 9007199254740993;
+  int_64 q4 = 9223372036854775807;
+
+  int m = 0;
+  if ((int_64)(double)i0 == 7) { m = m + 1; }
+  if ((int_64)(double)i1 == 0 - 5) { m = m + 2; }
+  if ((int_64)(double)c0 == 200) { m = m + 4; }
+  if ((int_64)(double)q0 == 1234567890123) { m = m + 8; }
+  if ((int_64)(double)q1 == 4294967296) { m = m + 16; }
+  if ((int_64)(double)q2 == 0 - 1) { m = m + 32; }
+  if ((int_64)(double)q3 == 9007199254740992) { m = m + 64; }
+  if ((int_64)(double)q4 == 0 - 9223372036854775807 - 1) { m = m + 128; }
+  if ((double)7 * 0.5 == 3.5) { m = m + 256; }
+
+  print(["(int_64)(double)7=", (int_64)(double)i0, " (int_64)(double)-5=", (int_64)(double)i1, "\n"]);
+  print(["(int_64)(double)2^32=", (int_64)(double)q1, "\n"]);
+  print(["(int_64)(double)(2^53+1)=", (int_64)(double)q3, "\n"]);
+  print(["(int_64)(double)INT64_MAX=", (int_64)(double)q4, "\n"]);
+  print(["mask=", m, " expect=511\n"]);
+  if (m == 511) { return 42; }
+  return 7;
+}

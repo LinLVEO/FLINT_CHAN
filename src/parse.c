@@ -259,6 +259,8 @@ bool expr_is_dbl(Node *n) {
     case ND_CALL: return n->ty == TY_DOUBLE;
     case ND_DEREF: return n->ty == TY_DOUBLE;            // *p（p 指向 double）
     case ND_ASSIGN: return expr_is_dbl(n->rhs) || n->ty == TY_DOUBLE;
+    // v1.8.0 C 风格转型：(double)x 的结果就是 double（结果类型 = 括号里的类型，唯一来源 node->ty）
+    case ND_CAST: return n->ty == TY_DOUBLE;
     // v1.3.1：三元的结果类型在 parse 就定死了（两支都 double / 一支 double 提升另一支）——
     //   codegen 直接读 ty，不去重推两分支（避免"两边判据不一致"的浮点旧坑重演）
     case ND_TERN: return n->ty == TY_DOUBLE;
@@ -284,6 +286,8 @@ bool expr_is_i64(Node *n) {
     case ND_CALL: return n->ty == TY_INT64;        // 调用节点的 ty 由被调函数 ret_ty 决定
     case ND_DEREF: return n->ty == TY_INT64;       // *p / 数组元素 / 结构体字段
     case ND_ASSIGN: return expr_is_i64(n->rhs) || n->ty == TY_INT64;
+    // v1.8.0 C 风格转型：(int_64)x 的结果就是 int_64
+    case ND_CAST: return n->ty == TY_INT64;
     case ND_TERN: return n->ty == TY_INT64;
     // v1.7.0 P1：++/-- 的值类型 = 操作数类型（前缀=新值、后缀=旧值，两者都是完整 64 位）。
     //   ⚠️ 不补这一档 = `int_64 y = x++;` 会被 asgn_rhs 包成 ND_I2L（movsxd rax,eax），
@@ -1353,6 +1357,11 @@ static void tern_addr_info(Node *n, TernAddr *out) {
       if (n->ty == TY_PTR) { out->is_addr = true; out->elem = n->elem_ty; out->sidx = n->struct_idx; }
       return;
     case ND_NEW: out->is_addr = true; out->elem = TY_INT; return;
+    // v1.8.0 C 风格转型：(T*)p 是地址值，指向类型来自节点（与 ND_VAR 的 TY_PTR 同口径：
+    //   指向类型在 elem_ty —— 不是 ty）。
+    case ND_CAST:
+      if (n->ty == TY_PTR) { out->is_addr = true; out->elem = n->elem_ty; out->sidx = n->struct_idx; }
+      return;
     case ND_ASSIGN: tern_addr_info(n->rhs, out); return;   // 赋值表达式的值 = 被赋的值
     case ND_PRE_INC: case ND_PRE_DEC: case ND_POST_INC: case ND_POST_DEC:
       tern_addr_info(n->lhs, out); return;
@@ -1763,13 +1772,114 @@ static int ptr_elem_ty(Node *n) {
       return n->rhs ? ptr_elem_ty(n->rhs) : TY_INT;
     }
     case ND_STR: return TY_CHAR;      // 字符串字面量值 = char*
+    // v1.8.0 C 风格转型：(T*)p 的指向类型就是括号里那个 T（只换类型、不产码）
+    case ND_CAST: return n->ty == TY_PTR ? n->elem_ty : TY_INT;
     default: return TY_INT;
   }
+}
+
+// ===== v1.8.0：C 风格转型 `(type)expr` =====
+// 文法位置 = **一元转换**（C 的标准位置）：`(int)x * 2` ⇒ `((int)x) * 2`，`(int)(x * 2)` 照括号。
+//   操作数取 unary 一层 ⇒ 前缀运算符与转型可互相嵌套：(int)-x / -(int)x 都行；
+//   postfix 比转型紧 ⇒ `(int)x[0]` = `(int)(x[0])`（与 C 一致）。
+// ⚠️ 已知偏差（FLINT 独有的幂 `^^`）：pow_expr 挂在 unary 尾部 ⇒ `(int)x^^2` 解析成 `(int)(x^^2)`。
+//   C 没有 ^^，这条只影响"先转型还是先求幂"的 64 位边界；已写进 SPEC 与 docs\语言参考.md。
+//
+// 判定 `(type)` 只看 `(` 后紧跟的**类型关键字**：int / int_32（is_ident 的别名）/ int_64 / char / double。
+//   void / struct / ptr 也认出来（否则会掉进普通括号表达式、报"意外的关键字"这种看不懂的错），
+//   但立刻硬错 —— v1 不支持（边界见 SPEC「C 风格转型」节）。
+// 语义（v1 口径，逐条与 SPEC/docs 一致）：
+//   (int)←int/int_32/char 恒等 ｜ (int)←int_64 取低 32 位 ｜ (int)←double cvttsd2si（截断向零，越界=0x80000000）
+//   (int_64)←int/char 符号扩展 ｜ (int_64)←int_64 恒等 ｜ (int_64)←double cvttsd2si 64 位
+//   (char)←int/int_64 取低 8 位（movzx，0..255） ｜ (double)←int/char cvtsi2sd 32 位 ｜ (double)←int_64 cvtsi2sd 64 位
+//   (T*)p ← 任意地址值：**只换类型、不产码** ｜ int↔指针 / struct / void / 数组转型：编译期硬错
+static bool tok_is_cast_type(Token *t) {
+  if (!t || t->kind != TK_IDENT) return false;
+  return is_ident(t, "int") || is_ident(t, "int_64") || is_ident(t, "char")
+      || is_ident(t, "double") || is_ident(t, "void") || is_ident(t, "struct")
+      || is_ident(t, "ptr");
+}
+// 前视 `(` + 类型关键字 ⇒ 这是一条转型。普通括号表达式 `(x)` 的 x 不可能是类型关键字
+//   （int/char/double/int_64/void/struct/ptr 都是保留字，禁止当变量名）⇒ 不会误判。
+static bool is_cast_start(Parser *p) {
+  return is_punct(p->tok, '(') && tok_is_cast_type(p->tok->next);
+}
+static char *cast_type_name(int ty) {
+  return ty == TY_INT ? "int" : ty == TY_INT64 ? "int_64" : ty == TY_CHAR ? "char"
+       : ty == TY_DOUBLE ? "double" : "指针";
+}
+static Node *cast_expr(Parser *p) {
+  Token *lp = p->tok;                 // '('
+  p->tok = p->tok->next;
+  Token *tt = p->tok;                 // 类型关键字
+  int ty = TY_INT;
+  int elem = TY_INT;                  // (T*) 的指向类型
+  bool is_ptr = false;
+  if (is_ident(tt, "int")) ty = TY_INT;                 // 含 int_32 别名
+  else if (is_ident(tt, "int_64")) ty = TY_INT64;
+  else if (is_ident(tt, "char")) ty = TY_CHAR;
+  else if (is_ident(tt, "double")) ty = TY_DOUBLE;
+  else if (is_ident(tt, "void"))
+    error_at(tt->loc, "不支持 (void) 转型：FLINT 没有 void 值（要丢弃结果就写成表达式语句）");
+  else if (is_ident(tt, "struct"))
+    error_at(tt->loc, "不支持 struct 转型：struct 没有整体值语义 —— 要换类型请声明一个 struct 指针变量"
+                      "（v1.8.0 边界，见 SPEC）");
+  else
+    error_at(tt->loc, "不支持 (ptr) 转型：ptr 只是 api 返回类型的关键字，"
+                      "指针类型请写 int* / char* / double* / int_64*");
+  p->tok = p->tok->next;
+  if (consume(p, '*')) {              // (T*)p
+    is_ptr = true;
+    elem = ty;
+    ty = TY_PTR;
+  }
+  if (is_punct(p->tok, '['))
+    error_at(p->tok->loc, "不支持数组转型：数组没有整体值语义 —— 要字节视图请用 char*");
+  if (!is_punct(p->tok, ')'))
+    error_at(p->tok->loc, "转型写法是 (类型)表达式 —— 期望 ')'"
+                          "（类型可写 int / int_32 / int_64 / char / double，或它们加 * 的指针类型）");
+  p->tok = p->tok->next;
+  Node *operand = unary(p);
+  if (!operand) error_at(lp->loc, "内部错误：转型缺少操作数");
+  // 函数指针：代码地址带签名，转成数据指针就把签名丢了（v1 边界，别静默退化）
+  if (operand->ty == TY_FUNCPTR || operand->kind == ND_FUNC_ADDR)
+    error_at(lp->loc, "函数指针不能转型（代码地址带签名，转成数据指针会丢签名）——"
+                      "要调用就写 int (*fp)(...)，要地址就写 &函数名");
+  bool from_addr = parse_is_addr_value(operand);
+  bool from_dbl = expr_is_dbl(operand);
+  if (is_ptr) {
+    // (T*)p：源必须是**地址值**。整数 → 指针是 T1 边界的反向（地址值不能装进 int 的对偶）
+    if (!from_addr)
+      error_at(lp->loc, "指针转型的源必须是地址值（指针 / 数组名 / &x / 字符串 / new）——"
+                        "整数不能转指针（T1 边界：地址值与 int 不能互相装；空指针请写 int *p = 0;）");
+    Node *c = new_node(ND_CAST, operand, NULL);
+    c->ty = TY_PTR;
+    c->elem_ty = elem;
+    c->struct_idx = -1;
+    c->loc = lp->loc;
+    return c;
+  }
+  // 数值转型 ← 地址值：int 只有 4 字节 ⇒ 高 32 位必丢（T1 红线，沿用既有判据与文案关键词）
+  if (from_addr)
+    error_at(lp->loc, "地址值（64 位）不能转成 %s —— 转型不提供「地址 ↔ 整数」通道"
+                      "（T1 边界：地址值不能装进 int，反向同理）。要地址请用指针变量承接，"
+                      "要数值请从字段/字节取出",
+             cast_type_name(ty));
+  // (char)double：v1 只给了 (int)/(int_64) 的 double 截断，两步请写清（别让编译器替你猜越界口径）
+  if (ty == TY_CHAR && from_dbl)
+    error_at(lp->loc, "不支持 (char)double：v1 的 double 截断只有 (int) / (int_64)"
+                      "（越界 = 0x80000000，同 C）。请写 (char)(int)值，把两步写清");
+  Node *c = new_node(ND_CAST, operand, NULL);
+  c->ty = ty;
+  c->loc = lp->loc;
+  return c;
 }
 
 // v0.7：&x 取址（ND_ADDR，仅变量/数组名）；*p 解引用（ND_DEREF，可作左值）
 // v0.7.2：~x 按位取反（ND_BITNOT）
 static Node *unary(Parser *p) {
+  // v1.8.0：C 风格转型在**一元转换**这一档（`(int)x * 2` = ((int)x)*2；`(int)(x * 2)` 照括号）
+  if (is_cast_start(p)) return cast_expr(p);
   if (consume(p, '+')) return unary(p);
   if (consume(p, '-')) {
     // v1.1.0：一元负号**不在解析期提升**——把 `-10` 硬提升成 double 会让 `-10 % 3` / `-10 & 3`
@@ -2577,6 +2687,14 @@ static int seg_print_kind(Parser *p, Token *s0, Node *n) {
     error_at(s0->loc, "new 地址不能直接打印（先由 own/share 接管或存变量）");
   case ND_ADDR:
     error_at(s0->loc, "地址值（&x）暂不支持直接打印（64 位，起步边界）");
+  case ND_CAST:
+    // v1.8.0：转型结果按**括号里的类型**分派（double / int_64 档已被上面的共用判据接走）
+    if (n->ty == TY_PTR) {
+      if (n->elem_ty == TY_CHAR) return 0;   // (char*)p = 字符串
+      error_at(s0->loc, "指针转型结果暂不支持直接打印（仅 char* 串可用）");
+    }
+    if (n->ty == TY_CHAR) return 1;          // (char)x → 字符
+    return 2;                                // (int)x → 数字
   default:
     return 2;   // 算术/位/比较/逻辑/赋值/自增自减 = int 值语义
   }

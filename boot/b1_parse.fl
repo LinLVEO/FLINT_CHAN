@@ -170,6 +170,16 @@ int ev(struct Ast *a, struct Parse *p, int idx, struct Vars *vs) {
     if (fn_retptr(p->fpty[fi]) == 4) { res = res % 256; if (res < 0) { res = res + 256; } }
     return res;
   }
+  // v1.8.0：C 风格转型（节点 70 —— 本解释器是 boot 的**自测跑腿**，不是编译器本体；
+  //   但既然 lib_parse 能产出节点 70，这里不认就会把它当二元比较静默算成 0/1。
+  //   val 编码：0=(int) 恒等 ｜ 3=(char) 模 256 ｜ 1=(int*) 2=(char*) 只换类型（值不变）。
+  //   ⚠️ 节点号必须 ≥70：68/69 已是 break/continue（lib_parse 的语句节点）。
+  //   ⚠️ 必须在下面两条 `ev(ll/rr)` **之前**判：转型只有一个操作数（rr 恒为 0）。
+  if (k == 70) {
+    int cv = ev(a, p, ll[idx], vs);
+    if (vv[idx] == 3) { cv = cv % 256; if (cv < 0) { cv = cv + 256; } }
+    return cv;
+  }
   int lv = ev(a, p, ll[idx], vs);
   int rv = ev(a, p, rr[idx], vs);
   if (k == 1) return lv + rv;

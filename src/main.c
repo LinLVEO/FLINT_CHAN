@@ -80,27 +80,28 @@ static char *default_out(char *src_path) {
 }
 
 static void usage(void) {
+  fprintf(stderr, "FLINT %s\n", FLINT_VERSION);
   fprintf(stderr, "用法: flint [-t] [-safe] [-o 输出.exe] <源文件> [源文件...]\n");
   fprintf(stderr, "  -t         只做词法分析，打印 token 流\n");
-  fprintf(stderr, "  -safe      安全模式（v0.9）：内存所有权强制——new 结果必须由 own/share 接管\n");
+  fprintf(stderr, "  -safe      安全模式：内存所有权强制——new 结果必须由 own/share 接管\n");
   fprintf(stderr, "  -o <路径>  指定输出 exe 路径\n");
-  fprintf(stderr, "  -admin     产物内嵌 manifest（requireAdministrator）：双击即请求管理员权限（v1.4.6，用于读 MSR 这类要提权的程序）\n");
-  fprintf(stderr, "  -gui       产物为 GUI 子系统（Subsystem=2，v1.4.28）：双击不弹控制台黑窗（门面验收第 1 条）；默认 3=CONSOLE\n");
+  fprintf(stderr, "  -admin     产物内嵌 manifest（requireAdministrator）：双击即请求管理员权限（用于读 MSR 这类要提权的程序）\n");
+  fprintf(stderr, "  -gui       产物为 GUI 子系统（Subsystem=2）：双击不弹控制台黑窗；默认 3=CONSOLE\n");
   fprintf(stderr, "  -stats     打印按函数的发射统计（账本：指令数/栈槽访问/调用；不改产物）\n");
-  fprintf(stderr, "  -strict    严格诊断档（v1.4.25）：把五类「静默」当编译错误拦下——\n");
+  fprintf(stderr, "  -strict    严格诊断档：把五类「静默」当编译错误拦下——\n");
   fprintf(stderr, "             ① int 值传给 int* 形参（E-T1-INTTOPTR）\n");
   fprintf(stderr, "             ② 读一个从没赋过值的局部量（E-STRICT-UNINIT）\n");
   fprintf(stderr, "             ③ 地址值(64位)经 int 形参/int 返回值被截断（E-STRICT-WIDTH）\n");
   fprintf(stderr, "             ④ 常量下标越界（E-STRICT-BOUNDS）\n");
   fprintf(stderr, "             ⑤ 裸指针 '+/-' 整数用在非 1 字节元素指针上（元素宽 >1 时按字节步进"
-                 "是静默错值，E-STRICT-PTRSTEP，v1.6.4）\n");
+                 "是静默错值，E-STRICT-PTRSTEP）\n");
   fprintf(stderr, "             默认关：不加这个开关，产物与从前逐字节相同。\n");
-  fprintf(stderr, "  -debug     产物携带「源码行 → 机器码地址」对照（v1.4.11）：\n");
+  fprintf(stderr, "  -debug     产物携带「源码行 → 机器码地址」对照：\n");
   fprintf(stderr, "             ① 标准腿 = 三个 DWARF5 节（.debug_line + 最小 CU 的 .debug_info/.debug_abbrev）\n");
   fprintf(stderr, "                → objdump --dwarf=decodedline / addr2line / gdb 直接能读；\n");
   fprintf(stderr, "             ② 私有腿 = 同源的 <输出>.tsv（补标准不提供的「字节区间 / 文件偏移 / 所属节」）。\n");
   fprintf(stderr, "             默认关：不加节，产物与现在逐字节相同。\n");
-  fprintf(stderr, "  多文件     多个 .fl 合并编译（v1.0.3）；源文件可用 include \"路径.fl\" 拼接（相对本文件目录）\n");
+  fprintf(stderr, "  多文件     多个 .fl 合并编译；源文件可用 include \"路径.fl\" 拼接（相对本文件目录）\n");
 }
 
 // ========== v1.0.3 多文件 / include 工具 ==========

@@ -1,0 +1,46 @@
+// f042_cast_int_from_i64.fl -- v1.8.0 C-style cast: `(int)x` where x is int_64.
+//
+// WHY THIS PROBE EXISTS: the cast table has one row for "int_64 -> int = low 32 bits".
+// The legacy spelling is to_int32(x); the C-style cast must produce the SAME value on every
+// input, including negatives and values whose low half has the sign bit set. A natural wrong
+// implementation is `movzx`/zero-extension (4294967295 would become 4294967295 instead of -1)
+// or a saturating convert; both are caught here because the expected values are signed.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\cast-exp.js        (section "== f042"; JS BigInt.asIntN(32, v) == mov eax,eax)
+//   -> 4294967296 -> 0 ｜ 8589934597 -> 5 ｜ -1 -> -1 ｜ 4294967295 -> -1 ｜
+//      INT64_MAX -> -1 ｜ INT64_MIN -> 0 ｜ 1234567890123 -> 1912276171 ｜
+//      -4294967297 -> -1 ｜ 2147483648 -> -2147483648 ｜ 4294967294 -> -2
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 1023 (all ten bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  int_64 v0 = 4294967296;
+  int_64 v1 = 8589934597;
+  int_64 v2 = 0 - 1;
+  int_64 v3 = 4294967295;
+  int_64 v4 = 9223372036854775807;
+  int_64 v5 = 0 - 9223372036854775807 - 1;
+  int_64 v6 = 1234567890123;
+  int_64 v7 = 0 - 4294967297;
+  int_64 v8 = 2147483648;
+  int_64 v9 = 4294967294;
+
+  int m = 0;
+  if ((int)v0 == 0) { m = m + 1; }
+  if ((int)v1 == 5) { m = m + 2; }
+  if ((int)v2 == 0 - 1) { m = m + 4; }
+  if ((int)v3 == 0 - 1) { m = m + 8; }
+  if ((int)v4 == 0 - 1) { m = m + 16; }
+  if ((int)v5 == 0) { m = m + 32; }
+  if ((int)v6 == 1912276171) { m = m + 64; }
+  if ((int)v7 == 0 - 1) { m = m + 128; }
+  if ((int)v8 == 0 - 2147483648) { m = m + 256; }
+  if ((int)v9 == 0 - 2) { m = m + 512; }
+
+  print(["(int)v0=", (int)v0, " (int)v1=", (int)v1, " (int)v2=", (int)v2, "\n"]);
+  print(["(int)v6=", (int)v6, " (int)v8=", (int)v8, " (int)v9=", (int)v9, "\n"]);
+  print(["mask=", m, " expect=1023\n"]);
+  if (m == 1023) { return 42; }
+  return 7;
+}

@@ -1,0 +1,68 @@
+// cast1.fl -- v1.8.0 C-style casts `(type)expr`, the part BOTH compilers share.
+//
+// SCOPE / WHY IT IS WRITTEN THIS WAY:
+//   boot\b1_emit.exe has no double and no int_64 type at all (8 dbl* samples are recorded
+//   BOOT_FAIL in test\差分门-baseline.txt). So this sample is the **common type universe**
+//   subset: (int) / (char) / (int*) / (char*) only. The (double)/(int_64) rows of the cast
+//   table are covered by the flint-only probes test\facts\f042..f046 and by the boundary
+//   probe test\边界探针.ps1 -- never by this file.
+//
+// EXPECTED VALUES (one bit per check; all 11 bits set -> mask 2047 -> exit 42):
+//   (char)300 = 300 mod 256 = 44          -- C: low 8 bits
+//   (int)char 200 = 200                   -- char is unsigned 0..255 in FLINT
+//   (char)(-1) = 255                      -- low 8 bits of 0xFFFFFFFF
+//   (int)42 = 42                          -- identity
+//   (int)3 * 2 + 1 = 7                    -- cast binds tighter than '*'
+//   (int)(1 + 2) * 3 = 9                  -- parentheses win
+//   ((int*)arr)[0] via p = 7, ((char*)p)[0] = 7, ((char*)p)[4] = 9   -- pointer cast = retype only
+//   (char*)"AB"[0] = 65                   -- string literal is char* already; cast is a no-op
+//   cast inside a call argument and in a return position
+//
+// ASCII only, no BOM. No includes needed (print is injected by the compiler).
+int add1(int x) { return x + 1; }
+
+int pick(char *s) { return s[1]; }
+
+int main() {
+  int big = 300;
+  int ch = (char)big;
+  char c = 200;
+  int z = (int)c;
+  int neg = (char)(0 - 1);
+  int ident = (int)42;
+
+  int arr[2];
+  arr[0] = 7;
+  arr[1] = 9;
+  int *p = (int*)arr;
+  char *q = (char*)p;
+  int back = *p;
+  int c0 = q[0];
+  int c4 = q[4];
+  char *s = (char*)"AB";
+  int s1 = pick((char*)"AB");
+
+  int prec = (int)3 * 2 + 1;
+  int paren = (int)(1 + 2) * 3;
+  int arg = add1((int)41);
+
+  int mask = 0;
+  if (ch == 44) { mask = mask + 1; }
+  if (z == 200) { mask = mask + 2; }
+  if (neg == 255) { mask = mask + 4; }
+  if (ident == 42) { mask = mask + 8; }
+  if (prec == 7) { mask = mask + 16; }
+  if (paren == 9) { mask = mask + 32; }
+  if (back == 7) { mask = mask + 64; }
+  if (c0 == 7) { mask = mask + 128; }
+  if (c4 == 9) { mask = mask + 256; }
+  if (s1 == 66) { mask = mask + 512; }
+  if (s[0] == 65) { mask = mask + 1024; }
+
+  print(["ch=", ch, " z=", z, " neg=", neg, " ident=", ident, "\n"]);
+  print(["back=", back, " c0=", c0, " c4=", c4, " s1=", s1, "\n"]);
+  print(["prec=", prec, " paren=", paren, " arg=", arg, "\n"]);
+  print(["mask=", mask, " expect=2047\n"]);
+  if (mask == 2047) { return 42; }
+  return 7;
+}

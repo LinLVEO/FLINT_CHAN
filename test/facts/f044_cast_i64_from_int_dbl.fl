@@ -1,0 +1,57 @@
+// f044_cast_i64_from_int_dbl.fl -- v1.8.0 C-style cast: `(int_64)x` where x is int / char / double.
+//
+// WHY THIS PROBE EXISTS: this row is the one the language previously refused outright
+// ("v1.7.0 P0/P1: int_64 and double do not convert"), so it has no legacy spelling to lean on.
+// Two things must hold: (a) int/char -> int_64 SIGN-extends (a 32-bit read that forgets
+// `movsxd` would turn -5 into 4294967291); (b) double -> int_64 uses the 64-bit cvttsd2si
+// (truncation, out-of-range -> 0x8000000000000000), which is a DIFFERENT instruction from the
+// 32-bit form -- using the 32-bit one would silently clamp at 2^31.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\cast-exp.js        (section "== f044"; asI64 for int/char, d2i64 for double)
+//   -> int -5 -> -5 ｜ int 2147483647 -> 2147483647 ｜ char 200 -> 200 ｜
+//      3.9 -> 3 ｜ -3.9 -> -3 ｜ 1234567890123.0 -> 1234567890123 ｜
+//      2^64 -> -9223372036854775808 ｜ 2^62 -> 4611686018427387904 ｜
+//      -2^64 -> -9223372036854775808
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 511 (all nine bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  int i0 = 0 - 5;
+  int i1 = 2147483647;
+  char c0 = 200;
+  double d0 = 3.9;
+  double d1 = 0.0 - 3.9;
+  double d2 = 1234567890123.0;
+  double d3 = 4294967296.0 * 4294967296.0;
+  double d4 = 4294967296.0 * 1073741824.0;
+  double d5 = 0.0 - 4294967296.0 * 4294967296.0;
+
+  int_64 w0 = (int_64)i0;
+  int_64 w1 = (int_64)i1;
+  int_64 w2 = (int_64)c0;
+  int_64 w3 = (int_64)d0;
+  int_64 w4 = (int_64)d1;
+  int_64 w5 = (int_64)d2;
+  int_64 w6 = (int_64)d3;
+  int_64 w7 = (int_64)d4;
+  int_64 w8 = (int_64)d5;
+
+  int m = 0;
+  if (w0 == 0 - 5) { m = m + 1; }
+  if (w1 == 2147483647) { m = m + 2; }
+  if (w2 == 200) { m = m + 4; }
+  if (w3 == 3) { m = m + 8; }
+  if (w4 == 0 - 3) { m = m + 16; }
+  if (w5 == 1234567890123) { m = m + 32; }
+  if (w6 == 0 - 9223372036854775807 - 1) { m = m + 64; }
+  if (w7 == 4611686018427387904) { m = m + 128; }
+  if (w8 == 0 - 9223372036854775807 - 1) { m = m + 256; }
+
+  print(["(int_64)-5=", w0, " (int_64)char200=", w2, "\n"]);
+  print(["(int_64)3.9=", w3, " (int_64)1.23e12=", w5, "\n"]);
+  print(["(int_64)2^62=", w7, " (int_64)+-2^64=", w6, "/", w8, "\n"]);
+  print(["mask=", m, " expect=511\n"]);
+  if (m == 511) { return 42; }
+  return 7;
+}

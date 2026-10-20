@@ -56,6 +56,7 @@ char6	OK	exit=
 char7	OK	exit=
 char8	OK	exit=
 char9	OK	exit=
+cast1	OK	exit=42
 chrlib1	OK	exit=
 comp1	OK	exit=
 comp2	OK	exit=

@@ -1,0 +1,48 @@
+// f045_cast_char.fl -- v1.8.0 C-style cast: `(char)x` where x is int / int_64 / char.
+//
+// WHY THIS PROBE EXISTS: FLINT's char is an UNSIGNED byte (0..255). `(char)x` must therefore be
+// a modulo-256 truncation into 0..255, not a sign-extension of the low byte and not a clamp.
+// The negative inputs are the discriminating cases: -1 must be 255 and -300 must be 212
+// (a signed-byte implementation would give -1 and 44... i.e. a different value class entirely).
+// int_64 inputs prove the truncation is done on the low 8 bits of the FULL 64-bit value
+// (2^32+65 must be 65, not the low byte of the low 32 bits of some 32-bit read -- those agree
+// here, so 2^32+65 also pins that the cast does not touch the upper half first).
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\cast-exp.js        (section "== f045"; charOf = ((v % 256) + 256) % 256)
+//   -> int 300 -> 44 ｜ -1 -> 255 ｜ 256 -> 0 ｜ 255 -> 255 ｜ -300 -> 212 ｜ 0 -> 0 ｜
+//      int_64 4294967361 -> 65 ｜ int_64 -4294967296 -> 0 ｜ char 200 -> 200 ｜
+//      int_64 4294967295 -> 255
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 1023 (all ten bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  int i0 = 300;
+  int i1 = 0 - 1;
+  int i2 = 256;
+  int i3 = 255;
+  int i4 = 0 - 300;
+  int i5 = 0;
+  int_64 q0 = 4294967361;
+  int_64 q1 = 0 - 4294967296;
+  char c0 = 200;
+  int_64 q2 = 4294967295;
+
+  int m = 0;
+  if ((char)i0 == 44) { m = m + 1; }
+  if ((char)i1 == 255) { m = m + 2; }
+  if ((char)i2 == 0) { m = m + 4; }
+  if ((char)i3 == 255) { m = m + 8; }
+  if ((char)i4 == 212) { m = m + 16; }
+  if ((char)i5 == 0) { m = m + 32; }
+  if ((char)q0 == 65) { m = m + 64; }
+  if ((char)q1 == 0) { m = m + 128; }
+  if ((char)c0 == 200) { m = m + 256; }
+  if ((char)q2 == 255) { m = m + 512; }
+
+  print(["(char)300=", (int)(char)i0, " (char)-1=", (int)(char)i1, " (char)-300=", (int)(char)i4, "\n"]);
+  print(["(char)4294967361=", (int)(char)q0, " (char)-2^32=", (int)(char)q1, "\n"]);
+  print(["mask=", m, " expect=1023\n"]);
+  if (m == 1023) { return 42; }
+  return 7;
+}

@@ -1,0 +1,39 @@
+// f047_cast_identity.fl -- v1.8.0 C-style cast: the IDENTITY rows of the cast table.
+//
+// WHY THIS PROBE EXISTS: `(int)x` where x is already int, `(int_64)x` where x is int_64,
+// `(double)x` where x is double and `(char)x` where x is char must be exact no-ops -- the
+// product may contain extra bytes but the VALUE must be bit-identical. A "helpful" narrowing
+// (e.g. routing int through movsxd, or re-truncating an int_64) would corrupt values that the
+// rest of the language keeps intact; these cases are the cheapest net for that class of bug.
+// (int)(char)200 pins the one cross-row identity: char -> int is a zero-extension, so 200 stays
+// 200 (a signed-char implementation would give -56).
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\cast-exp.js        (section "== f047")
+//   -> (int)42 -> 42 ｜ (int_64)8589934597 -> 8589934597 ｜ (double)2.5 -> 2.5 ｜
+//      (char)200 -> 200 ｜ (int)(char)200 -> 200
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 255 (all eight bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  int a = 42;
+  int_64 b = 8589934597;
+  double d = 2.5;
+  char c = 200;
+
+  int m = 0;
+  if ((int)42 == 42) { m = m + 1; }
+  if ((int)a == 42) { m = m + 2; }
+  if ((int_64)8589934597 == 8589934597) { m = m + 4; }
+  if ((int_64)b == b) { m = m + 8; }
+  if ((double)2.5 == 2.5) { m = m + 16; }
+  if ((double)d == d) { m = m + 32; }
+  if ((char)c == 200) { m = m + 64; }
+  if ((int)(char)200 == 200) { m = m + 128; }
+
+  print(["(int)a=", (int)a, " (int_64)b=", (int_64)b, "\n"]);
+  print(["(int)(char)200=", (int)(char)200, " (char)c=", (int)(char)c, "\n"]);
+  print(["mask=", m, " expect=255\n"]);
+  if (m == 255) { return 42; }
+  return 7;
+}

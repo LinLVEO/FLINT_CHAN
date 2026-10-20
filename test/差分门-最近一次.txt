@@ -1,6 +1,6 @@
 ﻿align_probe	OK	exit=0
 align2_probe	OK	exit=0
-api1	HANG	boot产物+flint产物 超过 15s
+api1	OK	exit=0
 api2	OK	exit=1
 api3	OK	exit=0
 apiarg16	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.exe' parse err=-176 token=37 pos=658 text='as' line 7: api msvcrt int pf16(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int) as "printf"; compile FAIL err=2
@@ -41,6 +41,7 @@ bit7	OK	exit=3
 bit8	OK	exit=8
 bit9	OK	exit=2
 bitop_probe	OK	exit=255
+cast1	OK	exit=42
 char_itotest	OK	exit=0
 char1	OK	exit=131
 char10	OK	exit=15

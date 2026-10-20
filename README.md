@@ -13,10 +13,10 @@
 
 | 事实 | 数字 / 说明 |
 |---|---|
-| 编译器版本 | v<!--fact:version-->1.7.0<!--/fact--> |
+| 编译器版本 | v<!--fact:version-->0.1.0<!--/fact--> |
 | 产物 | 纯自产机器码 PE，无 CRT ／ 无运行时依赖；`hello` = <!--fact:product-hello-->3072<!--/fact--> B |
 | 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己，产物与真 flint 逐字节一致） |
-| 门（可自己跑） | 总门 <!--fact:gate-steps-->14<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->44<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->210/210<!--/fact--> |
+| 门（可自己跑） | 总门 <!--fact:gate-steps-->14<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->51<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->210/210<!--/fact--> |
 | 平台 | Windows 10 x64（明确放弃 Win7）；单目标、单平台 |
 | 参与方式 | **暂时只收工单（issue），不接受外部 PR** —— 语言大到能给别人开口子之前，方向不摊开 |
 | 许可 | 源码 **MIT**（`LICENSE`）；文档 **CC BY 4.0** |
@@ -69,7 +69,7 @@ int main() {
 
 | 路径 | 是什么 |
 |---|---|
-| `src\` | 编译器本体（C）：词法 / 语法 / 代码生成 / PE 写出；<!--fact:src-files-->9<!--/fact--> 个源文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->11937<!--/fact--> 行 |
+| `src\` | 编译器本体（C）：词法 / 语法 / 代码生成 / PE 写出；<!--fact:src-files-->9<!--/fact--> 个源文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->12104<!--/fact--> 行 |
 | `lib\` | FLINT 标准库（`.fl` 源码库）：字符串 / 数字 / 容器 / 文件 / 数学 / FLGUI |
 | `apps\` | 用 FLINT 写的真实程序：`winpanel`（工具面板）、`m2_float`（硬件浮窗）、`ui_gallery`（控件画廊） |
 | `examples\` | 五个能抄的示例：hello / 中文打印 / 退出码 / 文件 I/O / 最小窗口（`examples\run-all.ps1`） |
@@ -98,10 +98,10 @@ int main() {
 - 一键出**单文件 exe**：无安装器、无运行时依赖、冷启动无初始化
 
 **不能做 / 还没有**（诚实账）
-- 语言层：无泛型、无无符号整型、无异常、无 `sizeof`、无 C 风格转型
+- 语言层：无泛型、无无符号整型、无异常、无 `sizeof`（**有** C 风格转型 `(type)expr`，见 `docs\语言参考.md` §3）
 - 平台层：只有 Windows x64；无多窗口、无高 DPI、IME 只"绕过"未"支持"
 - 生态层：无包管理、无第三方库（只能直调 DLL）、无 LSP / 格式化工具
-- 边界与坑：以 `docs\语言参考.md` 和 44 条探针为准 —— **文档与探针打架时，信探针**
+- 边界与坑：以 `docs\语言参考.md` 和 <!--fact:probe-cases-->51<!--/fact--> 条探针为准 —— **文档与探针打架时，信探针**
 
 ## 参与
 

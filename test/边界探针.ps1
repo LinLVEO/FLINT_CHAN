@@ -125,8 +125,8 @@ int main() {
      src='int main() { char *s = "ab" "cd"; return 42; }' }
   @{ n='sizeof';           kind='wall'; err="未声明的变量 'sizeof'"; note='没有 sizeof';
      src='int main() { int x = 4; return sizeof(x); }' }
-  @{ n='c_cast';           kind='wall'; err='意外的关键字';        note='没有 C 风格转型（(int)d）';
-     src='int main() { double d = 3.9; int x = (int)d; return x; }' }
+  @{ n='c_cast';           kind='ok';   code=42; note='C 风格转型 (int)d —— **v1.8.0 起支持**（原 wall 用例按边界表订正：double→int 截断向零，3.9 → 3）';
+     src='int main() { double d = 3.9; int x = (int)d; if (x == 3) { return 42; } return 7; }' }
   @{ n='long_long';        kind='wall'; err="未声明的变量 'long'";  note='没有 64 位整数类型（long long / int64）';
      src='int main() { long long x = 5; return 42; }' }
   @{ n='amp_api';          kind='wall'; err='需带括号调用';        note='&外部API名 不支持（要回调 → 库侧按 id 分派）';
@@ -192,6 +192,58 @@ int main() {
   #   · 现在：与 boot 同结论（能编、产物跑 42）；生产口径仍是**裸名**（字符串名/路径会烧进产物）。
   @{ n='api_str_modname_print'; kind='ok'; code=42; note='字符串模块名 ＋ 同文件 `print([...])`：注入的 `lib_print.fl` 不许把这条声明挡在身后（改前真 flint 报「api 声明必须放在文件最顶部（任何 struct/函数之前）」且指向**第 1 行第 1 列**；boot 侧同一份源码 exit 0 ⇒ 双端不一致的假拒绝）';
      src='api "kernel32.dll" int GetTickCount();' + "`n" + 'int main() { print(["b14 ok\n"]); if (GetTickCount() > 0) { return 42; } return 7; }' }
+
+  # ---------- v1.8.0：C 风格转型 `(type)expr`（语义表见 SPEC「C 风格转型」节）----------
+  #   ok 一条把**数值行全跑一遍**（每条都断言值，不是"能编就算过"）；
+  #   wall 六条把 v1 的禁区逐条钉死（struct / void / 数组 / 地址↔整数 / (char)double）。
+  @{ n='cast_scalar_values'; kind='ok'; code=42; note='C 风格转型的全部数值行：int_64→int 取低 32 位、int→int_64 符号扩展、int→char 模 256、char→int 零扩展、int→double、double→int 截断、int_64↔double；并钉优先级 `(int)3*2+1=7` 与 `(int)(1+2)*3=9`';
+     src=@(
+       'int main() {'
+       '  int_64 a = 8589934597;'
+       '  int x1 = (int)a;'
+       '  int_64 b = 0 - 5;'
+       '  int_64 x2 = (int_64)b;'
+       '  int q = 300;'
+       '  int x3 = (char)q;'
+       '  char cc = 200;'
+       '  int x4 = (int)cc;'
+       '  int_64 x5 = (int_64)cc;'
+       '  double d = (double)7;'
+       '  int x6 = (int)3.9;'
+       '  int_64 x7 = (int_64)3.9;'
+       '  int_64 big = 1234567890123;'
+       '  double d2 = (double)big;'
+       '  int x8 = (int)(d2 == 1234567890123.0);'
+       '  int p1 = (int)3 * 2 + 1;'
+       '  int p2 = (int)(1 + 2) * 3;'
+       '  int bad = 0;'
+       '  if (x1 != 5) { bad = 1; }'
+       '  if (x2 != 0 - 5) { bad = 1; }'
+       '  if (x3 != 44) { bad = 1; }'
+       '  if (x4 != 200) { bad = 1; }'
+       '  if (x5 != 200) { bad = 1; }'
+       '  if (!(d == 7.0)) { bad = 1; }'
+       '  if (x6 != 3) { bad = 1; }'
+       '  if (x7 != 3) { bad = 1; }'
+       '  if (x8 != 1) { bad = 1; }'
+       '  if (p1 != 7) { bad = 1; }'
+       '  if (p2 != 9) { bad = 1; }'
+       '  if (bad == 0) { return 42; }'
+       '  return 7;'
+       '}'
+     ) -join "`n" }
+  @{ n='cast_struct_wall'; kind='wall'; err='不支持 struct 转型'; note='(struct S)值：struct 没有整体值语义 ⇒ 编译期硬错（v1 边界，不让它静默退化成地址/字段猜测）';
+     src='struct S { int a; }' + "`n" + 'int main() { struct S s; s.a = 1; return (struct S)s; }' }
+  @{ n='cast_void_wall'; kind='wall'; err='不支持 (void) 转型'; note='(void)值：FLINT 没有 void 值 ⇒ 编译期硬错（要丢弃结果就写成表达式语句）';
+     src='int main() { int x = 5; return (void)x; }' }
+  @{ n='cast_addr_to_int_wall'; kind='wall'; err='地址值不能装进 int'; note='(int)指针：T1 边界的正向（地址值是 64 位，int 只有 4 字节）⇒ 编译期硬错，不静默截断';
+     src='int main() { int x = 5; int *p = &x; return (int)p; }' }
+  @{ n='cast_int_to_ptr_wall'; kind='wall'; err='整数不能转指针'; note='(int*)整数：T1 边界的反向 ⇒ 编译期硬错（空指针请写 int *p = 0;）';
+     src='int main() { int x = 5; int *q = (int*)x; return *q; }' }
+  @{ n='cast_array_wall'; kind='wall'; err='不支持数组转型'; note='(int[3])值：数组没有整体值语义 ⇒ 编译期硬错（要字节视图请用 char*）';
+     src='int main() { int a[3]; return (int[3])a; }' }
+  @{ n='cast_char_from_double_wall'; kind='wall'; err='不支持 (char)double'; note='(char)double 未列入 v1 口径（只给了 (int)/(int_64) 的 double 截断）⇒ 编译期硬错，让两步写清而不是猜越界规则';
+     src='int main() { return (char)1.5; }' }
 )
 
 # ---------------------------------------------------------------- 跑

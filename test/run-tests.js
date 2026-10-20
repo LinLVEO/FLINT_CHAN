@@ -400,6 +400,13 @@ compileCases.push(
   ["flgui3.fl", 42],
 );
 
+// —— v1.8.0：C 风格转型 `(type)expr` ——
+// 双端共用的类型宇宙子集（int / char / 指针）；数值行的 double / int_64 行由
+// test\facts\f042..f047 做独立裁判（boot 没有 double / int_64 这两个类型，属既有缺口）。
+compileCases.push(
+  ["cast1.fl", 42],
+);
+
 fs.mkdirSync(TMP, { recursive: true });
 for (const [sample, expect, expectOut] of compileCases) {
   const src = path.join(SAMPLES, sample);
@@ -423,6 +430,35 @@ for (const [sample, expect, expectOut] of compileCases) {
   check(`run ${label} 退出码`, got === expect, `实际 ${got}`);
   if (expectOut !== undefined) {
     check(`out ${label} stdout`, res.out === expectOut, `实际 ${JSON.stringify(res.out)}`);
+  }
+}
+
+// —— v1.8.0：C 风格转型 `(type)expr` 的**禁区**（全是编译期硬错，绝不允许静默退化）——
+// 语义表见 SPEC「C 风格转型」节。正例矩阵项 = cast1.fl（int/char/指针，双端共用子集），
+// 数值行的独立裁判在 test\facts\f042..f047。这里钉的是"不许猜"的那一侧：
+//   struct / void / 数组 没有整体值语义；(char)double 未列入 v1 口径；
+//   int ↔ 指针 是 T1 边界（地址值不能装进 int，反向同理）；函数指针带签名，转成数据指针会丢。
+{
+  const cases = [
+    ["nc_struct.fl", "struct S { int a; }\nint main() { struct S s; s.a = 1; return (struct S)s; }\n",
+      /不支持 struct 转型/, "(struct S)值 → 编译期硬错"],
+    ["nc_void.fl", "int main() { int x = 5; return (void)x; }\n",
+      /不支持 \(void\) 转型/, "(void)值 → 编译期硬错（没有 void 值）"],
+    ["nc_addr2int.fl", "int main() { int x = 5; int *p = &x; return (int)p; }\n",
+      /地址值不能装进 int/, "(int)指针 → 编译期硬错（T1：地址值不能装进 int）"],
+    ["nc_int2ptr.fl", "int main() { int x = 5; int *q = (int*)x; return *q; }\n",
+      /整数不能转指针/, "(int*)整数 → 编译期硬错（T1 的反向）"],
+    ["nc_arrcast.fl", "int main() { int a[3]; return (int[3])a; }\n",
+      /不支持数组转型/, "(int[3])值 → 编译期硬错（数组没有整体值语义）"],
+    ["nc_chardbl.fl", "int main() { return (char)1.5; }\n",
+      /不支持 \(char\)double/, "(char)double → 编译期硬错（v1 未列入，要求两步写清）"],
+    ["nc_funcptr.fl", "int f(int a) { return a; }\nint main() { int (*fp)(int) = &f; int *p = (int*)fp; return 0; }\n",
+      /函数指针不能转型/, "函数指针转型 → 编译期硬错（代码地址带签名，转成数据指针会丢）"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const r = run([path.join(TMP, name)]);
+    check(`负例：${label}`, !r.ok && re.test(r.stderr || ""), (r.stderr || "").split("\n")[1] || "");
   }
 }
 

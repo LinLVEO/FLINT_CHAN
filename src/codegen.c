@@ -747,6 +747,8 @@ static bool is_addr_expr(Node *n) {
     // v1.3.1：三元的结果宽度由 parse 定死（两支地址 → ty=TY_PTR；两支值 → int/double）。
     //   这里读 ty 即可——**不重推两分支**（两侧判据不一致是浮点旧坑的来源）。
     case ND_TERN: return n->ty == TY_PTR;
+    // v1.8.0：C 风格转型 —— (T*)p 是地址值；(int)/(int_64)/(char)/(double) 是值，不是地址
+    case ND_CAST: return n->ty == TY_PTR;
     default: return false;
   }
 }
@@ -817,6 +819,8 @@ static bool is_addr_value(Node *n) {
       if (is_addr_value(n->lhs) && is_addr_value(n->rhs)) return false;  // 地址 − 地址 = 差值（标量，不是地址）
       return is_addr_value(n->lhs) || is_addr_value(n->rhs);
     case ND_TERN: return n->ty == TY_PTR;   // v1.3.1：两支都是地址（parse 保证同指向类型）
+    // v1.8.0：C 风格转型 —— 与 is_addr_expr 同口径（两处判据必须同源，别各写一份）
+    case ND_CAST: return n->ty == TY_PTR;
     default: return false;
   }
 }
@@ -965,6 +969,7 @@ static bool is_pure_expr(Node *n) {
     case ND_LOGAND: case ND_LOGOR:
       return is_pure_expr(n->lhs) && is_pure_expr(n->rhs);
     case ND_NEG: case ND_NOT: case ND_BITNOT: case ND_I2D: case ND_D2I: case ND_ADDR:
+    case ND_CAST:   // v1.8.0：转型无副作用（指针转型更是一个字节都不发）
       return is_pure_expr(n->lhs);
     default: return false;   // 调用 / API / new / 赋值 / 自增自减 / 三元：保守一律不算
   }
@@ -1371,6 +1376,11 @@ static void emit_movq_xmm2_rax(Buf *b)  { const uint8_t x[] = {0x66, 0x48, 0x0F,
 static void emit_movq_xmm3_rax(Buf *b)  { const uint8_t x[] = {0x66, 0x48, 0x0F, 0x6E, 0xD8}; buf_bytes(b, x, 5); }
 static void emit_cvtsi2sd_xmm0_eax(Buf *b) { const uint8_t x[] = {0xF2, 0x0F, 0x2A, 0xC0}; buf_bytes(b, x, 4); }
 static void emit_cvttsd2si_eax_xmm0(Buf *b) { const uint8_t x[] = {0xF2, 0x0F, 0x2C, 0xC0}; buf_bytes(b, x, 4); }
+// v1.8.0 C 风格转型的 64 位版（REX.W 形态；与 32 位版同一个编码族，字节已逐条核对）：
+//   cvtsi2sd xmm0, rax = F2 48 0F 2A C0（reg=xmm0 / rm=rax）
+//   cvttsd2si rax, xmm0 = F2 48 0F 2C C0
+static void emit_cvtsi2sd_xmm0_rax(Buf *b) { const uint8_t x[] = {0xF2, 0x48, 0x0F, 0x2A, 0xC0}; buf_bytes(b, x, 5); }
+static void emit_cvttsd2si_rax_xmm0(Buf *b) { const uint8_t x[] = {0xF2, 0x48, 0x0F, 0x2C, 0xC0}; buf_bytes(b, x, 5); }
 static void emit_sse_binop(Buf *b, char op) {
   switch (op) {
     case '+': { const uint8_t x[] = {0xF2, 0x0F, 0x58, 0xC1}; buf_bytes(b, x, 4); return; } // addsd xmm0,xmm1
@@ -1691,6 +1701,7 @@ static bool is_call_free(Node *n) {
     case ND_LOGAND: case ND_LOGOR:
       return is_call_free(n->lhs) && is_call_free(n->rhs);
     case ND_NEG: case ND_NOT: case ND_BITNOT: case ND_I2D: case ND_D2I:
+    case ND_CAST:   // v1.8.0：转型本身不 call（操作数里有没有 call 由递归判定）
       return is_call_free(n->lhs);
     default: return false;
   }
@@ -2283,6 +2294,31 @@ static void gen_expr(FuncCtx *c, Node *node) {
       gen_expr(c, node->lhs);
       emit_cvttsd2si_eax_xmm0(b);
       return;
+    // ===== v1.8.0 C 风格转型 `(type)expr`（语义表见 SPEC「C 风格转型」节）=====
+    //   目标类型 = node->ty（**唯一来源**）；源类型在发射点用共用判据回推。
+    //   结果寄存器约定与全编译器一致：整数值 → eax/rax ｜ double → xmm0。
+    case ND_CAST: {
+      gen_expr(c, node->lhs);
+      bool from_dbl = expr_is_dbl(node->lhs);
+      bool from_i64 = expr_is_i64(node->lhs);
+      if (node->ty == TY_PTR) return;                    // (T*)p：只换类型，一个字节都不发
+      if (node->ty == TY_DOUBLE) {
+        if (from_i64) emit_cvtsi2sd_xmm0_rax(b);         // int_64 → double：F2 48 0F 2A C0
+        else if (!from_dbl) emit_cvtsi2sd_xmm0_eax(b);   // int/char → double：F2 0F 2A C0（char 值已在 0..255）
+        return;
+      }
+      if (node->ty == TY_INT64) {
+        if (from_dbl) emit_cvttsd2si_rax_xmm0(b);        // double → int_64：F2 48 0F 2C C0（截断向零）
+        else if (!from_i64) emit_movsxd_rax_eax(b);      // int/char → int_64：movsxd rax,eax（char 0..255 等价零扩展）
+        return;
+      }
+      if (node->ty == TY_CHAR) { emit_movzx_eax_al(b); return; }   // → char：movzx eax,al（低 8 位 = 模 256）
+      // 剩下 TY_INT
+      if (from_dbl) emit_cvttsd2si_eax_xmm0(b);          // double → int：F2 0F 2C C0（越界 = 0x80000000，同 C）
+      else if (from_i64) emit_l2i(b);                    // int_64 → int：mov eax,eax（取低 32 位）
+      // int/char → int：恒等（char 的读路径本身已是 movzx，值域 0..255）
+      return;
+    }
     case ND_STR: {
       // v0.7.3：字符串字面量值 = 数据段地址。lea rax,[rip+disp32]（48 8D 05）；
       // disp 目标是拼接 code 尾部的字符串区，全部函数生成完、排布后统一回填

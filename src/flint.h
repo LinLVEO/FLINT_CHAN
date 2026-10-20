@@ -2,6 +2,10 @@
 #ifndef FLINT_H
 #define FLINT_H
 
+// 对外发布版本（开源版）：只此一处真源 —— 编译器 `-h` 打印它，取数器 version 键读它。
+// 内部开发史（v1.x 那些记号）只留在注释/进度档案里，不再作为"当前版本"对外。
+#define FLINT_VERSION "0.1.0"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -125,6 +129,14 @@ typedef enum {
   ND_NUM64,     // 64 位字面量：lval = 值（codegen: mov rax,imm64）
   ND_I2L,       // int → int_64 拓宽（符号扩展：movsxd rax,eax）——隐式提升用
   ND_L2I,       // int_64 → int 显式收窄（to_int32；取低 32 位）
+  // —— v1.8.0 C 风格转型 `(type)expr` ——
+  //   **一个节点覆盖全部转型**：ty = 括号里的目标类型（TY_INT/TY_INT64/TY_CHAR/TY_DOUBLE/TY_PTR），
+  //   lhs = 操作数；源类型在发射点用共用判据回推（expr_is_dbl / expr_is_i64 / is_addr_expr）。
+  //   为什么不自造一堆 I2L64/I2D64/TRUNC8 节点：那样每个新节点都要在 expr_is_dbl / expr_is_i64 /
+  //   is_addr_expr / is_addr_value / tern_addr_info / 打印分派里各补一档（6 处，漏一处 = 静默错值）；
+  //   ND_CAST 让"结果类型"只有一个来源 = node->ty。
+  //   指针转型（(T*)p）在这里**只换类型、不产码**（elem_ty/struct_idx 记指向类型）。
+  ND_CAST,
 } NodeKind;
 
 // 变量类型（v0.7 起；v0.7.x 加结构体）

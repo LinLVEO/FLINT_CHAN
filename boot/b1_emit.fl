@@ -1164,6 +1164,13 @@ int gen_expr(struct Ast *a, int idx, struct W *w, struct Emit *em) {
     gen_expr(a, ll[idx], w, em);
     w8(w, 0xF7);
     w8(w, 0xD8);
+  } else if (k == 70) {               // v1.8.0 C 风格转型
+    //   val 编码（解析侧 lib_parse.fl 写）：0=(int) 恒等 ｜ 3=(char) 截断到 0..255 ｜
+    //   1=(int*) 2=(char*) 只换类型（一个字节都不发）。ty 已由解析侧标好（地址类 1/2）
+    //   ⚠️ 节点号必须 ≥70：68/69 已被 break/continue（emit_stmt 用）占用，别复用。
+    //   ⚠️ boot 没有 double / int_64 ⇒ 那两类转型不存在于本端（既有类型缺口，见 SPEC）
+    gen_expr(a, ll[idx], w, em);
+    if (vv[idx] == 3) { w8(w, 0x0F); w8(w, 0xB6); w8(w, 0xC0); }   // movzx eax, al
   } else if (k == 6) {                // 变量读：mov eax, [rbp-off]（off=(相对槽+1)*8）
     int pr6 = preg_of(em, vv[idx]);                // 第四刀：已提升的槽 → mov eax, rXd
     if (pr6 > 0) { em_ld_reg(w, pr6); }
