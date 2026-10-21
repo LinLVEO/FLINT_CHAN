@@ -56,7 +56,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\边界探针.ps1
 1. **别在 PowerShell 里直接写 `gcc src\*.c`** —— PowerShell 不给原生程序展开通配符，会报 `cc1.exe: too many filenames given`。用上面的 `cmd /c`，或显式列出 `.c` 文件。
 2. **编译器要放仓库根目录**（或别处但同目录要有 `lib\`）—— `include` 的解析顺序是「本文件目录 → **编译器 exe 所在目录的 `lib\`**」。
 
-最小可跑程序（注意 `print` 吃的是**数组**，不是普通函数调用）：
+最小可跑程序（注意 `print` 后面跟的是**段列表**——`[...]` 形状像数组，但它不是值，每段按类型自动选格式化器；也不是 C 的格式串）：
 
 ```
 int main() {
