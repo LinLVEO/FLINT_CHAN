@@ -129,6 +129,10 @@ typedef enum {
   ND_NUM64,     // 64 位字面量：lval = 值（codegen: mov rax,imm64）
   ND_I2L,       // int → int_64 拓宽（符号扩展：movsxd rax,eax）——隐式提升用
   ND_L2I,       // int_64 → int 显式收窄（to_int32；取低 32 位）
+  ND_U2L,       // v1.9.0：无符号 8/32 位 → 64 位拓宽（**零扩展**：mov eax,eax）——隐式提升用
+                //   与 ND_I2L 的差别只有"源侧符号性"：`int_64 + uint_32` 走 ND_U2L，
+                //   `uint_64 + int` 走 ND_I2L（值保持 = C11 6.3.1.3）。漏分这一档 =
+                //   `(uint_32)0-1` 参与 64 位运算时被抹成 -1（编译过、静默错值）。
   // —— v1.8.0 C 风格转型 `(type)expr` ——
   //   **一个节点覆盖全部转型**：ty = 括号里的目标类型（TY_INT/TY_INT64/TY_CHAR/TY_DOUBLE/TY_PTR），
   //   lhs = 操作数；源类型在发射点用共用判据回推（expr_is_dbl / expr_is_i64 / is_addr_expr）。
@@ -161,7 +165,46 @@ typedef enum {
              //   **必须**是独立枚举值（不做 TY_INT 的位标志）：parse 83 处 / codegen 27 处
              //   `TY_INT` 判据靠"不匹配"落到安全侧，位标志会让它们静默变宽。
              //   末尾追加 ⇒ TY_INT 仍是 0（slotmap.c:48/:201 拿 0 当默认）。
+  // ===== v1.9.0：三种**无符号**整数（uint_8 / uint_32 / uint_64）=====
+  //   表示（值宽 / 槽宽 / 元素步长）**逐条沿用**同宽的有符号/字节类型：
+  //     uint_8  ≡ char（1 字节，0..255）｜ uint_32 ≡ int（值 4 / 槽 8 / 步长 4）
+  //     uint_64 ≡ int_64（8 / 8 / 8）
+  //   不同类型、同表示 ⇒ 所有**宽度**判据必须与同宽对照类型走同一条路（见下面 ty_* 助手），
+  //   只有**符号性**（div/mod、shr、比较、打印）才分岔。别在新地方手抄 `== TY_INT`。
+  TY_UINT8,   // v1.9.0：uint_8  = 无符号 8 位（0..255），表示同 char
+  TY_UINT32,  // v1.9.0：uint_32 = 无符号 32 位，表示同 int（值 4 字节，帧槽 8 字节）
+  TY_UINT64,  // v1.9.0：uint_64 = 无符号 64 位，表示同 int_64（8 / 8 / 8）
 } Type;
+
+// ===== v1.9.0：无符号类型的**单点判据** =====
+// 病根（与 D3 宽度表同一条纪律）：`ty == TY_INT` / `ty == TY_INT64` / `ty == TY_CHAR`
+//   这种判据在本仓有 110+ 处；uint 进来以后，任何一处"没匹配上"都会静默落到 32 位 int 兜底
+//   （漏一处 = 那个位置静默当 int 处理）。所以宽度相关的判据**一律**改走下面这几个内联函数，
+//   只允许"符号性"（该不该用 div/shr/setcc 的无符号谓词）继续直接比枚举。
+static inline bool ty_uns(int ty) {         // 是不是无符号整数类型
+  return ty == TY_UINT8 || ty == TY_UINT32 || ty == TY_UINT64;
+}
+static inline bool ty_is8(int ty) {         // 字节族（值宽 1）
+  return ty == TY_CHAR || ty == TY_UINT8;
+}
+static inline bool ty_is32(int ty) {        // 32 位值族（值宽 4；帧槽仍是 8）
+  return ty == TY_INT || ty == TY_UINT32;
+}
+static inline bool ty_is64(int ty) {        // 64 位值族（值宽 = 槽宽 = 步长 = 8）
+  return ty == TY_INT64 || ty == TY_UINT64;
+}
+static inline bool ty_isint(int ty) {       // 三种整型宽度之一（非 double/指针/数组/结构体）
+  return ty_is8(ty) || ty_is32(ty) || ty_is64(ty);
+}
+// 同宽的有符号/字节对应类型：老通路（T1 标记、寄存器分配、符号扩展）一律喂这个。
+static inline int ty_sgn(int ty) {
+  return ty == TY_UINT8 ? TY_CHAR : ty == TY_UINT32 ? TY_INT : ty == TY_UINT64 ? TY_INT64 : ty;
+}
+// C 的**整数转换等级**（C11 6.3.1.1）：char/uint_8 参与运算前先提升到 int，故 rank=0；
+//   int/uint_32 = 1；int_64/uint_64 = 2。
+static inline int ty_rank(int ty) {
+  return ty_is8(ty) ? 0 : ty_is32(ty) ? 1 : ty_is64(ty) ? 2 : 3;
+}
 
 // —— v0.7.x 结构体 ——
 typedef struct {
@@ -173,6 +216,8 @@ typedef struct {
                //   v1.4.4：数组字段 = 元素类型（int/char/double）
   int arr_len; // v1.4.4：数组字段的元素个数（非数组 = 1）
   int offset;  // 距结构体首地址（v0.9.2：真实 C 布局，按字段类型对齐累加；旧版 = 字段序 × 8）
+  int sid;     // 2026-10-24（v2.3）：struct 指针字段**指向的结构体**（Program.structs 下标）；
+               //   非 struct 指针字段一律 -1（口径同 Node.struct_idx：0 会冒充"struct 0"）
 } StructField;
 
 typedef struct {
@@ -183,6 +228,11 @@ typedef struct {
                            //   真实 Win32 结构也动辄 40+ 字段。⚠️ boot 侧同一上限（`lib_parse.fl` 的
                            //   `st_nfields >= 128`）必须同步，否则又成"boot 比真 flint 窄"的双端断点）
   int size;           // v0.9.2：总字节 = 末字段后按最大对齐取整（C 布局；帧内槽数 = ceil(size/8)）
+  // v2.4.0（struct 嵌套 struct 值字段）：结构体**自身的对齐**（= max(直接字段对齐)，C 口径）。
+  //   `struct A { struct B b; }` 的 b 按 B 的对齐落位（和 C 逐字节一致）；
+  //   **不能**从 size 反推（size=8 可能是 align 4 的 int+char，也可能是 align 8 的指针）。
+  //   ⚠️ 只活在 parse 的布局期（flint 端单点）；boot 端同一语义在 sflat 的字段项里。
+  int align;
 } StructDef;
 
 typedef struct Node Node;
@@ -242,6 +292,15 @@ Node *expr_widen_dbl(Node *n);              // 需要 double 时，把 int 侧�
 //   导致「幂/widen 后的节点」判据不一致（见上一条注释的教训原文）。
 bool expr_is_i64(Node *n);                  // 这个表达式的值是不是 int_64（含混合运算的提升结果）
 Node *expr_widen_i64(Node *n);              // 需要 64 位时把 32 位侧包一层 ND_I2L（符号扩展）
+// ===== v1.9.0：无符号的**同一族判据**（与 expr_is_i64 逐条同形，parse/codegen 共用）=====
+//   expr_ty_of(n) = 这个表达式的 C 值类型（只回 8 种：TY_CHAR/TY_INT/TY_INT64/
+//     TY_UINT8/TY_UINT32/TY_UINT64/TY_DOUBLE/TY_PTR）。二元算术节点在 parse 时就把
+//     通常算术转换的结果类型刻在 node->ty 上 ⇒ 这里只读不算（O(1)，不重推子树）。
+int  expr_ty_of(Node *n);
+bool expr_is_u64(Node *n);                  // 值类型是无符号 64 位（uint_64）
+bool expr_is_u32(Node *n);                  // 值类型是无符号 32 位（uint_32）
+bool expr_is_uns(Node *n);                  // 值类型是任一 uint（打印分派/符号性判据用）
+Node *expr_widen_to64(Node *n, bool dst_uns);   // 拓宽到 64 位：**有符号源符号扩展 / 无符号源零扩展**
 // ===== D3：宽度口径的**单点表**（值宽 / 元素步长两列）=====
 // 病根：本仓已有 4 处各抄一份元素宽（parse.c 的 new_lvar 槽数、postfix 的下标缩放、
 //   ptr_step_elem_width 的 -strict 诊断、collect_globals 的 .data 布局），而
@@ -250,8 +309,8 @@ Node *expr_widen_i64(Node *n);              // 需要 64 位时把 32 位侧包�
 //   今天两列**数值相同**（char 1 / int 4 / int_64 8 / double 8 / 指针 8），但两列分开命名：
 //   "值宽"回答「一次读写几个字节」，"元素步长"回答「a[i] 的 i 缩放几倍」——混成一个数
 //   在下一轮改宽度时一定出错（`int` 的元素步长 4 / 全局标量 8 就是现成的反例）。
-int ty_value_bytes(int ty);                 // 值宽：char 1 / int 4 / int_64 8 / double 8 / 指针 8
-int ty_arr_stride(int ty);                  // 元素步长（下标缩放）：同上（int_64 = 8，无半槽）
+int ty_value_bytes(int ty);                 // 值宽：char/uint_8 1 / int/uint_32 4 / int_64/uint_64 8 / double 8 / 指针 8
+int ty_arr_stride(int ty);                  // 元素步长（下标缩放）：同上（int_64 = uint_64 = 8，无半槽）
 
 // ========== v1.3.0 全局变量（PE 第二节 .data）==========
 // 设计要点（2026-09-13；2026-09-15 更正）：全局变量不需要重定位表，是因为**产物里没有任何绝对地址**
@@ -275,7 +334,13 @@ int ty_arr_stride(int ty);                  // 元素步长（下标缩放）：
 //   单点计算在 pe.c：`pe_headers_size(pe_nsec_all(...))`，pe.c 与 main.c 的 TSV 共用同一份算式。
 int pe_nsec_all(int two_sec, int has_admin, int has_debug);
 uint32_t pe_headers_size(int nsec_all);
-#define FLINT_MAX_TEXT 0x100000        // 代码上限 1 MiB（保守值，远小于 disp32 的 ±2GB）
+// 2026-10-24（容量第二批）：**两条资源各有各的墙**，不再共用一个常量。
+//   原来 `.data` 的两处检查（parse.c）也拿 FLINT_MAX_TEXT 量 —— 改代码上限会**顺带**改数据上限，
+//   还没人知道；报错文案也把同一个数说成两种资源（"代码段超过 1 MiB" / ".data 单节上限 1 MiB"）。
+//   现在分开：各自的数字只描述自己的资源，改一个不会动另一个。
+//   ⚠️ 两条都远小于 PE/disp32 的物理界（disp32 ±2GB、32 位 RVA）；PE 布局本来就按实际大小现算。
+#define FLINT_MAX_TEXT 0x1000000       // 代码段上限 16 MiB
+#define FLINT_MAX_DATA 0x1000000       // .data 单节上限 16 MiB（全局变量总量；多节 .data 仍未开放）
 
 // .data 内一个全局变量
 typedef struct {
@@ -317,6 +382,26 @@ typedef struct {
 //   语义：可用内容 = CAP-1 字节（末字节固定留给结尾 0）；超过 ⇒ str() 整个返回 0（响亮失败，不静默截断）。
 #define FLINT_STRBUF_CAP 4096
 #define FLINT_STRBUF_CAP_S "4096"
+
+// ===== v5（`-debug`）D-1：**变量位置**（帧槽）=====
+// 调试器读一个局部量/形参只需要四件事：叫什么、什么类型、在帧里的哪个字节、哪一行声明的。
+// 为什么必须有：我们的 PE 里**没有任何**变量调试信息（只有 DWARF 行表），调试器自己去源码里猜类型
+//   必然会与编译器分叉 ⇒ 位置表只能由编译器出，且必须与**给变量分槽的那张表**同源（`parse.c` 的
+//   LVar：offset/ty/elem_ty/arr_len/struct_idx 就是槽的唯一真值）。
+// 口径（调试器直接拿去做地址运算，别改）：
+//   · slot = rbp 相对偏移 = **-LVar.offset**（本仓 LVar.offset 是正数，地址 = [rbp - offset]）；
+//   · 数组/结构体是多槽块 ⇒ 这里写它们**首槽**（块基址）的偏移，元素/字段偏移由调试器按 type 自己加；
+//   · kind：0 = local / 1 = param / 2 = aggregate（数组或结构体值变量）；
+//   · type：FLINT 写法（`int` / `int_64` / `char*` / `uint_32` / `int[5]` / `struct Point`），
+//     由 parse.c 的 ty_decl_str 从**同一张类型表**生成（不是另写一份拼写）。
+typedef struct {
+  char *name;        // 变量名（指向 parse 的 LVar.name；程序生命周期内有效）
+  char type[64];     // FLINT 写法的类型（见上）
+  int slot;          // rbp 相对偏移（负数；数组/结构体 = 首槽）
+  int line;          // 声明所在源码行（1 起；形参 = 形参那一行）
+  unsigned char kind;// 0=local 1=param 2=aggregate
+} DebugVar;
+
 typedef struct {
   char *name;          // 函数名
   bool is_main;        // 是否 main（入口，须 int 返回、无参）
@@ -335,6 +420,21 @@ typedef struct {
                        //   家族已经栽过 4 次，凡是**调用点/被调方要读的字段**都得在预扫描里齐。
   Node *body;          // 函数体语句链表头
   int var_count;       // 本函数帧变量槽数（参数 + 局部）
+  // ===== v5（`-debug`）：D-1 变量位置表 + D-3 帧表 —— **生成期真值**，只记不发 =====
+  // 这些字段全部由 codegen_func 在发射序言/收尾时顺手记下（`parse.c` 只填 dbg_vars）。
+  // 纪律：**只记不发** —— 多写这些字段不会让产物多一个字节（普通产物等价门守着）。
+  // 为什么不在这里算/推：帧大小、push 个数、序言/尾声字节位置**只有发射现场知道**；
+  //   事后再从产物反推 = 第二套真值（本仓反复栽过的"两处口径"病）。
+  int frame_size;        // 序言 `sub rsp, imm` 的 imm（大帧多段 sub ⇒ 各段之和；无 sub = 0）
+  int push_bytes;        // 序言被调者保存寄存器 push 的总字节数（= 8 * nsaved）
+  int ret_addr_off;      // 返回地址相对 rbp 的偏移（= 序言 push rbp 压掉的字节数；本仓 8）
+  int saved_regs[8];     // 按 **push 顺序** 的寄存器号（0=rbx 1=r12 2=r13 3=r14 4=r15）
+  int nsaved;            // saved_regs 有效个数
+  size_t prolog_len;     // 序言字节数（从函数 code 起点算：push rbp … 最后一个 push/垫）
+  size_t epilog_off;     // 尾声起点（相对函数 code 起点；= 收尾序列第一条指令处）
+  size_t epilog_len;     // 尾声字节数（收尾序列：写回 → add rsp → 逆序 pop → leave/ret）
+  DebugVar *dbg_vars;    // 局部变量 + 形参位置表（parse 填；不带 -debug 时 NULL/0）
+  int ndbg_vars;
 } FuncDef;
 
 // v0.8：外部 API 声明（api <dll> <返回> <名>(参数...);）
@@ -390,6 +490,9 @@ typedef struct {
 // 结构体：既要在 parse 内造签名、也要在 codegen 侧被间接调用读取（codegen 只读 nargs/返回类型，
 // 参数通道仍按「实参表达式是不是 double」分派 —— 与直接调用同一条路，见 gen_call 注释）
 
+// v2.1.0 enum：具名整数常量（parse 期直接折成字面量，codegen 零改动）
+typedef struct { char *name; int value; } EnumConst;
+
 typedef struct {
   FuncDef *funcs;      // 函数数组（动态，源定义序）
   int nfuncs;
@@ -412,6 +515,10 @@ typedef struct {
   FuncSig *sigs;
   int nsigs;
   int sigs_cap;
+  // v2.1.0 enum：具名整数常量（声明序；parse 期折成字面量，产物零变化）
+  EnumConst *enums;
+  int nenums;
+  int enums_cap;
 } Program;
 
 Program parse(Token *tok);
@@ -503,9 +610,24 @@ typedef struct {
 } DebugRow;
 
 // v1.4.11：一个函数在拼接后 code 内的区间（DWARF 每个函数发一条独立 sequence）
+// v5（`-debug`）：同时是**第三份调试信息**（`<out>.dbg.json`）的行 —— 帧表（D-3）+ 变量位置表（D-1）。
+//   字段值全部由 codegen_func 记在 FuncDef 上，codegen_main 汇总时原样拷过来（同一张表，不重算）。
 typedef struct {
   size_t off;    // 函数 code 起点（拼接后）
   size_t len;    // 函数 code 字节数
+  const char *name;   // 函数名（= FuncDef.name；生命周期 = Program）
+  // —— D-3 帧表（调试器手写栈回溯的唯一依据：本仓 PE 无 .pdata，StackWalk64 不可用）——
+  int frame_size;        // `sub rsp, imm` 的 imm（多段 sub = 总和；无 = 0）
+  int push_bytes;        // 被调者保存寄存器 push 总字节数
+  int ret_addr_off;      // 返回地址相对 rbp 的偏移（本仓 8）
+  int saved_regs[8];     // 按 push 顺序的寄存器号（0=rbx 1=r12 2=r13 3=r14 4=r15）
+  int nsaved;
+  size_t prolog_len;     // 序言字节数（相对函数起点）
+  size_t epilog_off;     // 尾声起点（相对函数起点）
+  size_t epilog_len;     // 尾声字节数
+  // —— D-1 变量位置表 ——
+  DebugVar *vars;        // 局部变量 + 形参（parse 填；排序在 debug_build_map 里做副本）
+  int nvars;
 } DebugFuncSpan;
 
 typedef struct {
@@ -623,6 +745,14 @@ void debug_build_line(GenResult *gen, uint32_t text_rva, Buf *out);
 void debug_build_info(GenResult *gen, uint32_t text_rva, uint32_t line_sec_off, Buf *out);
 void debug_build_abbrev(Buf *out);
 void debug_build_tsv(GenResult *gen, uint32_t text_rva, uint32_t text_raw_ptr,
+                     const char *exe_name, Buf *out);
+// ===== v5（2026-10-21）D-1 + D-3：第三份调试信息 `<输出>.dbg.json` =====
+// 内容 = 「函数 → 帧布局 + 局部变量/形参位置」，机器可读（JSON，UTF-8 无 BOM）、与 TSV / DWARF 行表
+// **同源**（同一张 DebugFuncSpan / DebugRow 表，不重新解析源码、不事后从产物反推）。
+// 为什么需要它（而不是接着扩 DWARF）：调试器要知道**帧布局**（无 .pdata ⇒ StackWalk64 不可用，
+//   栈回溯只能手写）和**变量的帧内地址**（DWARF 只有行表，没有变量 DIE）——这两样标准腿都没输出。
+// 参数与 debug_build_tsv 完全一致 ⇒ 地址换算只有一处（IMAGE_BASE + text_rva + 函数内偏移）。
+void debug_build_map(GenResult *gen, uint32_t text_rva, uint32_t text_raw_ptr,
                      const char *exe_name, Buf *out);
 
 // 生成整个程序：

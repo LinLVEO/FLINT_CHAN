@@ -1,0 +1,51 @@
+// f094_slash_sdf.fl -- M4 第五刀：SDF 半圆弧刀光（替代贝塞尔采样点）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  fx_isqrt(0) == 0
+//   bit1  fx_isqrt(1) == 1
+//   bit2  fx_isqrt(4) == 2
+//   bit3  fx_isqrt(100) == 10
+//   bit4  fx_isqrt(99) == 9
+//   bit5  slash_sdf r=10 -> 右侧 (cx+10,cy) 有墨
+//   bit6  左半不画：(cx-10,cy) 仍是背景
+//   bit7  y 限制生效 + 确定性（两次像素数相同）
+include "../../lib/fx.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int mask = 0;
+  int n = 0;
+  int n2 = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 64; s.cw = 64; s.ch = 64;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 64, 64) == 0) { return 2; }
+
+  if (fx_isqrt(0) == 0) { mask = mask | 1; }
+  if (fx_isqrt(1) == 1) { mask = mask | 2; }
+  if (fx_isqrt(4) == 2) { mask = mask | 4; }
+  if (fx_isqrt(100) == 10) { mask = mask | 8; }
+  if (fx_isqrt(99) == 9) { mask = mask | 16; }
+
+  gfx_clear(&b, 0x00000000);
+  n = slash_sdf(&b, 32, 32, 10, 1, 0, 63, 0x00FFFFFF);
+  if (n > 0) {
+    if (gfx_get(&b, 42, 32) == 0x00FFFFFF) { mask = mask | 32; }
+  }
+
+  if (gfx_get(&b, 22, 32) == 0x00000000) { mask = mask | 64; }
+
+  gfx_clear(&b, 0x00000000);
+  n = slash_sdf(&b, 32, 32, 10, 1, 28, 36, 0x00FFFFFF);
+  gfx_clear(&b, 0x00000000);
+  n2 = slash_sdf(&b, 32, 32, 10, 1, 28, 36, 0x00FFFFFF);
+  if (n == n2) { mask = mask | 128; }
+
+  print(["f094 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

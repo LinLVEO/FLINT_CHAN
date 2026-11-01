@@ -1,0 +1,232 @@
+// apps\kaguya_probe.fl -- NERO ·《虚妄之塔》辉夜版灰盒（M2 素材试做）：塔层 + 2 倍放大 + 三段斩
+//
+// 运行：hlc run apps\kaguya_probe.fl
+// 操作：←/→ 走、空格跳、J 斩（三段）、关窗退出。
+// 判据：建窗/加载各步 90..100；正常关窗退 0；运行 4 秒不崩。
+include "../lib/flgui_win32.fl"
+include "../lib/gfx.fl"
+include "../lib/grid.fl"
+include "../lib/mapload.fl"
+include "../lib/sprite.fl"
+include "../games/huiye/sprite_data.fl"
+include "../lib/actor.fl"
+include "../lib/body.fl"
+include "../lib/attack.fl"
+include "../lib/hitfx.fl"
+include "../lib/enemy.fl"
+include "../lib/audio.fl"
+include "../lib/fx.fl"
+include "../lib/slashfx.fl"
+include "../lib/hitstun.fl"
+
+// 帧限速用 Sleep：gui_win_frame_wait 走 MsgWait(QS_ALLINPUT)，按住键时每帧都被
+// 消息唤醒 ⇒ 帧率变高、物理每帧固定步长 ⇒ 游戏整体加速（用户报的老问题）。
+// Sleep 不响应键盘消息，按住键也稳定等满一帧。
+api kernel32 int Sleep(int);
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct GuiInput in;
+  struct Grid grid;
+  struct Body hero;
+  struct Combo combo;
+  struct HitFx fx;
+  struct HitStun foe_hurt;
+  struct SlashFx sfx[3];
+  int map[544];
+  int kbuf[768];
+  int ebuf[288];
+  int pal[7];
+  int W = 480;
+  int H = 270;
+  int mapw = 32;
+  int maph = 17;
+  int cam_x = 0;
+  int fc = 0;
+  int run = 1;
+  int face = 1;
+  int state = 0;
+  int slash_cd = 0;
+  int hit_done = 0;
+  int frame = 0;
+  int hpx = 0;
+  int hpy = 0;
+  int enemy_x = 120;
+  int enemy_y = 100;
+  int enemy_st = 0;
+  struct Body foe;
+  int dist = 0;
+  int moving = 0;
+  int i = 0;
+  int frame_start = 0;
+  int spent = 0;
+  int slash_t = 0;
+  int scx = 0;
+  int scy = 0;
+  int ddx = 0;
+  int ddy = 0;
+  int dl = 1;
+  int ux = 0;
+  int uy = 0;
+  int plot_x = 0;
+  int plot_y = 0;
+  int st = 0;
+  int sp = 0;
+  int sa = 255;
+  int sx0 = 0;
+  int sy0 = 0;
+  int sx1 = 0;
+  int sy1 = 0;
+  int sx2 = 0;
+  int sy2 = 0;
+  struct Particle ps[32];
+  int SCALE = 2;
+  int GRAVITY = 32768;   // 0.5 格/帧²（16.16）：主角和敌人共用同一个值
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "KAGUYA";
+  g.x = 120;
+  g.y = 80;
+  g.w = W;
+  g.h = H;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  if (grid_init(&grid, map, mapw, maph, 16, 16) == 0) { return 93; }
+  if (mapload_ascii("apps/tower.txt", map, mapw, maph) == 0) { return 94; }
+  if (sprite_kaguya_load(kbuf) == 0) { return 95; }
+  if (sprite_enemy_load(ebuf) == 0) { return 96; }
+  if (sprite_pal_fill(pal) != 7) { return 97; }
+  if (body_init(&hero, 64, 0, 32, 32) == 0) { return 98; }
+  if (body_init(&foe, 120, 100, 24, 24) == 0) { return 101; }
+  if (combo_start(&combo) == 0) { return 99; }
+  if (hitfx_start(&fx, 0, 0, 0) == 0) { return 100; }
+  foe_hurt.stun = 0;
+  foe_hurt.vx = 0;
+  foe_hurt.vy = 0;
+  sfx[0].t = 0;
+  sfx[1].t = 0;
+  sfx[2].t = 0;
+
+  i = 0;
+  while (i < 32) { ps[i].life = 0; i = i + 1; }
+
+  while (run == 1) {
+    frame_start = GetTickCount();
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      // 演示：前 3 秒自动挥刀（方便截图/录屏看效果）
+      if (fc < 90) {
+        if (fc % 30 == 0) { combo_press(&combo); }
+      }
+      hero.vx = 0;
+      moving = 0;
+      // A/D 左右、W 跳、S 加速下落
+      if ((GetAsyncKeyState(0x41) & 0x8000) != 0) {
+        hero.vx = -3 * 65536;
+        face = 0;
+        moving = 1;
+      }
+      if ((GetAsyncKeyState(0x44) & 0x8000) != 0) {
+        hero.vx = 3 * 65536;
+        face = 1;
+        moving = 1;
+      }
+      if ((GetAsyncKeyState(0x57) & 0x8000) != 0) {
+        if (hero.onground == 1) {
+          hero.vy = -9 * 65536;
+          audio_play("games/huiye/jump.wav");
+        }
+      }
+      if ((GetAsyncKeyState(0x53) & 0x8000) != 0) {
+        if (hero.vy < 6 * 65536) { hero.vy = 6 * 65536; }
+      }
+      if ((GetAsyncKeyState(0x4A) & 0x8000) != 0) { combo_press(&combo); }
+
+      body_step(&grid, &hero, GRAVITY);
+      combo_tick(&combo);
+      hitfx_tick(&fx);
+
+      hpx = hero.x / 65536;
+      hpy = hero.y / 65536;
+
+      enemy_x = foe.x / 65536;
+      enemy_y = foe.y / 65536;
+      dist = hpx - enemy_x;
+      if (dist < 0) { dist = 0 - dist; }
+      enemy_st = enemy_next_state(enemy_st, dist);
+      foe.vx = 0;
+      if (hitstun_tick(&foe_hurt) > 0) {
+        // 硬直中：被打断，不做 AI，按击退速度移动（现代动作游戏的"受击反应"）。
+        foe.vx = foe_hurt.vx;
+        foe.vy = foe_hurt.vy;
+      } else {
+        if (enemy_st == 1) {
+          if (hpx > enemy_x) { foe.vx = 65536; } else { foe.vx = -65536; }
+        }
+      }
+      body_step(&grid, &foe, GRAVITY);
+      enemy_x = foe.x / 65536;
+      enemy_y = foe.y / 65536;
+
+      if (slash_cd > 0) { slash_cd = slash_cd - 1; }
+      if (combo.step > 0) {
+        if (slash_cd <= 0) {
+          slashfx_pool_start(sfx, 3, hpx + 16, hpy + 16, face);
+          slash_cd = 6;
+          hit_done = 0;
+        }
+        if (attack_hit(hpx, hpy, 32, 32, face, enemy_x, enemy_y, 24, 24) == 1) {
+          if (hit_done == 0) {
+            hit_done = 1;
+            hitstun_start(&foe_hurt, face, 6);
+            if (fx.freeze == 0) {
+              hitfx_start(&fx, 6, 3, 2);
+              audio_play("games/huiye/hit.wav");
+            }
+          }
+        }
+      }
+      fx_update_rise(ps, 32);
+
+      cam_x = hpx - 240;
+      if (cam_x < 0) { cam_x = 0; }
+      if (cam_x > mapw * 16 - W) { cam_x = mapw * 16 - W; }
+
+      gfx_clear(&b, 0x000B0E1A);
+      grid_draw(&b, &grid, cam_x, 0);
+      state = actor_state_for(moving);
+      frame = actor_frame(state, fc);
+      if (combo.step > 0) { frame = 2; }
+      if (face == 1) {
+        sprite_blit_scale(&b, hpx - cam_x, hpy, kbuf, 16, 16, frame, pal, 7, SCALE);
+      } else {
+        sprite_blit_scale_flip(&b, hpx - cam_x, hpy, kbuf, 16, 16, frame, pal, 7, SCALE, 1);
+      }
+      // 刀光特效完全交给引擎库（lib\slashfx.fl）：样例只调 draw，不碰弧参数/时序。
+      slashfx_pool_draw(&b, sfx, 3, ps, 32, cam_x, 0);
+      fx_draw_fade(&b, ps, 32, cam_x);
+      // 先画再 tick：释放当帧就能看到 st=0 的满弧，不丢第一帧（"点了就要出来"）。
+      slashfx_pool_tick(sfx, 3);
+      sprite_blit_scale(&b, enemy_x - cam_x, enemy_y, ebuf, 12, 12, 0, pal, 7, SCALE);
+      if (fx.flash > 0) { gfx_flash(&b, 96); }
+      gfx_present(&sf);
+      spent = GetTickCount() - frame_start;
+      if (spent < 16) { Sleep(16 - spent); }
+      fc = fc + 1;
+    }
+  }
+  return 0;
+}
+
+
+
+
+

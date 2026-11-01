@@ -1,0 +1,44 @@
+// f070_gfx_dib -- 像素层（M0）：Surf.bits 直写通道 ＋ gfx.fl 的 attach/clear/px/rect/get
+// 判据：本样本编译通过且退出 42（8 项位掩码全亮）。
+// 为什么不开窗：surf_init 只要一个内存 DC ＋ DIB（不需要窗口）⇒ 纯进程内可判，适合进门。
+// 覆盖的坑：① 行宽 = DIB 位图宽 bw（不是逻辑宽 w）——末像素那条判据专门钉它；
+//           ② 字节序 B,G,R,A（照 ui_lib.fl 的 surf_alpha 抄，不自己推）；
+//           ③ 越界写必须被丢（gfx_px 返回 0）。
+include "../../lib/gfx.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int bits = 0;
+  int i = 0;
+  int n = 0;
+  char *px = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 32; s.cw = 64; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+
+  n = gfx_attach(&b, &s, 64, 32);
+  if (n == 0) { return 2; }
+  bits = bits | 1;                      // ① attach 成功
+
+  gfx_clear(&b, 0x00112233);            // R=0x11 G=0x22 B=0x33
+  if (gfx_get(&b, 0, 0) == 0x00112233) { bits = bits | 2; }        // ② 首像素
+  px = b.bits;                                                     // int* → char*（字节寻址；不能拿 int* 索引）
+  i = (31 * b.stride + 63) * 4;                                    // ③ 末像素（跨 stride 那一行）
+  if ((px[i] & 255) == 0x33) { bits = bits | 4; }
+  if ((px[i + 2] & 255) == 0x11) { bits = bits | 8; }
+
+  if (gfx_px(&b, 5, 7, 0x00AABBCC) == 1) { bits = bits | 16; }      // ④ 单点写返回 1
+  if (gfx_get(&b, 5, 7) == 0x00AABBCC) { bits = bits | 32; }         // ⑤ 读回一致
+
+  if (gfx_px(&b, 64, 0, 0x00FFFFFF) == 0) { bits = bits | 64; }      // ⑥ 越界写被丢
+
+  n = gfx_rect(&b, 60, 28, 70, 40, 0x0000FF00);                      // ⑦ 裁剪后写入像素数 = 4×4
+  if (n == 16) { bits = bits | 128; }
+
+  if (bits != 255) { return 3; }
+  return 42;
+}

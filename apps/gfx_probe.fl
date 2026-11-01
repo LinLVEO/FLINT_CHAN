@@ -1,0 +1,81 @@
+// apps\gfx_probe.fl — M0 像素层：480×270 帧缓冲直写 → ULW 上屏的可运行样例
+//
+// 运行方式：
+//   hlc run apps\gfx_probe.fl          （编译＋运行）
+//   hlc build apps\gfx_probe.fl        （产物进 build\gfx_probe.exe）
+//
+// 判据（自动）：退出码 = **每帧毫秒数×10**（先跑 300 帧测速，再演示 900 帧）。
+//   ⇒ 退出码 30 = 3.0 ms/帧；退出码 ≤ 80 = 达标（60 fps 预算 16.6 ms 的一半以内）。
+//   90/91/92 = 建窗/建表面/绑定失败（环境问题，不是性能问题）。
+include "../lib/flgui_win32.fl"
+include "../lib/gfx.fl"
+
+// 画一帧：竖向渐变背景 + 一个滑块方块 + 高光小方块（ph 控制滑块位置）
+int draw_frame(struct GfxBuf *b, int W, int H, int ph) {
+  int y = 0;
+  int v = 0;
+  int mx = 0;
+  y = 0;
+  while (y < H) {
+    v = y * 200 / H;                                        // 0..200 渐亮
+    gfx_rect(b, 0, y, W, y + 1, ((v / 3) << 16) | (v << 8) | (100 + v / 2));
+    y = y + 1;
+  }
+  mx = ph % (W - 100);
+  gfx_rect(b, mx, 120, mx + 80, 200, 0x00E8663C);           // 主体
+  gfx_box(b, mx, 120, mx + 80, 200, 0x00F2C14E);            // 1px 框（验裁剪与越界）
+  gfx_rect(b, 20, 20, 60, 40, 0x007FD8E8);                  // 高光角标
+  gfx_box(b, 20, 20, 60, 40, 0x00E8F0FF);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct GuiInput in;
+  int W = 480;
+  int H = 270;
+  int fc = 0;
+  int t0 = 0;
+  int t1 = 0;
+  int avg10 = 0;
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "GFXPROBE";
+  g.x = 120;
+  g.y = 100;
+  g.w = W;
+  g.h = H;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  // —— 测速：300 帧纯渲染（不 sleep）——
+  t0 = GetTickCount();
+  fc = 0;
+  while (fc < 300) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }
+    draw_frame(&b, W, H, fc);
+    gfx_present(&sf);
+    fc = fc + 1;
+  }
+  t1 = GetTickCount();
+  avg10 = (t1 - t0) * 10 / 300;
+  if (avg10 > 200) { avg10 = 200; }
+
+  // —— 演示：900 帧 ≈ 15 秒（60 fps），关窗即退 ——
+  fc = 0;
+  while (fc < 900) {
+    if (gui_win_pump(&g, &in) == 0) { return avg10; }
+    draw_frame(&b, W, H, fc);
+    gfx_present(&sf);
+    gui_win_frame_wait(&c);
+    fc = fc + 1;
+  }
+  return avg10;
+}

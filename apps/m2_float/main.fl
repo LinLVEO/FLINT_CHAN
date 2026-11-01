@@ -5,7 +5,7 @@
 // 数据源（第 5 步，2026-09-16）：**主源 = 8080 /api/data（HTTP+JSON，`lib\http_lib.fl`）**——
 //   与 C# 版同源读数（CPU 温度/占用/频率/功耗、GPU 温度/占用/显存/功耗、RAM、磁盘、网速、FPS、风扇）。
 //   直读通道（WinRing0 RAPL / ADL / IOCTL）保留作**回退**：8080 不通时按开关退回本地直读。
-// 编译：flint.exe main.fl -o m2_float.exe
+// 编译：hlc.exe main.fl -o m2_float.exe
 // 开关分布（正常使用不会碰到）：
 //   【自检类】tmp\row-probe\**selfcheck**\ —— dump.on / demo.on
 //     （2026-09-16 挪进子目录：自检开关与运行开关**物理分开**，交付/演示时不会误留；

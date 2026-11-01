@@ -1,6 +1,9 @@
 # 编译产物
 flint.exe
+hlc.exe
 flint_*.exe
+# `hlc build` 的默认产物目录（v1.10.5 起的约定；产物可重建，不入库）
+build/
 
 # 手工实验残留 / 临时目录
 tmp/
@@ -10,6 +13,10 @@ editor/tmp/
 # FLINT Studio 编译临时文件（写在被打开文件同目录）
 .studio_*.fl
 .studio_*.exe
+
+# FLINT Studio 的用户配置 / 会话状态（studio.cfg：字体字号工作区 + 上次文件/光标/滚动/窗口几何；
+# 2026-10-27 起 IDE 正常退出会写它。这是**本机用户数据**，不是源码，任何目录下都不入库）
+studio.cfg
 
 # samples 里手工编译的残留 exe（测试产物只写 test/tmp 且自清理）
 test/samples/*.exe
@@ -48,3 +55,53 @@ errors/
 diag/**/*.dll
 diag/**/*.exe
 diag/test/fltdiag/
+
+debugger/*.exe
+
+!apps/studio_native/studio_text.dll
+
+# ---- 运行时产物 / 现场垃圾（2026-10-31 仓库卫生刀）----
+# 背景：根目录曾堆 19 个 *.bak（4.1 MB）、ai.state（23 MB）、chip8 与 Studio 的截图/状态。
+# 规矩：**跑出来的东西不入库**；源码、样本、ROM、已入库的门证据日志照旧入库。
+
+# FLINT 程序的调试通道（写它的 = lib\flgui_ai.fl、apps\studio_native\studio_win.fl；
+# 读它的 = tools\flgui-ai.ps1 与 IDE 探针，而探针都在自己的 tmp\ 沙箱里读 ⇒
+# 仓库里出现的就是跑完没清的现场，删掉不影响任何探针）
+ai.state
+ai.ev
+ai.fb
+
+# 根目录随手落的日志（paint.log / minwin.log 就是实例）。故意**不用**全局 *.log：
+# bench\*.log、libcs\hwbridge\*.log、tmp\m9\*.log 是已入库的证据件，
+# 全局规则会让以后新增的证据件被静默忽略 —— "别误伤"在这里就是"只收根目录"。
+/*.log
+
+# chip8 运行时产物（帧缓冲 / 截图 / 按键与状态日志；roms\*.ch8 与 *.fl 源码照旧入库）
+apps/chip8/*.png
+apps/chip8/*.bmp
+apps/chip8/*.log
+apps/chip8/*.state
+apps/chip8/ai.*
+
+# FLINT Studio 编译临时件：实际落盘名是 `_studio_edit.fl`（下划线），老规则却写成 `.studio_*`
+# ⇒ 一直没生效（2026-10-31 实测 apps\studio_native\ 与 lib\ 各留一份）。下划线版本也收。
+_studio_edit.fl
+_studio_edit.log
+_studio_run.log
+
+# Studio 的手工调试现场（dbg/dump/一次性截图）。shot.png..shot9.png 里有已入库的，
+# 所以按名字收、不写 apps/studio_native/*.png。
+apps/studio_native/dbg*.txt
+apps/studio_native/o.txt
+apps/studio_native/o2.txt
+apps/studio_native/win.txt
+apps/studio_native/shot-live.png
+
+# paintshop 的用户配置（本机数据，同 studio.cfg 口径：不入库、也不删；
+# paint.log 归上面的 /*.log）
+paintshop.cfg
+
+# archive\rt\：可重生成的 Studio 调试现场（dbg*.txt / 一次性截图 / 临时 .fl），只留 README。
+# 留底是为了「不删」，不是为了入库 —— 这些内容换个日期就能重跑出来。
+archive/rt/*
+!archive/rt/README.md

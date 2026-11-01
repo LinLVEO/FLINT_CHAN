@@ -1,0 +1,63 @@
+// f075_phys.fl -- M3 第一版：定点数 16.16 + AABB + 落地
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  fx_from_int(5) == 327680
+//   bit1  fx_to_int(327680) == 5
+//   bit2  负数往返：fx_from_int(-3) == -196608 且 fx_to_int(-196608) == -3
+//   bit3  fx_mul(2.0, 3.0) == 6.0（先 /256 再乘的口径）
+//   bit4  AABB 相交：A(0,0,10,10) 与 B(5,5,10,10)
+//   bit5  AABB 贴边不算：B(10,0,10,10) 与 A 在 x 轴刚好接触 -> 0
+//   bit6  落地：py=100、vy=5、floor=100 -> py=100、vy=0、返回 1
+//   bit7  确定性：同一组"重力累加 + 落地"序列跑两次，结果逐位相同
+include "../../lib/phys.fl"
+
+int sim_land() {
+  int py = 0;
+  int vy = 0;
+  int i = 0;
+  int g = 32768;             // 0.5 格/tick²（16.16）
+  int hit = 0;
+  i = 0;
+  while (i < 10) {
+    vy = fx_add(vy, g);
+    py = fx_add(py, vy);
+    hit = hit + phys_land(&py, &vy, fx_from_int(6));
+    i = i + 1;
+  }
+  return py * 1000 + hit;
+}
+
+int main() {
+  int mask = 0;
+  int py = 0;
+  int vy = 0;
+  int a = 0;
+  int b = 0;
+
+  if (fx_from_int(5) == 327680) { mask = mask | 1; }
+  if (fx_to_int(327680) == 5) { mask = mask | 2; }
+  if (fx_from_int(-3) == -196608) {
+    if (fx_to_int(-196608) == -3) { mask = mask | 4; }
+  }
+  a = fx_mul(fx_from_int(2), fx_from_int(3));
+  if (a == fx_from_int(6)) { mask = mask | 8; }
+
+  if (phys_aabb(0, 0, 10, 10, 5, 5, 10, 10) == 1) { mask = mask | 16; }
+  if (phys_aabb(0, 0, 10, 10, 10, 0, 10, 10) == 0) { mask = mask | 32; }
+
+  py = 100;
+  vy = 5;
+  if (phys_land(&py, &vy, 100) == 1) {
+    if (py == 100) {
+      if (vy == 0) { mask = mask | 64; }
+    }
+  }
+
+  a = sim_land();
+  b = sim_land();
+  if (a == b) { mask = mask | 128; }
+
+  print(["f075 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

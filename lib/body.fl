@@ -1,0 +1,157 @@
+// body.fl -- 平台角色刚体（M3）：16.16 坐标/速度 + grid tile 碰撞 + 单向平台
+//
+// 用法：include "body.fl"（带进 phys.fl 与 grid.fl）
+// tile 约定：>0 = 实心；**9 = 单向平台**（只在下落时挡脚，上跳/横移可穿）。
+// 口径：x/y/vx/vy 都是 16.16 定点数；w/h 是像素。重力/速度由调用方给。
+include "phys.fl"
+include "grid.fl"
+
+struct Body { int x; int y; int vx; int vy; int w; int h; int onground; }
+
+int body_init(struct Body *b, int x, int y, int w, int h) {
+  if (b == 0) { return 0; }
+  b->x = fx_from_int(x);
+  b->y = fx_from_int(y);
+  b->vx = 0;
+  b->vy = 0;
+  b->w = w;
+  b->h = h;
+  b->onground = 0;
+  return 1;
+}
+
+// 内部：像素矩形与实心 tile 重叠？ignore_oneway=1 时 tile 9 不算实心。
+int body_hit_tile(struct Grid *g, int xpx, int ypx, int w, int h, int ignore_oneway) {
+  int tx0 = 0;
+  int ty0 = 0;
+  int tx1 = 0;
+  int ty1 = 0;
+  int tx = 0;
+  int ty = 0;
+  int t = 0;
+  if (g == 0) { return 0; }
+  tx0 = grid_floor_div(xpx, g->tw);
+  ty0 = grid_floor_div(ypx, g->th);
+  tx1 = grid_ceil_div(xpx + w, g->tw);
+  ty1 = grid_ceil_div(ypx + h, g->th);
+  if (tx0 < 0) { tx0 = 0; }
+  if (ty0 < 0) { ty0 = 0; }
+  if (tx1 > g->w) { tx1 = g->w; }
+  if (ty1 > g->h) { ty1 = g->h; }
+  ty = ty0;
+  while (ty < ty1) {
+    tx = tx0;
+    while (tx < tx1) {
+      t = grid_at(g, tx, ty);
+      if (t > 0) {
+        if (ignore_oneway == 0) { return 1; }
+        if (t != 9) { return 1; }
+      }
+      tx = tx + 1;
+    }
+    ty = ty + 1;
+  }
+  return 0;
+}
+
+// 全部实心（含单向平台）——给"点在不在实心格"这类判据用
+int body_hit(struct Grid *g, int xpx, int ypx, int w, int h) {
+  return body_hit_tile(g, xpx, ypx, w, h, 0);
+}
+
+// 只算硬实心（单向平台不算）——移动用
+int body_hit_solid(struct Grid *g, int xpx, int ypx, int w, int h) {
+  return body_hit_tile(g, xpx, ypx, w, h, 1);
+}
+
+// 第 row 行上、角色横向覆盖范围内是否有单向平台（tile 9）
+int body_oneway_at(struct Grid *g, int xpx, int w, int row) {
+  int tx0 = 0;
+  int tx1 = 0;
+  int tx = 0;
+  if (g == 0) { return 0; }
+  if (row < 0) { return 0; }
+  if (row >= g->h) { return 0; }
+  tx0 = grid_floor_div(xpx, g->tw);
+  tx1 = grid_ceil_div(xpx + w, g->tw);
+  if (tx0 < 0) { tx0 = 0; }
+  if (tx1 > g->w) { tx1 = g->w; }
+  tx = tx0;
+  while (tx < tx1) {
+    if (grid_at(g, tx, row) == 9) { return 1; }
+    tx = tx + 1;
+  }
+  return 0;
+}
+
+// 单轴逐像素移动：delta 是 16.16 增量，axis 0=x / 1=y。
+// 撞到硬实心前停下（像素级贴边）；下落跨过单向平台顶那一像素时也停下。
+// 返回 0=被挡住，1=走完，2=增量为 0（没走也没撞）。
+int body_move_axis(struct Grid *g, struct Body *b, int delta, int axis) {
+  int n = delta;
+  int s = 1;
+  int nx = 0;
+  int ny = 0;
+  int bottom1 = 0;
+  int row1 = 0;
+  if (n < 0) { n = 0 - n; s = -1; }
+  n = n / 65536;
+  if (n == 0) { return 2; }
+  while (n > 0) {
+    nx = b->x;
+    ny = b->y;
+    if (axis == 0) { nx = b->x + s * 65536; } else { ny = b->y + s * 65536; }
+    if (body_hit_solid(g, nx / 65536, ny / 65536, b->w, b->h) != 0) { return 0; }
+    if (axis == 1) {
+      if (s == 1) {
+        // 下落：脚底**严格进入**单向平台行才挡；正好落在平台顶那一像素放行
+        bottom1 = (ny + fx_from_int(b->h)) / 65536;
+        row1 = grid_floor_div(bottom1, g->th);
+        if (body_oneway_at(g, b->x / 65536, b->w, row1) == 1) {
+          if (bottom1 > row1 * g->th) { return 0; }
+        }
+      }
+    }
+    b->x = nx;
+    b->y = ny;
+    n = n - 1;
+  }
+  return 1;
+}
+
+// 一步：先加重力，再竖直移动、水平移动；撞到就清该轴速度（位置已贴边）。
+// onground 只在竖直向下撞到时置 1，竖直真的走了才清；零步（亚像素）保持原状态。
+int body_step(struct Grid *g, struct Body *b, int gravity) {
+  int r = 0;
+  int row = 0;
+  int foot = 0;
+  b->vy = fx_add(b->vy, gravity);
+  r = body_move_axis(g, b, b->vy, 1);
+  if (r == 0) {
+    b->vy = 0;
+    if (gravity > 0) { b->onground = 1; }
+  } else if (r == 1) {
+    b->onground = 0;
+  } else {
+    // 亚像素零步：**必须看脚下还有没有地**。只信 onground 会让"走出平台边缘"悬空
+    // （2026-10-31 用户报：平走不触发重力 —— 根因就是这里，走出平台后 onground 还留着，
+    //   下一帧 vy 又被清零，人一直飘着）。
+    foot = (b->y + fx_from_int(b->h)) / 65536;
+    row = grid_floor_div(foot, g->th);
+    if (body_hit_solid(g, b->x / 65536, foot, b->w, 1) != 0) {
+      b->onground = 1;
+      if (b->vy > 0) { b->vy = 0; }
+    } else if (body_oneway_at(g, b->x / 65536, b->w, row) == 1) {
+      // 脚下是单向平台：从上面站着也算有地
+      b->onground = 1;
+      if (b->vy > 0) { b->vy = 0; }
+    } else {
+      b->onground = 0;
+    }
+  }
+  r = body_move_axis(g, b, b->vx, 0);
+  if (r == 0) {
+    b->vx = 0;
+  }
+  return 0;
+}

@@ -38,7 +38,7 @@ if (-not $PSScriptRoot) { throw '差分门: 拿不到脚本所在目录（$PSScr
 $root    = Split-Path $PSScriptRoot -Parent          # E:\FLINT-lab
 $samples = Join-Path $PSScriptRoot 'samples'
 $bootDir = Join-Path $root 'boot'
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $boot    = Join-Path $bootDir 'b1_emit.exe'
 # ⚠️ 副本必须放在**与 test\samples 相同深度**的位置：样本里既有同目录 include，
 #    也有 `include "../../lib/xxx.fl"` 这类**按相对深度**写的路径（2026-09-19 踩过：
@@ -136,7 +136,7 @@ function Invoke-Compile([string]$exe, [string]$src, [string[]]$extra, [string]$t
   if ($null -eq $ec) { return @{ hang = $true; code = $null; text = "[$tag 编译超时/无退出码] " + ((Get-Content $outPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)) } }
   $txt = ''
   # ⚠️ `Start-Process -RedirectStandardOutput` **不做解码**，落盘就是子进程原样吐的字节；
-  #   实测 flint.exe 吐的是 **UTF-8**（首字节 E2 9C 85 = "✅"）⇒ 必须按 UTF8 读。
+  #   实测 hlc.exe 吐的是 **UTF-8**（首字节 E2 9C 85 = "✅"）⇒ 必须按 UTF8 读。
   #   不写 -Encoding 时 PS5.1 按 ANSI(GBK) 解 ⇒ 中文全变乱码，门外看着像失败（本轮实测踩过）。
   if (Test-Path $outPath) { $txt = (Get-Content $outPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) }
   if (Test-Path "$outPath.err") { $txt = $txt + (Get-Content "$outPath.err" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) }

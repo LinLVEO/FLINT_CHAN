@@ -1,6 +1,6 @@
 // main.fl -- print the 2-character Chinese label + ": 56 C", from a byte table (OLD route).
 //
-// Build: flint.exe examples\cn-print\main.fl
+// Build: hlc.exe examples\cn-print\main.fl
 // Run:   examples\cn-print\cn-print.exe
 //
 // =========================  CORRECTION (2026-10-14, measured)  =========================

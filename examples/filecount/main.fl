@@ -1,6 +1,6 @@
 // main.fl -- count the bytes and lines of a text file, then write a byte-identical copy.
 //
-// Build: flint.exe examples\filecount\main.fl -o examples\filecount\filecount.exe
+// Build: hlc.exe examples\filecount\main.fl -o examples\filecount\filecount.exe
 // Run:   examples\filecount\filecount.exe <in.txt>
 //          reads <in.txt>, writes <in.txt>.copy, prints the counts,
 //          exit code = line count (mod 256)   254 = cannot read   253 = cannot write

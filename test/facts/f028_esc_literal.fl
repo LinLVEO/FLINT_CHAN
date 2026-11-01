@@ -54,7 +54,7 @@
 //   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f028_esc_literal -Compiler boot
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f028_esc_literal.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl;E:\FLINT-lab\boot\lib_parse.fl
 //   (sibling row for the OTHER escape fork: E:\FLINT-lab\test\facts\f003_xesc.fl -- `\xNN`)
 //

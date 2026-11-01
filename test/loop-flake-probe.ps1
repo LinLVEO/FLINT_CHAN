@@ -17,7 +17,7 @@ Set-Content -LiteralPath (Join-Path $scDir 'demo.on') -Value 'on' -Encoding ASCI
 foreach ($f in @('HwBridge.dll', 'config.json')) { Copy-Item (Join-Path $appDir $f) (Join-Path $work $f) -Force }
 
 Push-Location $root
-& (Join-Path $root 'flint.exe') (Join-Path $appDir 'main.fl') -o (Join-Path $work 'app_flint.exe') 2>&1 | Out-Null
+& (Join-Path $root 'hlc.exe') (Join-Path $appDir 'main.fl') -o (Join-Path $work 'app_hlc.exe') 2>&1 | Out-Null
 Write-Output ("flint compile exit=" + $LASTEXITCODE)
 & (Join-Path $root 'boot\b1_emit.exe') (Join-Path $appDir 'main.fl') 2>&1 | Out-Null
 Write-Output ("boot compile exit=" + $LASTEXITCODE)
@@ -52,5 +52,5 @@ function Probe([string]$exe, [string]$tag, [int]$runs) {
   }
 }
 Probe (Join-Path $work 'app_boot.exe') 'boot' 10
-Probe (Join-Path $work 'app_flint.exe') 'flint' 10
+Probe (Join-Path $work 'app_hlc.exe') 'flint' 10
 Write-Output ("scratch: " + $work)

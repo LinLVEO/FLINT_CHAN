@@ -1,6 +1,6 @@
 // student.fl — 学生管理系统（FLINT 演示应用）
 // 功能：1 添加  2 列出  3 查找  4 删除  5 统计  6 保存到文件  7 从文件读取  0 退出
-// 编译：E:\FLINT\flint.exe student.fl -o student.exe    （自举编译器同样能编：boot\b1_emit.exe student.fl）
+// 编译：E:\FLINT\hlc.exe student.fl -o student.exe    （自举编译器同样能编：boot\b1_emit.exe student.fl）
 // 运行：run.bat（内部 chcp 65001，中文界面不乱码）；数据文件 students.txt 存在本目录
 //
 // FLINT 写法说明（这门语言现在的样子）：

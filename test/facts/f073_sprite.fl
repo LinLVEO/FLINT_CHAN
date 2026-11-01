@@ -1,0 +1,64 @@
+// f073_sprite.fl -- M2 精灵绘制：调色板索引 -> GfxBuf（sprite_blit）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 帧 0 = 1,0 / 0,1（对角），帧 1 = 2,2 / 2,2（全实）。pal[1]=红、pal[2]=绿、其余 0。
+//   bit0  frame0 画在 (5,5) -> 写入 2 像素（两个 1，两个 0 透明）
+//   bit1  (5,5) = pal[1]
+//   bit2  (6,5) = 背景（透明跳过）
+//   bit3  (6,6) = pal[1]、(5,6) = 背景（对角另一半）
+//   bit4  frame1 全实 -> 写入 4 像素
+//   bit5  (5,5) = pal[2]（帧切换生效）
+//   bit6  blit(-1,-1) 越界 -> 只有 (0,0) 落进屏内，写入 1，不崩
+//   bit7  ncol 截断：v=3 且 ncol=3 -> 该像素不画（(5,5) 仍是背景），其余 3 个照画
+include "../../lib/sprite.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int data[8];
+  int pal[7];
+  int mask = 0;
+  int n = 0;
+  int BG = 0x00ABCDEF;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 16; s.bh = 16; s.cw = 16; s.ch = 16;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 16, 16) == 0) { return 2; }
+
+  data[0] = 1; data[1] = 0; data[2] = 0; data[3] = 1;
+  data[4] = 2; data[5] = 2; data[6] = 2; data[7] = 2;
+  pal[0] = 0; pal[1] = 0x00FF0000; pal[2] = 0x0000FF00;
+  pal[3] = 0; pal[4] = 0; pal[5] = 0; pal[6] = 0;
+
+  gfx_clear(&b, BG);
+  n = sprite_blit(&b, 5, 5, data, 2, 2, 0, pal, 7);
+  if (n == 2) { mask = mask | 1; }
+  if (gfx_get(&b, 5, 5) == 0x00FF0000) { mask = mask | 2; }
+  if (gfx_get(&b, 6, 5) == BG) { mask = mask | 4; }
+  if (gfx_get(&b, 6, 6) == 0x00FF0000) {
+    if (gfx_get(&b, 5, 6) == BG) { mask = mask | 8; }
+  }
+
+  gfx_clear(&b, BG);
+  n = sprite_blit(&b, 5, 5, data, 2, 2, 1, pal, 7);
+  if (n == 4) { mask = mask | 16; }
+  if (gfx_get(&b, 5, 5) == 0x0000FF00) { mask = mask | 32; }
+
+  gfx_clear(&b, BG);
+  n = sprite_blit(&b, -1, -1, data, 2, 2, 1, pal, 7);
+  if (n == 1) { mask = mask | 64; }
+
+  data[4] = 3;
+  gfx_clear(&b, BG);
+  n = sprite_blit(&b, 5, 5, data, 2, 2, 1, pal, 3);
+  if (n == 3) {
+    if (gfx_get(&b, 5, 5) == BG) { mask = mask | 128; }
+  }
+
+  print(["f073 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

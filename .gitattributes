@@ -61,3 +61,15 @@ apps/m2_float/浮窗规格-对C#逐细节.md  export-ignore
 libcs/hwbridge/部署说明.md     export-ignore
 test/boot缺口归因.md           export-ignore
 lib/FLGUI.md                   export-ignore
+# 官方工具接口契约（内部设计件，对外只发源码）+ 调试工具还没落地
+interface/                     export-ignore
+debugger/                      export-ignore
+
+# ---- 仓库卫生（2026-10-31）：归档区与过程笔记不进导出包 ----
+# archive\ 下是旧二进制（*.bak / 历史 exe）与 Studio 调试现场，只作本机留底。
+archive/                       export-ignore
+# PROGRESS.md 瘦身后拆出的历史归档（与 PROGRESS-归档.md 同口径）
+PROGRESS-归档-*.md             export-ignore
+# 根目录过程笔记已搬进 notes\。上面按名字的规则在任何目录都生效（gitattributes 与 .gitignore
+# 同一套匹配规则），这里再显式标一次目录：以后新加、名字没被既有规则覆盖的笔记也不会漏出去。
+notes/                         export-ignore

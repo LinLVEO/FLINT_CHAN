@@ -87,7 +87,7 @@
 //   (v1.7.0 int4 ABI: q8/r24 land on whole 4-byte elements; mid-element reads are layout-dependent and unprinted)
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f025_ptr_arith.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
 //   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\SPEC.md;
 //   (context pins for the same rule: E:\FLINT-lab\test\samples\audit7.fl;

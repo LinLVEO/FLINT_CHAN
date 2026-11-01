@@ -1,0 +1,171 @@
+// apps\game_probe.fl -- NERO ·《虚妄之塔》M1~M7 汇合灰盒：滚屏 + 精灵 + 刚体 + 攻击 + 敌人
+//
+// 运行：hlc run apps\game_probe.fl
+// 操作：←/→ 走，空格跳（地面时），J 攻击（三段连击），关窗退出。
+// 判据：建窗/加载各步返回 90..99 的错误码；正常关窗退 0。
+include "../lib/flgui_win32.fl"
+include "../lib/gfx.fl"
+include "../lib/grid.fl"
+include "../lib/mapload.fl"
+include "../lib/sprite.fl"
+include "../games/huiye/sprite_data.fl"
+include "../lib/actor.fl"
+include "../lib/body.fl"
+include "../lib/attack.fl"
+include "../lib/hitfx.fl"
+include "../lib/enemy.fl"
+include "../lib/save.fl"
+include "../lib/audio.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct GuiInput in;
+  struct Grid grid;
+  struct Body hero;
+  struct Combo combo;
+  struct HitFx fx;
+  int map[544];
+  int hbuf[768];
+  int ebuf[288];
+  int pal[7];
+  int W = 480;
+  int H = 270;
+  int mapw = 32;
+  int maph = 17;
+  int cam_x = 0;
+  int fc = 0;
+  int run = 1;
+  int face = 1;
+  int state = 0;
+  int frame = 0;
+  int hpx = 0;
+  int hpy = 0;
+  int enemy_x = 400;
+  int enemy_y = 200;
+  int enemy_st = 0;
+  int dist = 0;
+  int moving = 0;
+  char sbuf[64];
+  int sv[4];
+  int n = 0;
+  int esc_prev = 0;
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "GAMEPROBE";
+  g.x = 120;
+  g.y = 80;
+  g.w = W;
+  g.h = H;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  if (grid_init(&grid, map, mapw, maph, 16, 16) == 0) { return 93; }
+  if (mapload_ascii("apps/map.txt", map, mapw, maph) == 0) { return 94; }
+  if (sprite_hero_load(hbuf) == 0) { return 95; }
+  if (sprite_enemy_load(ebuf) == 0) { return 96; }
+  if (sprite_pal_fill(pal) != 7) { return 97; }
+  if (body_init(&hero, 32, 0, 16, 16) == 0) { return 98; }
+  if (combo_start(&combo) == 0) { return 99; }
+  if (hitfx_start(&fx, 0, 0, 0) == 0) { return 100; }
+
+  // 读档（没有存档就按默认开局；坏档一律忽略，不崩）
+  sv[0] = 0; sv[1] = 0; sv[2] = 0; sv[3] = 0;
+  n = std::file_read("game_probe.sav", sbuf, 64);
+  if (n > 0) {
+    if (save_unpack(sbuf, n, sv, 4) == 4) {
+      hero.x = sv[0];
+      hero.y = sv[1];
+      enemy_x = sv[2];
+      enemy_y = sv[3];
+    }
+  }
+
+  while (run == 1) {
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      hero.vx = 0;
+      moving = 0;
+      // A/D 左右、W 跳、S 加速下落
+      if ((GetAsyncKeyState(0x41) & 0x8000) != 0) {
+        hero.vx = -3 * 65536;
+        face = 0;
+        moving = 1;
+      }
+      if ((GetAsyncKeyState(0x44) & 0x8000) != 0) {
+        hero.vx = 3 * 65536;
+        face = 1;
+        moving = 1;
+      }
+      if ((GetAsyncKeyState(0x57) & 0x8000) != 0) {
+        if (hero.onground == 1) {
+          hero.vy = -8 * 65536;
+          audio_play("apps/beep.wav");
+        }
+      }
+      if ((GetAsyncKeyState(0x53) & 0x8000) != 0) {
+        if (hero.vy < 6 * 65536) { hero.vy = 6 * 65536; }
+      }
+      if ((GetAsyncKeyState(0x4A) & 0x8000) != 0) { combo_press(&combo); }
+      // ESC：按下沿存档（位置 + 敌人位置）
+      if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) {
+        if (esc_prev == 0) {
+          sv[0] = hero.x;
+          sv[1] = hero.y;
+          sv[2] = enemy_x;
+          sv[3] = enemy_y;
+          n = save_pack(sbuf, 64, sv, 4);
+          if (n > 0) { std::file_write("game_probe.sav", sbuf, n); }
+        }
+        esc_prev = 1;
+      } else {
+        esc_prev = 0;
+      }
+
+      body_step(&grid, &hero, 32768);
+      combo_tick(&combo);
+      hitfx_tick(&fx);
+
+      hpx = hero.x / 65536;
+      hpy = hero.y / 65536;
+
+      dist = hpx - enemy_x;
+      if (dist < 0) { dist = 0 - dist; }
+      enemy_st = enemy_next_state(enemy_st, dist);
+      if (enemy_st == 1) {
+        if (hpx > enemy_x) { enemy_x = enemy_x + 1; } else { enemy_x = enemy_x - 1; }
+      }
+
+      if (combo.step > 0) {
+        if (attack_hit(hpx, hpy, 16, 16, face, enemy_x, enemy_y, 12, 12) == 1) {
+          if (fx.freeze == 0) {
+            hitfx_start(&fx, 6, 3, 2);
+            audio_play("apps/beep.wav");
+          }
+        }
+      }
+
+      cam_x = hpx - 240;
+      if (cam_x < 0) { cam_x = 0; }
+      if (cam_x > mapw * 16 - W) { cam_x = mapw * 16 - W; }
+
+      gfx_clear(&b, 0x000B0E1A);
+      grid_draw(&b, &grid, cam_x, 0);
+      state = actor_state_for(moving);
+      frame = actor_frame(state, fc);
+      sprite_blit(&b, hpx - cam_x, hpy, hbuf, 16, 16, frame, pal, 7);
+      sprite_blit(&b, enemy_x - cam_x, enemy_y, ebuf, 12, 12, 0, pal, 7);
+      if (fx.flash > 0) { gfx_flash(&b, 96); }
+      gfx_present(&sf);
+      gui_win_frame_wait(&c);
+      fc = fc + 1;
+    }
+  }
+  return 0;
+}

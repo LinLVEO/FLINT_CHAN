@@ -1,0 +1,986 @@
+// studio_server.fl — FLINT Studio 原生服务端（骨架）
+// 目标：与 Node 版 editor\server.js 的 HTTP 面等价（/api/health、/api/events 先落地）
+// 编译：E:\FLINT-lab\hlc.exe apps\studio_native\main.fl -o apps\studio_native\studio_server.exe
+
+api ws2_32 int WSAStartup(int, int);
+api ws2_32 int WSACleanup();
+api ws2_32 int socket(int, int, int);
+api ws2_32 int bind(int, int, int);
+api ws2_32 int listen(int, int);
+api ws2_32 int accept(int, int, int);
+api ws2_32 int recv(int, int, int, int);
+api ws2_32 int send(int, int, int, int);
+api ws2_32 int closesocket(int);
+api ws2_32 int ioctlsocket(int, int, int);
+api ws2_32 int select(int, int, int, int, int);
+api ws2_32 int WSAGetLastError();
+api kernel32 int GetTickCount();
+api kernel32 int Sleep(int);
+api kernel32 int GetCurrentDirectoryA(int, int);
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int CreateProcessA(int, int, int, int, int, int, int, int, int, int);
+api kernel32 int WaitForSingleObject(int, int);
+api kernel32 int GetExitCodeProcess(int, int);
+api kernel32 int CloseHandle(int);
+api kernel32 int DeleteFileA(int);
+api kernel32 ptr GetCommandLineA();
+api kernel32 ptr FindFirstFileA(int, int);
+api kernel32 int FindNextFileA(ptr, int);
+api kernel32 int FindClose(ptr);
+include "../../lib/io_lib.fl"
+
+// —— 全局状态（v1.10.0 起支持 int 标量/数组全局；本项目就靠它跨请求）——
+int g_listen;              // 监听 socket
+int g_cl[8];               // 客户端 socket（0 = 空闲）
+int g_cst[8];              // 0=空闲 1=读请求中 2=SSE 长连接 3=待关闭
+int g_clen[8];             // 已收请求字节数
+int g_cap = 4096;          // 每客户端缓冲上限
+char g_buf[32768];         // 8 个客户端的请求缓冲（拼在一起，按 slot 偏移）
+int g_port = 8899;
+int g_served = 0;          // 已办请求数（自证用）
+int g_started = 0;         // 启动时刻 ms
+char g_capjson[16384];     // interface\capabilities.json 原文
+int g_caplen = 0;
+char g_state[4096];        // /api/editor/state 的镜像体
+int g_statel = 0;
+int g_rev = 0;
+// —— job 表（run 端点）：8 个槽，id = "j<N>" ——
+char g_jobids[128];        // 8 × 16 字节
+int g_joblen[8];
+int g_jobcode[8];
+int g_jobms[8];
+int g_jobn = 0;
+char *g_jobout;            // 8 × 4096 输出缓冲（启动时分配）
+int g_line = 0;            // 最近一次诊断的行/列
+int g_col = 0;
+char g_diagmsg[512];       // 最近一次诊断的原文（给 /api/diagnostics 回放）
+int g_diagmsgl = 0;
+int g_hasdiag = 0;
+char g_fix[256];
+int g_fixl = 0;
+char g_cmd[1024];          // 子进程命令行（CreateProcess 会就地改写，必须是可写缓冲）
+char g_mode[16];          // native / headless
+char g_tmpath[600];
+char g_ws[260];            // 工作区根（绝对路径）
+char g_path[512];          // 解出来的相对路径
+char g_abs[600];           // 拼出来的绝对路径
+// ⚠️ 大缓冲用**指针全局 + VirtualAlloc**，别写成全局数组：全局数组会原样进 .data，
+//    130KB+64KB 的缓冲会把产物从 75KB 撑到 278KB（FLINT 的卖点是极小产物，这里不能破）。
+char *g_tmp;               // 读文件缓冲（启动时分配）
+char *g_out;               // 响应体缓冲（启动时分配）
+char *g_ins;               // edit 的新文本缓冲
+char *g_edit;              // edit 的拼接结果缓冲
+int g_dbg = 0;             // 调试：只打印前若干轮 select 结果
+
+// —— fd_set 手工构造 ——
+// ⚠️ 必须建在 **char** 缓冲上：FLINT 的局部 int 数组是 8 字节槽（a[i]=*(a+i*8)），
+//   而 Windows 的 fd_set 是 { u_int fd_count; SOCKET fd_array[64]; } = 4 字节计数 + 8 字节步进。
+//   早先版本用 int fs[130] 装 → 句柄写到字节 8/12 而不是 4/8 → select 永远看不到就绪句柄
+//   （监听 socket 明明 LISTENING，curl 却超时）。本文件所有「原生结构体」一律走 char + 字节偏移。
+int w32(char *b, int off, int v) {
+  b[off] = v - (v / 256) * 256;
+  b[off + 1] = (v / 256) - (v / 65536) * 256;
+  b[off + 2] = (v / 65536) - (v / 16777216) * 256;
+  b[off + 3] = (v / 16777216) - (v / 1073741824) * 256;
+  return 0;
+}
+
+// ⚠️ char 在 FLINT 里是**有符号** 1 字节 ⇒ 必须 &255 按无符号读，否则句柄低字节 >127 会变负数
+//   （实测症状：select 明明就绪，fs_has 却永远不匹配 → accept/recv 从不发生、curl 超时）
+int r32(char *b, int off) {
+  int v = 0;
+  v = (b[off] & 255) + (b[off + 1] & 255) * 256 + (b[off + 2] & 255) * 65536 + (b[off + 3] & 255) * 16777216;
+  return v;
+}
+
+int fs_init(char *fs) {
+  w32(fs, 0, 0);
+  return 0;
+}
+
+int fs_add(char *fs, int sk) {
+  int n = r32(fs, 0);
+  if (n >= 64) { return 0; }
+  w32(fs, 4 + n * 8, sk);        // 句柄低 32 位
+  w32(fs, 8 + n * 8, 0);         // 高 32 位（句柄都是小整数）
+  w32(fs, 0, n + 1);
+  return 0;
+}
+
+// select 返回后：fd_set 里只剩就绪句柄 —— 逐个比对
+int fs_has(char *fs, int sk) {
+  int n = r32(fs, 0);
+  int i = 0;
+  while (i < n) {
+    if (r32(fs, 4 + i * 8) == sk) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// —— 文本工具 ——
+int ap(char *d, int p, char *s) {
+  int i = 0;
+  while (s[i] != 0) { d[p] = s[i]; p = p + 1; i = i + 1; }
+  return p;
+}
+
+int apnum(char *d, int p, int v) {
+  char t[16];
+  int n = 0;
+  int i = 0;
+  if (v == 0) { d[p] = '0'; return p + 1; }
+  if (v < 0) { d[p] = '-'; p = p + 1; v = 0 - v; }
+  while (v > 0) { t[n] = 48 + (v - (v / 10) * 10); n = n + 1; v = v / 10; }
+  i = n - 1;
+  while (i >= 0) { d[p] = t[i]; p = p + 1; i = i - 1; }
+  return p;
+}
+
+// 在 [off, off+len) 里找子串 s；找不到 -1
+int find_sub(char *b, int off, int len, char *s) {
+  int sl = 0;
+  int i = 0;
+  int j = 0;
+  while (s[sl] != 0) { sl = sl + 1; }
+  if (sl == 0) { return -1; }
+  while (i + sl <= len) {
+    j = 0;
+    while (j < sl && b[off + i + j] == s[j]) { j = j + 1; }
+    if (j == sl) { return off + i; }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// 路径是否以 prefix 开头
+int path_is(char *b, int off, int len, char *prefix) {
+  int pl = 0;
+  int i = 0;
+  while (prefix[pl] != 0) { pl = pl + 1; }
+  if (len < pl) { return 0; }
+  while (i < pl) {
+    if (b[off + i] != prefix[i]) { return 0; }
+    i = i + 1;
+  }
+  // 边界：前缀之后只能是结尾 / '?' / '/' / ' ' —— 否则 `/api/file` 会把 `/api/files` 整条吃掉
+  //   （实测症状：/api/files 返回 E-PATH，因为走了 /api/file 的 path 分支）
+  // 前缀以 '/' 结尾时（如 /api/jobs/）后面本来就接参数，不再要求边界字符
+  if (prefix[pl - 1] != 47) {
+    if (pl < len) {
+      if (b[off + pl] != 63 && b[off + pl] != 47 && b[off + pl] != 32) { return 0; }
+    }
+  }
+  return 1;
+}
+
+// —— HTTP 响应 ——
+int send_plain(int sk, char *status, char *ctype, char *body, int blen) {
+  char h[512];
+  int hl = 0;
+  hl = ap(h, hl, "HTTP/1.0 ");
+  hl = ap(h, hl, status);
+  hl = ap(h, hl, "\r\nContent-Type: ");
+  hl = ap(h, hl, ctype);
+  hl = ap(h, hl, "\r\nContent-Length: ");
+  hl = apnum(h, hl, blen);
+  hl = ap(h, hl, "\r\nConnection: close\r\n\r\n");
+  send(sk, h, hl, 0);
+  if (blen > 0) { send(sk, body, blen, 0); }
+  return 0;
+}
+
+include "file_routes.fl"
+include "compile_routes.fl"
+include "fs_routes.fl"
+include "search_routes.fl"
+
+// 取 JSON 里 "key": 123 的整数值（找不到返回 -1）
+int json_num(char *b, int off, int len, char *key) {
+  int k = find_sub(b, off, len, key);
+  int i = 0;
+  int v = 0;
+  int got = 0;
+  if (k < 0) { return 0 - 1; }
+  i = k + 1;
+  while (i < off + len && b[i] != ':') { i = i + 1; }
+  i = i + 1;
+  while (i < off + len) {
+    if (b[i] >= 48 && b[i] <= 57) { v = v * 10 + (b[i] - 48); got = 1; }
+    else { if (got == 1) { break; } }
+    i = i + 1;
+  }
+  if (got == 0) { return 0 - 1; }
+  return v;
+}
+
+// —— 头字段解析：找 "Key: 123" 里的整数（找不到 -1）——
+int hdr_int(char *b, int off, int len, char *key) {
+  int k = find_sub(b, off, len, key);
+  int i = 0;
+  int v = 0;
+  int got = 0;
+  if (k < 0) { return -1; }
+  i = k + 1;
+  // 跳过 key 本身与 ": "
+  while (i < off + len && b[i] != ':') { i = i + 1; }
+  i = i + 1;
+  while (i < off + len) {
+    if (b[i] >= 48 && b[i] <= 57) { v = v * 10 + (b[i] - 48); got = 1; }
+    else { if (got == 1) { break; } }
+    i = i + 1;
+  }
+  if (got == 0) { return -1; }
+  return v;
+}
+
+// 把一个 slot 的请求缓冲按路由处理；返回 2 = SSE 长连接，3 = 已回复可关闭，0 = 数据还不够
+int handle_req(int slot) {
+  char *b = g_buf;
+  int off = slot * g_cap;
+  int len = g_clen[slot];
+  char body[256];
+  int bl = 0;
+  int ps = 0;
+  int pe = 0;
+  int hs = 0;
+  int clen = 0;
+  int bstart = 0;
+  int plen = 0;
+  int k = 0;
+  int i = 0;
+  int r = 0;
+  int rr = 0;
+  int st = 0;
+  int en = 0;
+  int tl = 0;
+  int fn = 0;
+  int fn2 = 0;
+  int dbg = 0;
+  int keep = 0;
+  int o = 0;
+
+  // 请求行：<METHOD> <PATH> HTTP/1.x
+  ps = off;
+  while (ps < off + len && b[ps] != ' ') { ps = ps + 1; }
+  ps = ps + 1;
+  pe = ps;
+  while (pe < off + len && b[pe] != ' ') { pe = pe + 1; }
+  plen = pe - ps;
+
+  hs = find_sub(b, off, len, "\r\n\r\n");
+  if (hs < 0) { return 0; }
+  bstart = hs + 4;
+  // HTTP 头名大小写不敏感（实测：Node fetch 发的是小写 content-length，只匹配标准写法会读成 -1 → 体丢掉）
+  clen = hdr_int(b, off, len, "Content-Length:");
+  if (clen < 0) { clen = hdr_int(b, off, len, "content-length:"); }
+
+  if (plen == 1 && b[ps] == 47) {
+    if (seq(g_mode, "headless") != 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-HEADLESS\"}");
+      send_plain(g_cl[slot], "404 Not Found", "application/json", g_out, bl);
+    } else {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-NOUI\"}");
+      send_plain(g_cl[slot], "404 Not Found", "application/json", g_out, bl);
+    }
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/health")) {
+    bl = ap(body, bl, "{\"ok\":true,\"mode\":\"");
+    bl = ap(body, bl, g_mode);
+    bl = ap(body, bl, "\",\"port\":");
+    bl = apnum(body, bl, g_port);
+    bl = ap(body, bl, ",\"served\":");
+    bl = apnum(body, bl, g_served);
+    bl = ap(body, bl, ",\"upMs\":");
+    bl = apnum(body, bl, GetTickCount() - g_started);
+    bl = ap(body, bl, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", body, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/capabilities")) {
+    if (g_caplen <= 0) { bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-CAPFILE\"}"); send_plain(g_cl[slot], "500 Internal Server Error", "application/json", g_out, bl); return 3; }
+    // 原文件是 {"version":1,...}（顶层对象）⇒ 掐掉首个 '{' 后拼 "{\"ok\":true,"（11 字节）
+    k = ap(body, 0, "{\"ok\":true,");
+    {
+      char h[256];
+      int hl = 0;
+      hl = ap(h, hl, "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
+      hl = apnum(h, hl, k + g_caplen);
+      hl = ap(h, hl, "\r\nConnection: close\r\n\r\n");
+      send(g_cl[slot], h, hl, 0);
+      send(g_cl[slot], body, k, 0);
+      send(g_cl[slot], g_capjson, g_caplen, 0);
+    }
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/editor/state")) {
+    if (b[off] == 'P') {                       // POST：存镜像
+      if (clen < 0) { clen = 0; }
+      if (bstart + clen > len) { return 0; }   // 体还没收全
+      if (clen > 4000) { clen = 4000; }
+      i = 0;
+      while (i < clen) { g_state[i] = b[bstart + i]; i = i + 1; }
+      g_statel = clen;
+      g_rev = g_rev + 1;
+      bl = ap(body, bl, "{\"ok\":true,\"revision\":");
+      bl = apnum(body, bl, g_rev);
+      bl = ap(body, bl, "}");
+      send_plain(g_cl[slot], "200 OK", "application/json", body, bl);
+      g_served = g_served + 1;
+      return 3;
+    }
+    // GET：把存的字段原样回吐（契约只查 tabs/cursor/selection 的字段值）
+    bl = ap(body, bl, "{\"ok\":true,\"revision\":");
+    bl = apnum(body, bl, g_rev);
+    bl = ap(body, bl, ",\"mirror\":");
+    if (g_statel > 0) { i = 0; while (i < g_statel) { body[bl] = g_state[i]; bl = bl + 1; i = i + 1; } }
+    else { bl = ap(body, bl, "null"); }
+    bl = ap(body, bl, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", body, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/events")) {
+    bl = ap(body, bl, "HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
+    bl = ap(body, bl, "event: ready\ndata: {\"ok\":true}\n\n");
+    send(g_cl[slot], body, bl, 0);
+    g_served = g_served + 1;
+    return 2;
+  }
+
+  if (path_is(b, ps, plen, "/api/workspace")) {
+    if (b[off] == 'P') {
+      if (clen < 0) { clen = 0; }
+      if (bstart + clen > len) { return 0; }
+      r = json_str(b, bstart, clen, "\"root\"", g_ws, 250);
+      if (r < 0) { bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-ARGS\"}"); send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl); return 3; }
+    }
+    bl = ap(g_out, 0, "{\"ok\":true,\"root\":\"");
+    bl = json_esc(g_out, bl, g_ws, sl(g_ws));
+    bl = ap(g_out, bl, "\"}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/file")) {
+    r = qs_get(b, ps, plen, "path", g_path, 500);
+    if (r <= 0 || path_bad(g_path)) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-PATH\"}"); send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    ws_join(g_abs, g_path);
+    if (std::file_exists(g_abs) == 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-NOFILE\"}");
+      send_plain(g_cl[slot], "404 Not Found", "application/json", g_out, bl);
+      return 3;
+    }
+    r = std::file_read(g_abs, g_tmp, 65000);
+    if (r < 0) { r = 0; }
+    bl = ap(g_out, 0, "{\"ok\":true,\"src\":\"");
+    bl = json_esc(g_out, bl, g_tmp, r);
+    bl = ap(g_out, bl, "\",\"path\":\"");
+    bl = json_esc(g_out, bl, g_path, sl(g_path));
+    bl = ap(g_out, bl, "\",\"bytes\":");
+    bl = apnum(g_out, bl, r);
+    bl = ap(g_out, bl, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/save")) {
+    if (clen < 0) { clen = 0; }
+    // ⚠️ bstart 是**缓冲区绝对偏移**（slot N 的起点是 N*4096），而 len 是本连接的字节数。
+    //   拿两者直接比是错的：只有 slot 0（off=0）会碰巧正确 —— 实测症状是"SSE 一占住 slot 0，
+    //   后续请求全部 socket hang up"。终点一律用 off + len。
+    if (bstart + clen > off + len) { clen = (off + len) - bstart; }
+    if (clen < 0) { clen = 0; }
+    r = json_str(b, bstart, clen, "\"path\"", g_path, 500);
+    if (r <= 0 || path_bad(g_path)) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-PATH\"}"); send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    r = json_str(b, bstart, clen, "\"src\"", g_tmp, 65000);
+    if (r < 0) { r = 0; }
+    ws_join(g_abs, g_path);
+    rr = r;
+    r = std::file_write(g_abs, g_tmp, rr);
+    if (r == 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-WRITE\"}"); send_plain(g_cl[slot], "500 Internal Server Error", "application/json", g_out, bl);
+      return 3;
+    }
+    bl = ap(g_out, 0, "{\"ok\":true,\"bytes\":");
+    bl = apnum(g_out, bl, rr);
+    bl = ap(g_out, bl, ",\"path\":\"");
+    bl = json_esc(g_out, bl, g_path, sl(g_path));
+    bl = ap(g_out, bl, "\"}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/diagnostics")) {
+    bl = ap(g_out, 0, "{\"ok\":true,\"diagnostics\":[");
+    if (g_hasdiag != 0) {
+      bl = ap(g_out, bl, "{\"line\":");
+      bl = apnum(g_out, bl, g_line);
+      bl = ap(g_out, bl, ",\"col\":");
+      bl = apnum(g_out, bl, g_col);
+      bl = ap(g_out, bl, ",\"msg\":\"");
+      bl = json_esc(g_out, bl, g_diagmsg, g_diagmsgl);
+      bl = ap(g_out, bl, "\",\"fix\":\"");
+      bl = json_esc(g_out, bl, g_fix, g_fixl);
+      bl = ap(g_out, bl, "\"}");
+    }
+    bl = ap(g_out, bl, "]}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/editor/edit")) {
+    if (clen < 0) { clen = 0; }
+    // ⚠️ bstart 是**缓冲区绝对偏移**（slot N 的起点是 N*4096），而 len 是本连接的字节数。
+    //   拿两者直接比是错的：只有 slot 0（off=0）会碰巧正确 —— 实测症状是"SSE 一占住 slot 0，
+    //   后续请求全部 socket hang up"。终点一律用 off + len。
+    if (bstart + clen > off + len) { clen = (off + len) - bstart; }
+    if (clen < 0) { clen = 0; }
+    r = json_str(b, bstart, clen, "\"path\"", g_path, 500);
+    if (r <= 0 || path_bad(g_path)) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-PATH\"}");
+      send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    st = json_num(b, bstart, clen, "\"start\"");
+    en = json_num(b, bstart, clen, "\"end\"");
+    tl = json_str(b, bstart, clen, "\"text\"", g_ins, 16380);
+    if (tl < 0) { tl = 0; }
+    if (st < 0) { st = 0; }
+    if (en < 0) { en = 0; }
+    ws_join(g_abs, g_path);
+    fn = std::file_read(g_abs, g_tmp, 65000);
+    if (fn < 0) { fn = 0; }
+    if (st > fn || en > fn || en < st) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-RANGE\",\"length\":");
+      bl = apnum(g_out, bl, fn);
+      bl = ap(g_out, bl, "}");
+      send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    // 脏文件保护：状态镜像里该 path 标了 dirty 且请求没带 force
+    if (find_sub(b, bstart, clen, "\"force\"") < 0) {
+      if (g_statel > 0 && find_sub(g_state, 0, g_statel, g_path) >= 0) {
+        if (find_sub(g_state, 0, g_statel, "\"dirty\":true") >= 0) {
+          bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-DIRTY\"}");
+          send_plain(g_cl[slot], "409 Conflict", "application/json", g_out, bl);
+          return 3;
+        }
+      }
+    }
+    o = 0;
+    i = 0;
+    while (i < st) { g_edit[o] = g_tmp[i]; o = o + 1; i = i + 1; }
+    i = 0;
+    while (i < tl) { g_edit[o] = g_ins[i]; o = o + 1; i = i + 1; }
+    i = en;
+    while (i < fn) { g_edit[o] = g_tmp[i]; o = o + 1; i = i + 1; }
+    rr = o;
+    r = std::file_write(g_abs, g_edit, rr);
+    if (r == 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-WRITE\"}");
+      send_plain(g_cl[slot], "500 Internal Server Error", "application/json", g_out, bl);
+      return 3;
+    }
+    bl = ap(g_out, 0, "{\"ok\":true,\"length\":");
+    bl = apnum(g_out, bl, rr);
+    bl = ap(g_out, bl, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+  if (path_is(b, ps, plen, "/api/compile")) {
+    print(["[compile] hs=", hs, " bstart=", bstart, " clen=", clen, " len=", len, "\n"]);
+    if (clen < 0) { clen = 0; }
+    // ⚠️ bstart 是**缓冲区绝对偏移**（slot N 的起点是 N*4096），而 len 是本连接的字节数。
+    //   拿两者直接比是错的：只有 slot 0（off=0）会碰巧正确 —— 实测症状是"SSE 一占住 slot 0，
+    //   后续请求全部 socket hang up"。终点一律用 off + len。
+    if (bstart + clen > off + len) { clen = (off + len) - bstart; }
+    if (clen < 0) { clen = 0; }
+    r = json_str(b, bstart, clen, "\"src\"", g_tmp, 65000);
+    if (r < 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-ARGS\"}");
+      send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    dbg = 0;
+    if (find_sub(b, bstart, clen, "\"debug\":true") >= 0) { dbg = 1; }
+    keep = 0;
+    if (find_sub(b, bstart, clen, "\"keep\":true") >= 0) { keep = 1; }
+    ws_join(g_abs, "tmp\\studio_compile.fl");
+    std::file_write(g_abs, g_tmp, r);
+    ws_join(g_abs, "tmp\\studio_compile.exe");
+    // 命令行：hlc.exe <src> -o <exe> > <log> 2>&1
+    {
+      int p = 0;
+      p = ap(g_cmd, 0, "cmd.exe /c \"\"");
+      p = ap(g_cmd, p, "E:\\FLINT-lab\\hlc.exe");
+      p = ap(g_cmd, p, "\" ");
+      if (dbg != 0) { p = ap(g_cmd, p, "-debug "); }
+      p = ap(g_cmd, p, g_ws);
+      p = ap(g_cmd, p, "\\tmp\\studio_compile.fl -o ");
+      p = ap(g_cmd, p, g_ws);
+      p = ap(g_cmd, p, "\\tmp\\studio_compile.exe > ");
+      p = ap(g_cmd, p, g_ws);
+      p = ap(g_cmd, p, "\\tmp\\studio_compile.log 2>&1\"");
+      g_cmd[p] = 0;
+    }
+    {
+      int t0 = GetTickCount();
+      rr = run_cmd(g_cmd);
+      r = GetTickCount() - t0;
+    }
+    ws_join(g_abs, "tmp\\studio_compile.log");
+    fn = std::file_read(g_abs, g_tmp, 65000);
+    if (fn < 0) { fn = 0; }
+    // 编译成功时顺手把程序跑一次，输出并入 stdout（Node 版 /api/compile 就是这个语义：
+    //   好程序用例断言的是**程序自己**打印的 "hi 5"，不是编译器那行 ✅）
+    if (rr == 0 && fn < 60000) {
+      int p2 = 0;
+      p2 = ap(g_cmd, 0, "cmd.exe /c \"\"");
+      p2 = ap(g_cmd, p2, g_ws);
+      p2 = ap(g_cmd, p2, "\\tmp\\studio_compile.exe\" > \"");
+      p2 = ap(g_cmd, p2, g_ws);
+      p2 = ap(g_cmd, p2, "\\tmp\\studio_run.log\" 2>&1\"");
+      g_cmd[p2] = 0;
+      run_cmd(g_cmd);
+      ws_join(g_abs, "tmp\\studio_run.log");
+      fn2 = std::file_read(g_abs, g_tmp + fn, 4000);
+      if (fn2 < 0) { fn2 = 0; }
+      fn = fn + fn2;
+    }
+    r = parse_diag(g_tmp, fn);
+    if (r != 0) {
+      g_hasdiag = 1;
+      g_diagmsgl = fn;
+      if (g_diagmsgl > 500) { g_diagmsgl = 500; }
+      o = 0;
+      while (o < g_diagmsgl) { g_diagmsg[o] = g_tmp[o]; o = o + 1; }
+      g_fixl = diag_fix(g_tmp, fn, g_fix, 250);
+    } else {
+      g_hasdiag = 0;
+      g_diagmsgl = 0;
+    }
+    bl = ap(g_out, 0, "{\"ok\":");
+    if (rr == 0 && r == 0) { bl = ap(g_out, bl, "true"); } else { bl = ap(g_out, bl, "false"); }
+    bl = ap(g_out, bl, ",\"exitCode\":");
+    bl = apnum(g_out, bl, rr);
+    bl = ap(g_out, bl, ",\"stdout\":\"");
+    bl = json_esc(g_out, bl, g_tmp, fn);
+    bl = ap(g_out, bl, "\",\"stderr\":\"\",\"diagnostics\":[");
+    if (r != 0) {
+      char fixbuf[256];
+      int fl = 0;
+      bl = ap(g_out, bl, "{\"line\":");
+      bl = apnum(g_out, bl, g_line);
+      bl = ap(g_out, bl, ",\"col\":");
+      bl = apnum(g_out, bl, g_col);
+      bl = ap(g_out, bl, ",\"msg\":\"");
+      bl = json_esc(g_out, bl, g_tmp, fn);
+      bl = ap(g_out, bl, "\",\"fix\":\"");
+      fl = diag_fix(g_tmp, fn, fixbuf, 200);
+      bl = json_esc(g_out, bl, fixbuf, fl);
+      bl = ap(g_out, bl, "\"}");
+    }
+    bl = ap(g_out, bl, "]");
+    if (dbg != 0) {
+      ws_join(g_abs, "tmp\\studio_compile.exe");
+      bl = ap(g_out, bl, ",\"exePath\":\"");
+      bl = json_esc(g_out, bl, g_abs, sl(g_abs));
+      bl = ap(g_out, bl, "\",\"mapPath\":\"");
+      bl = json_esc(g_out, bl, g_abs, sl(g_abs));
+      bl = ap(g_out, bl, ".dbg.json\",\"tsvPath\":\"");
+      bl = json_esc(g_out, bl, g_abs, sl(g_abs));
+      bl = ap(g_out, bl, ".tsv\"");
+    }
+    bl = ap(g_out, bl, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    // 不保留时清掉产物（含 -debug 的旁文件）
+    if (keep == 0) {
+      ws_join(g_abs, "tmp\\studio_compile.exe");
+      DeleteFileA(g_abs);
+      ws_join(g_abs, "tmp\\studio_compile.exe.dbg.json");
+      DeleteFileA(g_abs);
+      ws_join(g_abs, "tmp\\studio_compile.exe.tsv");
+      DeleteFileA(g_abs);
+    }
+    // SSE：compileFinished
+    {
+      char ev[128];
+      int e = 0;
+      e = ap(ev, 0, "event: compileFinished\ndata: {\"ok\":");
+      if (rr == 0) { e = ap(ev, e, "true"); } else { e = ap(ev, e, "false"); }
+      e = ap(ev, e, "}\n\n");
+      sse_broadcast(ev, e);
+    }
+    return 3;
+  }
+  if (path_is(b, ps, plen, "/api/dirs")) {
+    r = qs_get(b, ps, plen, "path", g_path, 500);
+    if (r < 0) { g_path[0] = 0; }
+    if (sl(g_path) == 0) { ws_join(g_abs, "."); } else { ws_join(g_abs, g_path); }
+    g_outn = 0;
+    g_outn = ap(g_out, g_outn, "{\"ok\":true,\"dirs\":[");
+    o = 0;
+    list_dir(g_abs, "", 0, 1, &o);
+    g_outn = ap(g_out, g_outn, "],\"count\":");
+    g_outn = apnum(g_out, g_outn, o);
+    g_outn = ap(g_out, g_outn, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, g_outn);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/files")) {
+    g_outn = 0;
+    g_outn = ap(g_out, g_outn, "{\"ok\":true,\"files\":[");
+    o = 0;
+    list_dir(g_ws, "", 0, 2, &o);
+    g_outn = ap(g_out, g_outn, "],\"count\":");
+    g_outn = apnum(g_out, g_outn, o);
+    g_outn = ap(g_out, g_outn, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, g_outn);
+    g_served = g_served + 1;
+    return 3;
+  }
+  if (path_is(b, ps, plen, "/api/search")) {
+    char qbuf[128];
+    int qn = 0;
+    int rx = 0;
+    qn = qs_get(b, ps, plen, "q", qbuf, 120);
+    if (qn <= 0) {
+      bl = ap(g_out, 0, "{\"ok\":true,\"count\":0,\"matches\":[]}");
+      send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+      return 3;
+    }
+    if (find_sub(b, ps, plen, "regex=1") >= 0) { rx = 1; }
+    if (rx != 0) { rx_parse(qbuf, qn); }
+    // 先写数组头，让 search_dir 直接往里追加条目，最后再补 count（顺序反了会把数字写进数组里）
+    g_outn = 0;
+    g_outn = ap(g_out, g_outn, "{\"ok\":true,\"matches\":[");
+    o = 0;
+    {
+      char pre[8];
+      pre[0] = 0;
+      search_dir(g_ws, pre, 0, qbuf, qn, rx, &o);
+    }
+    g_outn = ap(g_out, g_outn, "],\"count\":");
+    g_outn = apnum(g_out, g_outn, o);
+    g_outn = ap(g_out, g_outn, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, g_outn);
+    g_served = g_served + 1;
+    return 3;
+  }
+  if (path_is(b, ps, plen, "/api/libs")) {
+    g_outn = 0;
+    g_outn = ap(g_out, g_outn, "{\"ok\":true,\"libs\":[");
+    o = 0;
+    ws_join(g_abs, "lib");
+    list_dir(g_abs, "lib", 0, 2, &o);
+    g_outn = ap(g_out, g_outn, "],\"count\":");
+    g_outn = apnum(g_out, g_outn, o);
+    g_outn = ap(g_out, g_outn, "}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, g_outn);
+    g_served = g_served + 1;
+    return 3;
+  }
+
+  if (path_is(b, ps, plen, "/api/editor/command")) {
+    char cbuf[64];
+    int cn = 0;
+    int cli = 0;
+    if (clen < 0) { clen = 0; }
+    // ⚠️ bstart 是**缓冲区绝对偏移**（slot N 的起点是 N*4096），而 len 是本连接的字节数。
+    //   拿两者直接比是错的：只有 slot 0（off=0）会碰巧正确 —— 实测症状是"SSE 一占住 slot 0，
+    //   后续请求全部 socket hang up"。终点一律用 off + len。
+    if (bstart + clen > off + len) { clen = (off + len) - bstart; }
+    if (clen < 0) { clen = 0; }
+    cn = json_str(b, bstart, clen, "\"cmd\"", cbuf, 60);
+    if (cn <= 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-CMD\"}");
+      send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    // 白名单：未知命令一律 E-CMD（与 Node 版同口径：不会把任意字符串转发给 UI）
+    if (seq(cbuf, "goto") == 0) {
+      if (seq(cbuf, "open") == 0) {
+        if (seq(cbuf, "save") == 0) {
+          if (seq(cbuf, "close") == 0) {
+            if (seq(cbuf, "focus") == 0) {
+              bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-CMD\"}");
+              send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+              return 3;
+            }
+          }
+        }
+      }
+    }
+    i = 0;
+    while (i < 8) { if (g_cst[i] == 2) { cli = cli + 1; } i = i + 1; }
+    bl = ap(g_out, 0, "{\"ok\":true,\"clients\":");
+    bl = apnum(g_out, bl, cli);
+    bl = ap(g_out, bl, ",\"command\":{\"cmd\":\"");
+    bl = json_esc(g_out, bl, cbuf, cn);
+    bl = ap(g_out, bl, "\",\"line\":");
+    bl = apnum(g_out, bl, json_num(b, bstart, clen, "\"line\""));
+    bl = ap(g_out, bl, "}}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+  if (path_is(b, ps, plen, "/api/run")) {
+    if (clen < 0) { clen = 0; }
+    // ⚠️ bstart 是**缓冲区绝对偏移**（slot N 的起点是 N*4096），而 len 是本连接的字节数。
+    //   拿两者直接比是错的：只有 slot 0（off=0）会碰巧正确 —— 实测症状是"SSE 一占住 slot 0，
+    //   后续请求全部 socket hang up"。终点一律用 off + len。
+    if (bstart + clen > off + len) { clen = (off + len) - bstart; }
+    if (clen < 0) { clen = 0; }
+    r = json_str(b, bstart, clen, "\"path\"", g_path, 500);
+    if (r <= 0 || path_bad(g_path)) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-PATH\"}");
+      send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+      return 3;
+    }
+    // 只允许 .exe（与 Node 版同口径）
+    if (has_ext(g_path, ".exe") == 0) {
+      if (has_ext(g_path, ".EXE") == 0) {
+        bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-NOTEXE\"}");
+        send_plain(g_cl[slot], "400 Bad Request", "application/json", g_out, bl);
+        return 3;
+      }
+    }
+    {
+      int jn = g_jobn;
+      int p2 = 0;
+      int t0 = 0;
+      if (jn >= 8) { jn = 0; }
+      ws_join(g_abs, g_path);
+      p2 = ap(g_cmd, 0, "cmd.exe /c \"\"");
+      p2 = ap(g_cmd, p2, g_abs);
+      p2 = ap(g_cmd, p2, "\" > \"");
+      p2 = ap(g_cmd, p2, g_ws);
+      p2 = ap(g_cmd, p2, "\\tmp\\studio_job.log\" 2>&1\"");
+      g_cmd[p2] = 0;
+      t0 = GetTickCount();
+      rr = run_cmd(g_cmd);
+      g_jobms[jn] = GetTickCount() - t0;
+      g_jobcode[jn] = rr;
+      ws_join(g_abs, "tmp\\studio_job.log");
+      fn = std::file_read(g_abs, g_jobout + jn * 4000, 3900);
+      if (fn < 0) { fn = 0; }
+      g_joblen[jn] = fn;
+      // id = "j<N>"
+      {
+        int q = jn * 16;
+        g_jobids[q] = 106; q = q + 1;                     // 'j'
+        g_jobids[q] = 49 + (jn % 10); q = q + 1;
+        g_jobids[q] = 0;
+      }
+      g_jobn = jn + 1;
+      bl = ap(g_out, 0, "{\"ok\":true,\"jobId\":\"");
+      bl = ap(g_out, bl, g_jobids + jn * 16);
+      bl = ap(g_out, bl, "\"}");
+      send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+      g_served = g_served + 1;
+      return 3;
+    }
+  }
+
+  if (path_is(b, ps, plen, "/api/jobs/")) {
+    char jid[16];
+    int jl = plen - 10;
+    int jn = 0;
+    int found = 0;
+    i = 0;
+    while (i < jl && i < 14) { jid[i] = b[ps + 10 + i]; jid[i + 1] = 0; i = i + 1; }
+    jid[jl] = 0;
+    i = 0;
+    while (i < 8) {
+      if (seq(g_jobids + i * 16, jid) != 0) { jn = i; found = 1; break; }
+      i = i + 1;
+    }
+    if (found == 0) {
+      bl = ap(g_out, 0, "{\"ok\":false,\"code\":\"E-NOJOB\"}");
+      send_plain(g_cl[slot], "404 Not Found", "application/json", g_out, bl);
+      return 3;
+    }
+    bl = ap(g_out, 0, "{\"ok\":true,\"id\":\"");
+    bl = ap(g_out, bl, jid);
+    bl = ap(g_out, bl, "\",\"status\":\"done\",\"exitCode\":");
+    bl = apnum(g_out, bl, g_jobcode[jn]);
+    bl = ap(g_out, bl, ",\"ms\":");
+    bl = apnum(g_out, bl, g_jobms[jn]);
+    bl = ap(g_out, bl, ",\"stdout\":\"");
+    bl = json_esc(g_out, bl, g_jobout + jn * 4000, g_joblen[jn]);
+    bl = ap(g_out, bl, "\",\"stderr\":\"\"}");
+    send_plain(g_cl[slot], "200 OK", "application/json", g_out, bl);
+    g_served = g_served + 1;
+    return 3;
+  }
+  bl = ap(body, bl, "{\"ok\":false,\"code\":\"E-ROUTE\"}");
+  send_plain(g_cl[slot], "404 Not Found", "application/json", body, bl);
+  g_served = g_served + 1;
+  return 3;
+}
+int main() {
+  char wsa[400];
+  char sa[16];
+  int i = 0;
+  int r = 0;
+  int sk = 0;
+  int cl = 0;
+  int n = 0;
+  int poll = 0;
+  int slot = 0;
+  char fs[520];
+  char tv[8];
+  int tick = 0;
+  int k = 0;
+
+  // 预读接口契约文件（只读一次，之后每个 /api/capabilities 直接回吐）
+  i = 0;
+  while (i < 16384) { g_capjson[i] = 0; i = i + 1; }
+  // 路径三级回退：CWD 是仓库根 / 是 apps\studio_native / 都不是（IDE 从任意目录启动）
+  g_caplen = std::file_read("interface\\capabilities.json", g_capjson, 16000);
+  if (g_caplen <= 0) { g_caplen = std::file_read("..\\..\\interface\\capabilities.json", g_capjson, 16000); }
+  if (g_caplen <= 0) { g_caplen = std::file_read("E:\\FLINT-lab\\interface\\capabilities.json", g_capjson, 16000); }
+  if (g_caplen > 0) {
+    // 跳过开头的空白与首个 '{'（响应要拼自己的 {"ok":true, ...}）
+    k = 0;
+    while (k < g_caplen && (g_capjson[k] == ' ' || g_capjson[k] == 10 || g_capjson[k] == 13 || g_capjson[k] == 9 || g_capjson[k] == 123)) { k = k + 1; }
+    i = 0;
+    while (k + i < g_caplen) { g_capjson[i] = g_capjson[k + i]; i = i + 1; }
+    g_caplen = i;
+  } else {
+    g_caplen = 0;
+  }
+
+  i = 0;
+  while (i < 400) { wsa[i] = 0; i = i + 1; }
+  r = WSAStartup(0x0202, wsa);
+  if (r != 0) { print(["WSAStartup fail ", r, "\n"]); return 1; }
+
+  sk = socket(2, 1, 6);
+  if (sk < 0) { print(["socket fail\n"]); return 2; }
+
+  i = 0;
+  while (i < 16) { sa[i] = 0; i = i + 1; }
+  sa[0] = 2; sa[1] = 0;
+  sa[2] = g_port / 256;
+  sa[3] = g_port - (g_port / 256) * 256;
+  sa[4] = 127; sa[5] = 0; sa[6] = 0; sa[7] = 1;
+
+  r = bind(sk, sa, 16);
+  if (r != 0) { print(["bind fail ", r, "\n"]); closesocket(sk); return 3; }
+  r = listen(sk, 8);
+  if (r != 0) { print(["listen fail ", r, "\n"]); closesocket(sk); return 4; }
+
+  // 监听 socket 设非阻塞：FIONBIO(0x8004667E) + 1
+  w32(tv, 0, 1);
+  ioctlsocket(sk, 0x8004667E, tv);
+  w32(tv, 0, 0);
+
+  g_tmp = VirtualAlloc(0, 65536, 0x3000, 4);
+  g_out = VirtualAlloc(0, 131072, 0x3000, 4);
+  g_ins = VirtualAlloc(0, 16384, 0x3000, 4);
+  g_edit = VirtualAlloc(0, 65536, 0x3000, 4);
+  g_jobout = VirtualAlloc(0, 32768, 0x3000, 4);
+  if (g_tmp == 0 || g_out == 0) { print(["alloc fail\n"]); return 9; }
+
+  // 模式：命令行里出现 --headless 就不提供 UI（Node 版同款语义）
+  {
+    char *cl = GetCommandLineA();
+    ap(g_mode, 0, "native");
+    if (find_sub(cl, 0, sl(cl), "--headless") >= 0) { ap(g_mode, 0, "headless"); }
+  }
+
+  // 工作区 = 启动时的当前目录（IDE 从仓库根或任意目录启动都能用）
+  GetCurrentDirectoryA(250, g_ws);
+  if (sl(g_ws) <= 0) { g_ws[0] = ':'; g_ws[1] = 92; g_ws[2] = 0; }
+
+  g_listen = sk;
+  g_started = GetTickCount();
+  print(["studio_server listening 127.0.0.1:", g_port, "\n"]);
+
+  i = 0;
+  while (i < 8) { g_cl[i] = 0; g_cst[i] = 0; g_clen[i] = 0; i = i + 1; }
+
+  // 跑 12 秒（测试窗口；接 IDE 主循环后改成跟随窗口生命周期）
+  while (GetTickCount() - g_started < 12000) {
+    // 轮询式多路复用：监听/客户端全部非阻塞，accept 返回 -1 就是"没有新连接"。
+    // （select 在本项目里未跑通：WSAENOTSOCK/10038 —— 见 tmp\sel_probe.fl，先绕开不阻塞 IDE 进度）
+    cl = accept(g_listen, 0, 0);
+    if (cl > 0) {
+      slot = 0;
+      while (slot < 8 && g_cst[slot] != 0) { slot = slot + 1; }
+      if (slot < 8) {
+        print(["[acc] slot=", slot, " sk=", cl, "\n"]);
+        g_cl[slot] = cl;
+        g_cst[slot] = 1;
+        g_clen[slot] = 0;
+        w32(tv, 0, 1);
+        ioctlsocket(cl, 0x8004667E, tv);   // 客户端也非阻塞
+        w32(tv, 0, 0);
+      } else {
+        closesocket(cl);
+      }
+    }
+
+    i = 0;
+    while (i < 8) {
+      if (g_cst[i] == 1 || g_cst[i] == 2) {
+        n = recv(g_cl[i], g_buf + i * g_cap + g_clen[i], g_cap - g_clen[i], 0);
+        print(["[recv] slot=", i, " n=", n, " cst=", g_cst[i], "\n"]);
+        if (n > 0) {
+          g_clen[i] = g_clen[i] + n;
+          if (find_sub(g_buf, i * g_cap, g_clen[i], "\r\n\r\n") >= 0) {
+            r = handle_req(i);
+            if (r == 2) { g_cst[i] = 2; }
+            else { closesocket(g_cl[i]); g_cl[i] = 0; g_cst[i] = 0; g_clen[i] = 0; }
+          }
+        } else {
+          if (n < 0) {
+            // -1 = 非阻塞下"暂时没数据"：连接还活着，**不能**收摊（收了会把正常连接砍掉）
+          } else {
+            // n == 0 = 对端真的关掉了：SSE 连接也必须一起释放，否则 8 个 slot 会被泄漏光
+            //   （实测症状：契约测试跑到第 12 个请求时新连接被立刻关闭 → fetch 报 other side closed）
+            print(["[close] slot=", i, " cst=", g_cst[i], "\n"]);
+            closesocket(g_cl[i]);
+            g_cl[i] = 0; g_cst[i] = 0; g_clen[i] = 0;
+          }
+        }
+      }
+      i = i + 1;
+    }
+    Sleep(1);
+  }
+
+  // 收尾
+  i = 0;
+  while (i < 8) {
+    if (g_cst[i] != 0) { closesocket(g_cl[i]); }
+    i = i + 1;
+  }
+  closesocket(g_listen);
+  WSACleanup();
+  print(["served ", g_served, " request(s)\n"]);
+  return 0;
+}

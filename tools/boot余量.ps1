@@ -1,4 +1,4 @@
-# boot[headroom].ps1 -- STATIC budget meter for boot's ONE function table.
+﻿# boot[headroom].ps1 -- STATIC budget meter for boot's ONE function table.
 #   (The file NAME is non-ASCII -- "boot" + the Chinese word for headroom -- because the work
 #    order fixes that name; the CONTENT is pure ASCII on purpose, so the ASCII-contract gate
 #    test\verify-all.ps1 can call it. Below it is spelled tools\boot[headroom].ps1.)
@@ -130,11 +130,19 @@ if (-not (Test-Path -LiteralPath $limitFile -PathType Leaf)) {
 }
 $limitText = Get-Latin1 $limitFile
 $limitHits = @()
-foreach ($m in [regex]::Matches($limitText, 'nfuncs\s*>=\s*(\d+)')) {
+# 2026-10-24：函数表上限改成**单点函数** `int cap_funcs() { return 8192; }`（lib_parse.fl 顶部），
+#   两处守卫写的是 `nfuncs >= cap_funcs()`。先取函数定义里的数字；取不到再退回旧的
+#   `nfuncs >= <字面量>` 写法（旧文件留档用），两种写法都不认就响亮失败。
+foreach ($m in [regex]::Matches($limitText, 'cap_funcs\s*\(\s*\)\s*\{\s*return\s+(\d+)\s*;')) {
   $limitHits += [pscustomobject]@{ Value = [int]$m.Groups[1].Value; Line = (1 + ($limitText.Substring(0, $m.Index) -split "`n").Count - 1) }
 }
 if ($limitHits.Count -eq 0) {
-  Write-Host 'bootbudget: FAIL no `nfuncs >= <n>` capacity guard found in boot\lib_parse.fl'
+  foreach ($m in [regex]::Matches($limitText, 'nfuncs\s*>=\s*(\d+)')) {
+    $limitHits += [pscustomobject]@{ Value = [int]$m.Groups[1].Value; Line = (1 + ($limitText.Substring(0, $m.Index) -split "`n").Count - 1) }
+  }
+}
+if ($limitHits.Count -eq 0) {
+  Write-Host 'bootbudget: FAIL no `cap_funcs()` definition nor `nfuncs >= <n>` guard found in boot\lib_parse.fl'
   exit 2
 }
 $limitValues = @($limitHits | ForEach-Object { $_.Value } | Sort-Object -Unique)
@@ -216,7 +224,7 @@ function Splice-File([string]$name, [int]$depth) {
     }
     $i = $eol + 1
   }
-  if ($script:sb.Length -ge 524288) { $script:err = 'spliced source over 524288 bytes (boot err=-5)'; return -5 }
+  if ($script:sb.Length -ge 1048576) { $script:err = 'spliced source over 1048576 bytes (boot err=-5)'; return -5 }
   return 0
 }
 
@@ -277,8 +285,8 @@ if ($injNew -or $injOwn -or $injShare) {
 $buf = $pre + $spliced + $suffix
 $preLen = $pre.Length
 $sufStart = $preLen + $segLen
-if ($buf.Length -ge 524288) {
-  Write-Host 'bootbudget: FAIL injected source over 524288 bytes (boot would report source too large / err=-5)'
+if ($buf.Length -ge 1048576) {
+  Write-Host 'bootbudget: FAIL injected source over 1048576 bytes (boot would report source too large / err=-5)'
   exit 2
 }
 
@@ -478,7 +486,7 @@ if ($Json) {
   Write-Host ("occupied      : {0}  = api {1} + top-level function definitions {2}" -f $occupied, $api, $func)
   Write-Host ("headroom      : {0}" -f $headroom)
   Write-Host ("also counted  : struct definitions {0} (different table, not billed) | top-level global decls {1} (not billed)" -f $structs, $globals)
-  Write-Host ("source        : spliced {0} B + injected {1} B = {2} B (cap 524288), {3} closure files" -f $segLen, ($buf.Length - $segLen), $buf.Length, $script:order.Count)
+  Write-Host ("source        : spliced {0} B + injected {1} B = {2} B (cap 1048576), {3} closure files" -f $segLen, ($buf.Length - $segLen), $buf.Length, $script:order.Count)
   Write-Host 'boot injections (b1_emit.fl:3071-3109):'
   foreach ($n in $injNotes) { Write-Host ("  - {0}" -f $n) }
   Write-Host ''

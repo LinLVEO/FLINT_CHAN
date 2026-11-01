@@ -1,0 +1,685 @@
+// jsonq -- the first real tool: query a JSON file by dot path.
+//   jsonq <file.json> <.path>
+//
+// Step 1: CLI skeleton (done) -- arguments out of GetCommandLineA, whole file read.
+// Step 2: lexer (done) -- { } [ ] : ,  "str"  number  true/false/null, with line:col.
+// Step 3: value model + recursive descent (this file). The tree is dumped so the
+//         structure can be eyeballed before any querying exists.
+// Work order: 工单-JSON查询器-jsonq.md  (each step must run before the next one starts)
+//
+// Two deviations from the work order, both forced by the compiler and both recorded here:
+//
+//  (a) Numbers keep the SOURCE SLICE (offset+length), they are not parsed into int/double.
+//      The order asks for "digits as they are", so the source bytes are the faithful
+//      answer; and a struct field is 4 bytes here, so an int would silently truncate past
+//      2^31 -- which the order explicitly forbids. Huge integers just round-trip.
+//
+//  (b) The node pool is FIVE PARALLEL int arrays, not `struct JVal pool[1024]`.
+//      Probe tmp\jqtest\ptr.fl + ptr2.fl: a `struct S *` parameter cannot index its
+//      elements -- `p[i].f`, `(&p[i])->f`, `(p + i)->f` are all rejected with
+//      "'->' left side must be a pointer to a struct". Struct arrays only index by NAME
+//      inside the function that declares them, so a recursive parser (which must share
+//      the pool across frames) has no way in. Int arrays pass and index fine, and they
+//      dodge the element-stride rule (8*ceil(size/8)) at the same time.
+api kernel32 ptr GetCommandLineA();
+
+include "io_lib.fl"
+include "dstr_lib.fl"
+include "esc_lib.fl"
+
+// Token kinds.
+//   0 EOF   1 {   2 }   3 [   4 ]   5 :   6 ,   7 string   8 number
+//   9 true  10 false  11 null  12 error
+struct Jq {
+  int pos;      // scan cursor (byte offset into jq_src)
+  int len;      // bytes available
+  int line;     // current line, 1-based
+  int col;      // current column, 1-based (counted in BYTES: UTF-8 chars count as 2-3)
+  int err;      // 0 = ok, else an error code (jq_reporterr maps it back to text)
+  int errline;  // where the error was found
+  int errcol;
+  int tk;       // kind of the token just lexed
+  int ts;       // token start offset
+  int te;       // token end offset (EXCLUSIVE, and for a string it points at the closing
+                // quote, so the content is [ts+1, te) -- length te-ts-1)
+  int tline;    // token start line
+  int tcol;     // token start column
+}
+
+// Error codes (a code, never a pointer: FLINT has no global pointer and a struct field
+// is 4 bytes).
+//   1 unterminated string          2 control character in string
+//   3 bad number                   4 unexpected character
+//   5 unexpected end of input      6 nesting too deep
+//   7 expected ':' after a key     8 expected ',' or '}' in an object
+//   9 expected ',' or ']' in an array   10 object key must be a string
+//  11 trailing garbage after the root value   12 string pool / escape failure
+//  13 file too large
+
+// ---------- the node pool ----------
+// A node is identified by its index. Five parallel arrays, all -1 terminated:
+//   nk[i]  kind: 0 null  1 true  2 false  3 number  4 string  5 array  6 object
+//   nv[i]  number: source offset of the lexeme  | string: offset into the Str pool
+//   nl[i]  number: source length                | string: byte length
+//   nf[i]  first child, -1 when none (arrays: the elements; objects: the first key)
+//   ns[i]  next sibling, -1 at the end of a child list
+// An object's child list is key, value, key, value... so a key is always followed by
+// its value. Siblings are a chain rather than a contiguous run because depth-first
+// allocation interleaves a child's own children between two siblings -- the first
+// version assumed a contiguous run and rebuilt the tree wrong (a key's value ended up
+// being the key's first grandchild).
+
+// Two arguments packed as "path\0dotpath". GLOBAL, because a function cannot hand back
+// a pointer into its own stack frame (see examples\filecount).
+char jq_argv[1024];
+// The whole JSON source, plus one byte reserved for a terminator. 256 KiB cap for now;
+// a longer file is a loud error, never a silent cut.
+char jq_src[262145];
+// Unescape scratch for one string token, shared by every recursion level (it is filled
+// and copied to the pool immediately, never held across a call). esc_lib works on a
+// caller-supplied buffer and refuses to write past it, so a too-long escape is a loud
+// error -- never a half-written string.
+char jq_ebuf[4096];
+// Output of jq_strtok (a string has to return both an offset and a length).
+int jq_soff;
+int jq_slen;
+
+// ---------- command line ----------
+
+// Split the command line into up to 2 arguments, written back-to-back into out with a
+// NUL after each. Quotes are stripped (so a path with spaces survives). Returns the count.
+int jq_args(char *out, int cap) {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  int n = 0;
+  int o = 0;
+
+  // Skip the exe path (argv[0]); it may be quoted.
+  while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+  if (cmd[i] == 34) {
+    i = i + 1;
+    while (cmd[i] != 0 && cmd[i] != 34) { i = i + 1; }
+    if (cmd[i] == 34) { i = i + 1; }
+  } else {
+    while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9) { i = i + 1; }
+  }
+
+  while (n < 2) {
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+    if (cmd[i] == 0) { break; }
+    int q = 0;
+    if (cmd[i] == 34) { q = 1; i = i + 1; }
+    while (cmd[i] != 0 && o < cap - 2) {
+      if (q == 1) {
+        if (cmd[i] == 34) { break; }
+      } else {
+        if (cmd[i] == 32 || cmd[i] == 9) { break; }
+      }
+      out[o] = cmd[i];
+      o = o + 1;
+      i = i + 1;
+    }
+    out[o] = 0;
+    o = o + 1;
+    n = n + 1;
+    if (q == 1) { if (cmd[i] == 34) { i = i + 1; } }
+  }
+  return n;
+}
+
+int jq_strlen(char *s) {
+  int k = 0;
+  while (s[k] != 0) { k = k + 1; }
+  return k;
+}
+
+// ---------- lexer ----------
+
+int jq_isdig(int c) { return c >= 48 && c <= 57; }
+int jq_isws(int c) { return c == 32 || c == 9 || c == 10 || c == 13; }
+
+// Advance one byte, keeping line/col in step.
+int jq_adv(struct Jq *st) {
+  if (st->pos < st->len) {
+    if (jq_src[st->pos] == 10) {
+      st->line = st->line + 1;
+      st->col = 1;
+    } else {
+      st->col = st->col + 1;
+    }
+    st->pos = st->pos + 1;
+  }
+  return 0;
+}
+
+int jq_bad(struct Jq *st, int code) {
+  st->err = code;
+  st->errline = st->tline;
+  st->errcol = st->tcol;
+  st->tk = 12;
+  return 12;
+}
+
+// Match a keyword at the cursor ("true"/"false"/"null"); 1 = matched.
+int jq_kw(struct Jq *st, char *w, int kind) {
+  int i = 0;
+  while (w[i] != 0) {
+    if (st->pos + i >= st->len) { return 0; }
+    if (jq_src[st->pos + i] != w[i]) { return 0; }
+    i = i + 1;
+  }
+  st->pos = st->pos + i;
+  st->col = st->col + i;
+  st->te = st->pos;
+  st->tk = kind;
+  return 1;
+}
+
+// Peek at the next non-whitespace byte without consuming anything (0 = end of input).
+// Needed to tell "[]" / "{}" from "has at least one element" without eating the first
+// token and then having to hand it back.
+int jq_peekc(struct Jq *st) {
+  int i = st->pos;
+  while (i < st->len && jq_isws(jq_src[i])) { i = i + 1; }
+  if (i >= st->len) { return 0; }
+  return jq_src[i];
+}
+
+// Lex one token. Fills ts/te/tline/tcol and tk; returns the kind (0 = EOF, 12 = error).
+int jq_lex(struct Jq *st) {
+  while (st->pos < st->len) {
+    if (jq_isws(jq_src[st->pos])) { jq_adv(st); } else { break; }
+  }
+  st->ts = st->pos;
+  st->tline = st->line;
+  st->tcol = st->col;
+  st->te = st->pos;
+
+  if (st->pos >= st->len) { st->tk = 0; return 0; }
+
+  int c = jq_src[st->pos];
+  if (c == 123) { jq_adv(st); st->te = st->pos; st->tk = 1; return 1; }
+  if (c == 125) { jq_adv(st); st->te = st->pos; st->tk = 2; return 2; }
+  if (c == 91)  { jq_adv(st); st->te = st->pos; st->tk = 3; return 3; }
+  if (c == 93)  { jq_adv(st); st->te = st->pos; st->tk = 4; return 4; }
+  if (c == 58)  { jq_adv(st); st->te = st->pos; st->tk = 5; return 5; }
+  if (c == 44)  { jq_adv(st); st->te = st->pos; st->tk = 6; return 6; }
+
+  if (c == 34) {
+    jq_adv(st);                    // opening quote
+    while (st->pos < st->len) {
+      int d = jq_src[st->pos];
+      if (d == 92) {               // backslash: the next byte is escaped, whatever it is
+        jq_adv(st);
+        if (st->pos < st->len) { jq_adv(st); }
+      } else if (d == 34) {
+        st->te = st->pos;          // closing quote; content is [ts+1, te)
+        jq_adv(st);
+        st->tk = 7;
+        return 7;
+      } else if (d < 32) {
+        return jq_bad(st, 2);
+      } else {
+        jq_adv(st);
+      }
+    }
+    return jq_bad(st, 1);
+  }
+
+  if (c == 45 || jq_isdig(c)) {
+    if (c == 45) { jq_adv(st); }
+    int nd = 0;
+    while (st->pos < st->len && jq_isdig(jq_src[st->pos])) { jq_adv(st); nd = nd + 1; }
+    if (nd == 0) { return jq_bad(st, 3); }
+    if (st->pos < st->len && jq_src[st->pos] == 46) {     // '.'
+      jq_adv(st);
+      int fd = 0;
+      while (st->pos < st->len && jq_isdig(jq_src[st->pos])) { jq_adv(st); fd = fd + 1; }
+      if (fd == 0) { return jq_bad(st, 3); }
+    }
+    if (st->pos < st->len) {
+      int e = jq_src[st->pos];
+      if (e == 101 || e == 69) {                          // 'e' / 'E'
+        jq_adv(st);
+        if (st->pos < st->len) {
+          int s = jq_src[st->pos];
+          if (s == 43 || s == 45) { jq_adv(st); }
+        }
+        int ed = 0;
+        while (st->pos < st->len && jq_isdig(jq_src[st->pos])) { jq_adv(st); ed = ed + 1; }
+        if (ed == 0) { return jq_bad(st, 3); }
+      }
+    }
+    st->te = st->pos;
+    st->tk = 8;
+    return 8;
+  }
+
+  if (c == 116) { if (jq_kw(st, "true", 9)) { return 9; } }
+  if (c == 102) { if (jq_kw(st, "false", 10)) { return 10; } }
+  if (c == 110) { if (jq_kw(st, "null", 11)) { return 11; } }
+
+  return jq_bad(st, 4);
+}
+
+// One line, "line:col  reason" (the order's wording), which is what a script can scrape.
+void jq_reporterr(struct Jq *st) {
+  print([st->errline, ":", st->errcol, "  "]);
+  if (st->err == 1) { print(["unterminated string\n"]); return; }
+  if (st->err == 2) { print(["control character in string\n"]); return; }
+  if (st->err == 3) { print(["bad number\n"]); return; }
+  if (st->err == 4) { print(["unexpected character\n"]); return; }
+  if (st->err == 5) { print(["unexpected end of input\n"]); return; }
+  if (st->err == 6) { print(["nesting too deep (limit 64)\n"]); return; }
+  if (st->err == 7) { print(["expected ':' after a key\n"]); return; }
+  if (st->err == 8) { print(["expected ',' or '}' in an object\n"]); return; }
+  if (st->err == 9) { print(["expected ',' or ']' in an array\n"]); return; }
+  if (st->err == 10) { print(["object key must be a string\n"]); return; }
+  if (st->err == 11) { print(["trailing garbage after the root value\n"]); return; }
+  if (st->err == 12) { print(["string too long for the pool\n"]); return; }
+  if (st->err == 13) { print(["file too large\n"]); return; }
+  if (st->err == 14) { print(["too many nodes (limit 1024)\n"]); return; }
+  print(["syntax error\n"]);
+}
+
+void jq_init(struct Jq *st, int len) {
+  st->pos = 0;
+  st->len = len;
+  st->line = 1;
+  st->col = 1;
+  st->err = 0;
+  st->errline = 0;
+  st->errcol = 0;
+  st->tk = 0;
+  st->ts = 0;
+  st->te = 0;
+  st->tline = 1;
+  st->tcol = 1;
+}
+
+// ---------- string pool ----------
+
+// Append n bytes to the pool and return their offset; -1 = out of memory / too long.
+int jq_strput(struct Str *spl, char *bytes, int n) {
+  int off = spl->len;
+  if (std::str_addn(spl, bytes, n) < 0) { return -1; }
+  return off;
+}
+
+// Unescape the current string token into the pool. Result offset/length land in
+// jq_soff / jq_slen. 0 = ok, -1 = bad escape or pool failure.
+// esc_json does the hard part: \" \\ \/ \b \f \n \r \t and \uXXXX -> UTF-8, surrogate
+// pairs combined, unknown escapes refused. The token content is the bytes between the
+// quotes, [ts+1, te).
+int jq_strtok(struct Jq *st, struct Str *spl) {
+  int n = st->te - st->ts - 1;
+  if (n < 0) { return -1; }
+  int w = std::esc_json(jq_ebuf, 4096, &jq_src[st->ts + 1], n);
+  if (w < 0) { return -1; }
+  int off = jq_strput(spl, jq_ebuf, w);
+  if (off < 0) { return -1; }
+  jq_soff = off;
+  jq_slen = w;
+  return 0;
+}
+
+// ---------- recursive descent ----------
+
+int jq_fail(struct Jq *st, int code) {
+  st->err = code;
+  st->errline = st->tline;
+  st->errcol = st->tcol;
+  return -1;
+}
+
+// Allocate one node and return its index; -1 = the pool is full (loud, never a silent
+// overflow). Fresh nodes start as null with no links.
+int jq_alloc(int *nk, int *nv, int *nl, int *nf, int *ns, int *pn) {
+  if (*pn >= 1024) { return -1; }
+  int i = *pn;
+  *pn = i + 1;
+  nk[i] = 0;
+  nv[i] = 0;
+  nl[i] = 0;
+  nf[i] = -1;
+  ns[i] = -1;
+  return i;
+}
+
+// Parse one value at the cursor and return its node index; -1 = error (st->err is set).
+// `depth` is the nesting level of THIS value (the root is 0).
+int jq_value(struct Jq *st, int *nk, int *nv, int *nl, int *nf, int *ns, int *pn,
+             struct Str *spl, int depth) {
+  if (depth > 64) { return jq_fail(st, 6); }
+
+  int k = jq_lex(st);
+  if (k == 12) { return -1; }
+
+  int idx = jq_alloc(nk, nv, nl, nf, ns, pn);
+  if (idx < 0) { return jq_fail(st, 14); }
+
+  if (k == 9)  { nk[idx] = 1; return idx; }
+  if (k == 10) { nk[idx] = 2; return idx; }
+  if (k == 11) { nk[idx] = 0; return idx; }
+  if (k == 8) {
+    nk[idx] = 3;
+    nv[idx] = st->ts;
+    nl[idx] = st->te - st->ts;
+    return idx;
+  }
+  if (k == 7) {
+    nk[idx] = 4;
+    if (jq_strtok(st, spl) < 0) { return jq_fail(st, 12); }
+    nv[idx] = jq_soff;
+    nl[idx] = jq_slen;
+    return idx;
+  }
+  if (k == 5 || k == 6 || k == 2 || k == 4 || k == 0) { return jq_fail(st, 5); }
+
+  if (k == 3) {                                   // array
+    nk[idx] = 5;
+    int pc = jq_peekc(st);
+    if (pc == 0) { return jq_fail(st, 5); }
+    if (pc == 93) {                               // ']' -- empty array
+      k = jq_lex(st);
+      if (k == 12) { return -1; }
+      return idx;
+    }
+    int prev = -1;
+    while (1) {
+      int vi = jq_value(st, nk, nv, nl, nf, ns, pn, spl, depth + 1);
+      if (vi < 0) { return -1; }
+      if (prev < 0) { nf[idx] = vi; } else { ns[prev] = vi; }
+      prev = vi;
+      k = jq_lex(st);
+      if (k == 12) { return -1; }
+      if (k == 6) { continue; }                   // ',' then the next element
+      if (k == 4) { return idx; }
+      return jq_fail(st, 9);
+    }
+  }
+
+  // k == 1: object. The child chain is key, value, key, value...
+  nk[idx] = 6;
+  int pc2 = jq_peekc(st);
+  if (pc2 == 0) { return jq_fail(st, 5); }
+  if (pc2 == 125) {                               // '}' -- empty object
+    k = jq_lex(st);
+    if (k == 12) { return -1; }
+    return idx;
+  }
+  k = jq_lex(st);
+  if (k == 12) { return -1; }
+  int prev2 = -1;
+  while (1) {
+    if (k != 7) { return jq_fail(st, 10); }
+    int ki = jq_alloc(nk, nv, nl, nf, ns, pn);
+    if (ki < 0) { return jq_fail(st, 14); }
+    nk[ki] = 4;
+    if (jq_strtok(st, spl) < 0) { return jq_fail(st, 12); }
+    nv[ki] = jq_soff;
+    nl[ki] = jq_slen;
+    if (prev2 < 0) { nf[idx] = ki; } else { ns[prev2] = ki; }
+
+    k = jq_lex(st);
+    if (k == 12) { return -1; }
+    if (k != 5) { return jq_fail(st, 7); }        // ':'
+
+    int vi = jq_value(st, nk, nv, nl, nf, ns, pn, spl, depth + 1);
+    if (vi < 0) { return -1; }
+    ns[ki] = vi;                                  // the value follows its key
+    prev2 = vi;
+
+    k = jq_lex(st);
+    if (k == 12) { return -1; }
+    if (k == 6) { k = jq_lex(st); if (k == 12) { return -1; } continue; }
+    if (k == 2) { return idx; }
+    return jq_fail(st, 8);
+  }
+}
+
+// ---------- shared little helpers ----------
+
+// Length of the sibling chain starting at c.
+int jq_chainlen(int *ns, int c) {
+  int n = 0;
+  while (c >= 0) { n = n + 1; c = ns[c]; }
+  return n;
+}
+
+// Print one byte as two lowercase hex digits (no prefix).
+void jq_puthex2(int c) {
+  char *hx = "0123456789abcdef";
+  char hi = hx[(c >> 4) & 15];
+  char lo = hx[c & 15];
+  print([hi, lo]);
+}
+
+// Print n bytes of b starting at off. ASCII control bytes become \xNN so one value
+// stays on one line; everything else goes out as its own byte, so UTF-8 text (the
+// common case in JSON) reaches the terminal unchanged. Note that `print` of an int
+// prints its decimal digits -- a byte has to be held in a char to print as a character
+// (probe tmp\jqtest\char.fl).
+void jq_putbytes(char *b, int off, int n) {
+  int i = 0;
+  while (i < n) {
+    int c = b[off + i];
+    if (c >= 32 && c != 127) {
+      char ch = c;
+      print([ch]);
+    } else {
+      print(["\\x"]);
+      jq_puthex2(c);
+    }
+    i = i + 1;
+  }
+}
+
+// ---------- path query ----------
+
+// Does the pool string at `off` equal the klen bytes at key? (byte compare, no NUL)
+int jq_eqbytes(struct Str *spl, int off, char *key, int klen) {
+  char *sb = spl->p;
+  int i = 0;
+  while (i < klen) {
+    if (sb[off + i] != key[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// Child of `obj` whose key equals key[0..klen); -1 = no such key. The child chain of an
+// object is key, value, key, value... so a match returns the node right after the key.
+int jq_find(int *nk, int *nv, int *nl, int *nf, int *ns, struct Str *spl,
+            int obj, char *key, int klen) {
+  int c = nf[obj];
+  while (c >= 0) {
+    int vi = ns[c];
+    if (nl[c] == klen && jq_eqbytes(spl, nv[c], key, klen)) { return vi; }
+    c = ns[vi];
+  }
+  return -1;
+}
+
+// Walk a dot path from the root. Grammar: "." then any number of
+//   "." key        -- object member (key runs to the next '.' or '[')
+//   "[" digits "]" -- array element
+// "." alone means the root.
+// Returns the node index, -1 = path does not exist, -2 = the path itself is malformed.
+int jq_walk(int *nk, int *nv, int *nl, int *nf, int *ns, struct Str *spl,
+            int root, char *dot) {
+  if (dot[0] != 46) { return -2; }
+  int cur = root;
+  int i = 1;
+  if (dot[i] == 0) { return cur; }               // "." = the root itself
+  while (dot[i] != 0) {
+    if (dot[i] == 91) {                          // '['
+      i = i + 1;
+      int v = 0;
+      int nd = 0;
+      while (dot[i] >= 48 && dot[i] <= 57) {
+        v = v * 10 + (dot[i] - 48);
+        nd = nd + 1;
+        i = i + 1;
+      }
+      if (nd == 0) { return -2; }
+      if (dot[i] != 93) { return -2; }
+      i = i + 1;
+      if (nk[cur] != 5) { return -1; }
+      if (v >= jq_chainlen(ns, nf[cur])) { return -1; }
+      int c = nf[cur];
+      int j = 0;
+      while (j < v) { c = ns[c]; j = j + 1; }
+      cur = c;
+      continue;
+    }
+    if (dot[i] == 46) {                          // '.' separator
+      i = i + 1;
+      if (dot[i] == 0) { return -2; }            // trailing dot
+      continue;
+    }
+    int s0 = i;
+    while (dot[i] != 0 && dot[i] != 46 && dot[i] != 91) { i = i + 1; }
+    int klen = i - s0;
+    if (nk[cur] != 6) { return -1; }
+    int found = jq_find(nk, nv, nl, nf, ns, spl, cur, &dot[s0], klen);
+    if (found < 0) { return -1; }
+    cur = found;
+  }
+  return cur;
+}
+
+// ---------- output ----------
+
+// Print the selected value. Scalars are printed as they are (a number is the source
+// lexeme, a string is its unescaped bytes). First version: a container prints a one-line
+// summary instead of being re-serialized -- see the note in the work order; the upgrade
+// path is a to-JSON writer, which needs its own escaping layer.
+void jq_printval(int *nk, int *nv, int *nl, int *nf, int *ns, struct Str *spl, int idx) {
+  int k = nk[idx];
+  if (k == 0) { print(["null\n"]); return; }
+  if (k == 1) { print(["true\n"]); return; }
+  if (k == 2) { print(["false\n"]); return; }
+  if (k == 3) {
+    jq_putbytes(jq_src, nv[idx], nl[idx]);
+    print(["\n"]);
+    return;
+  }
+  if (k == 4) {
+    char *sb = spl->p;
+    jq_putbytes(sb, nv[idx], nl[idx]);
+    print(["\n"]);
+    return;
+  }
+  if (k == 5) {
+    print(["<array ", jq_chainlen(ns, nf[idx]), " items>\n"]);
+    return;
+  }
+  print(["<object ", jq_chainlen(ns, nf[idx]) / 2, " keys>\n"]);
+}
+
+// ---------- tree dump (step-3 self check) ----------
+
+void jq_show(int *nk, int *nv, int *nl, int *nf, int *ns, struct Str *spl, int idx, int ind) {
+  int i = 0;
+  while (i < ind) { print(["  "]); i = i + 1; }
+  int k = nk[idx];
+  if (k == 0) { print(["null\n"]); return; }
+  if (k == 1) { print(["true\n"]); return; }
+  if (k == 2) { print(["false\n"]); return; }
+  if (k == 3) {
+    print(["num "]);
+    jq_putbytes(jq_src, nv[idx], nl[idx]);
+    print(["\n"]);
+    return;
+  }
+  if (k == 4) {
+    char *sb = spl->p;
+    print(["str \""]);
+    jq_putbytes(sb, nv[idx], nl[idx]);
+    print(["\"\n"]);
+    return;
+  }
+  if (k == 5) {
+    print(["arr[", jq_chainlen(ns, nf[idx]), "]\n"]);
+    int c = nf[idx];
+    while (c >= 0) {
+      jq_show(nk, nv, nl, nf, ns, spl, c, ind + 1);
+      c = ns[c];
+    }
+    return;
+  }
+  char *sb2 = spl->p;
+  print(["obj{", jq_chainlen(ns, nf[idx]) / 2, "}\n"]);
+  int c2 = nf[idx];
+  while (c2 >= 0) {
+    int ki = c2;
+    int vi = ns[ki];
+    int a = 0;
+    while (a < ind + 1) { print(["  "]); a = a + 1; }
+    print(["key \""]);
+    jq_putbytes(sb2, nv[ki], nl[ki]);
+    print(["\" ->\n"]);
+    jq_show(nk, nv, nl, nf, ns, spl, vi, ind + 2);
+    c2 = ns[vi];
+  }
+}
+
+int main() {
+  int n = jq_args(jq_argv, 1024);
+  if (n < 2) {
+    print(["usage: jsonq <file.json> <.path>\n"]);
+    return 2;
+  }
+  char *path = &jq_argv[0];
+
+  int got = std::file_read(path, jq_src, 262144);
+  if (got < 0) {
+    print(["jsonq: cannot read ", path, "\n"]);
+    return 2;
+  }
+  if (got >= 262144) {
+    print(["jsonq: file too large (limit 262144 bytes)\n"]);
+    return 2;
+  }
+  jq_src[got] = 0;
+
+  struct Jq st;
+  jq_init(&st, got);
+
+  int nk[1024];
+  int nv[1024];
+  int nl[1024];
+  int nf[1024];
+  int ns[1024];
+  struct Str spl;
+  spl.p = 0;
+  spl.len = 0;
+  spl.cap = 0;
+  if (std::str_init(&spl, 0) < 0) {
+    print(["jsonq: out of memory\n"]);
+    return 2;
+  }
+
+  int nn = 0;
+  int root = jq_value(&st, nk, nv, nl, nf, ns, &nn, &spl, 0);
+  if (root < 0) { jq_reporterr(&st); return 2; }
+
+  int k = jq_lex(&st);
+  if (k == 12) { jq_reporterr(&st); return 2; }
+  if (k != 0) { jq_fail(&st, 11); jq_reporterr(&st); return 2; }
+
+  char *dot = &jq_argv[jq_strlen(path) + 1];
+  int cur = jq_walk(nk, nv, nl, nf, ns, &spl, root, dot);
+  if (cur == -2) {
+    print(["jsonq: malformed path: ", dot, "\n"]);
+    return 2;
+  }
+  if (cur < 0) {
+    // The work order is explicit: "path does not exist" is exit 1 with NO stdout, so a
+    // script can tell "no such key" from "the file is broken" without parsing text.
+    return 1;
+  }
+  jq_printval(nk, nv, nl, nf, ns, &spl, cur);
+  return 0;
+}

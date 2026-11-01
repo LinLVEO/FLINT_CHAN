@@ -483,8 +483,23 @@ function Get-BoundaryToolRun {
   $p = Join-Path $rootFull $rel
   if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw ('tool missing: ' + $rel) }
   Push-Location $rootFull
-  try { $out = & node $rel 2>&1 | Out-String } finally { Pop-Location }
-  $code = $LASTEXITCODE
+  # 2026-10-24: **node 的 stdout 必须先落成字节、再按 UTF-8 读**。
+  #   原因：`& node $rel | Out-String` 由 PowerShell 按“控制台编码”解码；在没有控制台的进程里
+  #   （tools\silent-gate.ps1 的 CREATE_NO_WINDOW / 私有桌面）拿不到控制台代码页 ⇒ 中文被按
+  #   OEM/ANSI 解成乱码 ⇒ 按 [3] 这类中文小节名匹配的键全部 NOT_COLLECTED（实测 docgate 8 条假红）。
+  #   cmd 的 `>` 保留原始字节，读回来再显式 UTF8 解码，与有没有控制台无关。
+  $tmpOut = Join-Path $env:TEMP ('flint-boundary-' + $PID + '.out')
+  try {
+    $null = & cmd /c ('node "' + $p + '" > "' + $tmpOut + '" 2>&1')
+    $code = $LASTEXITCODE
+    $out = ''
+    if (Test-Path -LiteralPath $tmpOut -PathType Leaf) {
+      $out = [IO.File]::ReadAllText($tmpOut, [Text.Encoding]::UTF8)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $tmpOut -PathType Leaf) { Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue }
+    Pop-Location
+  }
   if ($null -eq $code) { $code = 0 }
   if ($code -ne 0) { throw ($rel + ' exited ' + $code + ' -- its numbers cannot be trusted') }
   $inputs = New-Object System.Collections.ArrayList
@@ -507,7 +522,7 @@ function Get-BoundaryFact([string]$K, [string]$Rx, [string]$Section) {
   return New-Fact $K $val $src $run.Cmd $run.Stamp
 }
 
-# ------------------------------------------------------------------ flint.exe 的重建 / 忽略状态
+# ------------------------------------------------------------------ hlc.exe 的重建 / 忽略状态
 function Get-FlintRebuildNote {
   $rel = 'test\verify-all.ps1'
   $p = Join-Path $rootFull $rel
@@ -522,7 +537,7 @@ function Get-FlintIgnoreNote {
   $note = 'gitignore state unknown (git not available)'
   Push-Location $rootFull
   try {
-    $out = & git check-ignore -v 'flint.exe' 2>&1 | Out-String
+    $out = & git check-ignore -v 'hlc.exe' 2>&1 | Out-String
     $code = $LASTEXITCODE
   } catch {
     $out = ''
@@ -611,27 +626,67 @@ function Get-ProductFact([string]$K, [string]$Rel, [string]$Note = '') {
   if ($Note -ne '') { $src = $src + '; ' + $Note }
   return New-Fact $K ([string]$f.Length) $src $cmd ($f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
 }
+# 2026-10-28：Get-FileHash 在「Node 以管道拉起 PS 5.1」的现场不可用（PSModulePath 混入 PS7 模块目录，
+#   5.1 的模块自动加载失败）⇒ 重编/自举这几条事实永远 NOT_COLLECTED、doc 门 17 处漂移永远修不掉。
+#   改成纯 .NET 哈希，不依赖任何模块自动加载。
+function Get-Sha256Hex([string]$path) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes($path)))).Replace('-', '') }
+  finally { $sha.Dispose() }
+}
 function Get-ProductShaFact([string]$K, [string]$Rel, [string]$Note = '') {
   $p = Join-Path $rootFull $Rel
   if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw ('product missing: ' + $Rel) }
   $f = Get-Item -LiteralPath $p
-  $sha = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.Substring(0, 16)
+  $sha = (Get-Sha256Hex $p).Substring(0, 16)
   $cmd = '(Get-FileHash ' + $Rel + ' -Algorithm SHA256).Hash.Substring(0,16)'
   $src = 'sha16(SHA256) of ' + $Rel
   if ($Note -ne '') { $src = $src + '; ' + $Note }
   return New-Fact $K $sha $src $cmd ($f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
 }
 
+# ------------------------------------------------------------------ 重编一致性（同一份源码重编 vs 仓库里那份）
+# 为什么要有这条（2026-10-24）：文档里"重编逐字节相同"这句话被散文抄了 5 处，编译器一改就全错。
+# 答案只许从这里取：在 %TEMP% 里重编一次，比 SHA256，值只有 same / differs。
+# 它**只报事实、不报好坏**（GUI 产物目前不保证字节稳定：winpanel 同尺寸不同内容、ui_gallery 连尺寸都会变），
+# 文档只许引用它，不许自己写结论。
+function Get-RebuildFact([string]$K, [string]$SrcRel, [string]$ArtifactRel, [string[]]$Extra) {
+  $flint = Join-Path $rootFull 'hlc.exe'
+  if (-not (Test-Path -LiteralPath $flint -PathType Leaf)) { throw ('hlc.exe missing: cannot rebuild ' + $SrcRel) }
+  $artifact = Join-Path $rootFull $ArtifactRel
+  if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw ('product missing: ' + $ArtifactRel) }
+  $dir = Join-Path $env:TEMP ('flint-facts-' + $PID)
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $out = Join-Path $dir ([IO.Path]::GetFileName($ArtifactRel))
+  if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
+  if ($null -eq $Extra) { $Extra = @() }
+  if ($null -eq $Extra) { $Extra = @() }
+  $srcFull = Join-Path $rootFull $SrcRel
+  & $flint $srcFull @Extra '-o' $out 2>&1 | Out-Null
+  $code = $LASTEXITCODE
+  if ($null -eq $code) { $code = 0 }
+  if ($code -ne 0) { throw ('rebuild of ' + $SrcRel + ' exited ' + $code + ' -- cannot compare') }
+  if (-not (Test-Path -LiteralPath $out -PathType Leaf)) { throw ('rebuild produced no file for ' + $SrcRel) }
+  $a = Get-Sha256Hex $out
+  $b = Get-Sha256Hex $artifact
+  $val = 'differs'
+  if ($a -eq $b) { $val = 'same' }
+  $cmd = 'hlc.exe ' + $SrcRel + ' ' + ($Extra -join ' ') + ' -o %TEMP%\...  -> compare SHA256 with ' + $ArtifactRel
+  $src = 'fresh rebuild of ' + $SrcRel + ' in %TEMP% vs committed ' + $ArtifactRel + ' (SHA256; value = same/differs)'
+  return New-Fact $K $val $src $cmd (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+}
+
 # ------------------------------------------------------------------ 产物 sha16：先分清「committed 文件身份」与「重编核对的哈希」
 # 2026-10-16 实测（实验在本脚本之外做，数字故意不入本脚本 —— 铁律 1）：
-#   同一个 flint.exe 编同一份源码是**确定的**（连着两次重建，sha16 相同）；
-#   但**仓库里 committed 的 .exe 不等于重建结果** —— hello 逐字节相同，winpanel / ui_gallery 同尺寸、内容不同。
+#   同一个 hlc.exe 编同一份源码是**确定的**（连着两次重建，sha16 相同）；
+#   但**仓库里 committed 的 .exe 不等于重建结果** —— hello 逐字节相同，winpanel / ui_gallery 不同
+#   （2026-10-24 复测：winpanel 同尺寸不同内容、ui_gallery 连尺寸都可能不同 ⇒ 别在口径里写"同尺寸"）。
 # ⇒ sha16 键的口径只能声明成「仓库里那个文件的身份」，不能当成「重编核对会得到的哈希」去引用。
 function Get-ProductBuildNote([string]$Which) {
   if ($Which -eq 'reproducible') {
     return 'FLINT-built bare PE (no assembler, no linker, no CRT); measured 2026-10-16: a fresh rebuild of the same source IS byte-identical to the committed file => this sha is stable across rebuilds'
   }
-  return 'FLINT-built bare PE (no assembler, no linker, no CRT); measured 2026-10-16: a fresh rebuild of the same source is NOT byte-identical to the committed file (same size, different content) => this value is the COMMITTED FILE identity, NOT a rebuild check; do not quote it in documents'
+  return 'FLINT-built bare PE (no assembler, no linker, no CRT); measured 2026-10-16, re-checked 2026-10-24: a fresh rebuild of the same source is NOT byte-identical to the committed file (content differs; sometimes the size differs too) => this value is the COMMITTED FILE identity, NOT a rebuild check; do not quote it in documents'
 }
 
 # ------------------------------------------------------------------ 图片（PNG 头里的像素尺寸 / 文件字节）
@@ -828,7 +883,7 @@ function Get-SelfHostFact {
   foreach ($r in $rels) {
     $p = Join-Path $rootFull $r
     if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw ('self-hosting source missing: ' + $r + ' (run boot\verify.ps1 to regenerate self1/self2)') }
-    $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.Substring(0, 16)
+    $h = (Get-Sha256Hex $p).Substring(0, 16)
     [void]$rows.Add([pscustomobject]@{ Rel = $r; Sha = $h })
   }
   $uniq = @($rows | ForEach-Object { $_.Sha } | Sort-Object -Unique)
@@ -840,6 +895,24 @@ function Get-SelfHostFact {
   $cmd = 'Get-FileHash boot\b1_emit.fl,boot\self1.fl,boot\self2.fl -Algorithm SHA256'
   $asOf = Get-MaxMTimeFrom @(($rows | ForEach-Object { Join-Path $rootFull $_.Rel }))
   return New-Fact 'selfhost-shas' $uniq[0] $src $cmd $asOf
+}
+
+# boot 编自己：两代**产物**是否逐字节相同（"不动点"这句话的可判据版本）。
+function Get-SelfHostExeFact([string]$K) {
+  $rels = @('boot\self1.exe', 'boot\self2.exe')
+  $paths = @()
+  foreach ($r in $rels) {
+    $p = Join-Path $rootFull $r
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw ('self-hosting product missing: ' + $r + ' (run boot\verify.ps1)') }
+    $paths += $p
+  }
+  $h1 = Get-Sha256Hex $paths[0]
+  $h2 = Get-Sha256Hex $paths[1]
+  $val = 'differs'
+  if ($h1 -eq $h2) { $val = 'same' }
+  $src = 'SHA256 of ' + ($rels -join ' vs ') + ' (value = same/differs; boot compiling itself twice)'
+  $cmd = 'Get-FileHash boot\self1.exe,boot\self2.exe -Algorithm SHA256'
+  return New-Fact $K $val $src $cmd (Get-MaxMTimeFrom $paths)
 }
 
 # ------------------------------------------------------------------ version
@@ -879,7 +952,7 @@ $script:KeyOrder = @(
   'examples-passed', 'strict-classes', 'memory-flint-rows', 'boundary-suspect-uncovered',
   'imports-m2float', 'modules-m2float', 'imports-winpanel',
   'boot-occupied', 'boot-headroom', 'boot-limit',
-  'limit-imports', 'limit-groups', 'limit-dllname', 'limit-code', 'limit-strbuf',
+  'limit-imports', 'limit-groups', 'limit-dllname', 'limit-code', 'limit-data', 'limit-strbuf',
   'limit-structfields', 'limit-funcargs', 'limit-apiargs', 'limit-int32max',
   'limit-boottable', 'limit-blockchildren', 'limit-constpool',
   'limit-bootsrcbytes', 'limit-bootreadbuf', 'limit-splicesize',
@@ -895,17 +968,19 @@ $script:KeyOrder = @(
   'product-flint', 'product-flint-sha16',
   'product-hello', 'product-window', 'product-winpanel', 'product-m2float', 'product-uigallery', 'product-student',
   'product-winpanel-sha16', 'product-hello-sha16', 'product-uigallery-sha16',
-  'selfhost-shas'
+  'selfhost-shas', 'selfhost-fixedpoint',
+  'rebuild-hello', 'rebuild-winpanel', 'rebuild-uigallery'
 )
 
 $patternMaxImports = '#define\s+MAX_IMPORTS\s+(\d+)'
 $patternMaxGroups = '#define\s+MAX_GROUPS\s+(\d+)'
 $patternDllName = '#define\s+IMPORT_DLL_NAME_MAX\s+(\d+)'
 $patternMaxText = '#define\s+FLINT_MAX_TEXT\s+(0x[0-9A-Fa-f]+)'
+$patternMaxData = '#define\s+FLINT_MAX_DATA\s+(0x[0-9A-Fa-f]+)'   # 2026-10-24：.data 从 FLINT_MAX_TEXT 拆出独立常量
 $patternFields = 'StructField\s+fields\[(\d+)\]'
 $patternFuncArgs = '#define\s+FUNC_MAX_ARGS\s+(\d+)'
 $patternApiArgs = '#define\s+API_MAX_ARGS\s+(\d+)'
-$patternNFuncs = 'nfuncs\s*>=\s*(\d+)'
+$patternNFuncs = 'cap_funcs\s*\(\s*\)\s*\{\s*return\s+(\d+)'   # 2026-10-24：函数表上限改成单点函数 cap_funcs()（原 'nfuncs >= <n>'）
 $patternBlockKids = 'cnt\s*>=\s*(\d+)\)\s*return -101'
 $patternSpool = 'spcur\s*>=\s*(\d+)'
 $patternBootSrc = 'char\s+\*src\s*=\s*VirtualAlloc\(0,\s*(\d+)'
@@ -1008,16 +1083,17 @@ function Get-Fact([string]$k) {
   elseif ($k -eq 'limit-groups') { $f = Get-LimitFact -K $k -Rel 'src\pe.c' -Pattern $patternMaxGroups -Label 'MAX_GROUPS' -Cmd 'Select-String -Path src\pe.c -Pattern MAX_GROUPS' }
   elseif ($k -eq 'limit-dllname') { $f = Get-LimitFact -K $k -Rel 'src\pe.c' -Pattern $patternDllName -Label 'IMPORT_DLL_NAME_MAX' -Cmd 'Select-String -Path src\pe.c -Pattern IMPORT_DLL_NAME_MAX' }
   elseif ($k -eq 'limit-code') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternMaxText -Label 'FLINT_MAX_TEXT' -Hex -Cmd 'Select-String -Path src\flint.h -Pattern FLINT_MAX_TEXT' }
+  elseif ($k -eq 'limit-data') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternMaxData -Label 'FLINT_MAX_DATA' -Hex -Cmd 'Select-String -Path src\flint.h -Pattern FLINT_MAX_DATA' }
   elseif ($k -eq 'limit-structfields') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternFields -Label 'StructField fields[N]' -Cmd 'Select-String -Path src\flint.h -Pattern StructField' }
   elseif ($k -eq 'limit-funcargs') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternFuncArgs -Label 'FUNC_MAX_ARGS' -Cmd 'Select-String -Path src\flint.h -Pattern FUNC_MAX_ARGS' }
   elseif ($k -eq 'limit-apiargs') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternApiArgs -Label 'API_MAX_ARGS' -Cmd 'Select-String -Path src\flint.h -Pattern API_MAX_ARGS' }
   elseif ($k -eq 'limit-int32max') { $f = Get-Int32MaxFact }
   elseif ($k -eq 'limit-strbuf') { $f = Get-LimitFact -K $k -Rel 'src\flint.h' -Pattern $patternStrbuf -Label 'FLINT_STRBUF_CAP' -RequireUnique -Cmd 'Select-String -Path src\flint.h -Pattern FLINT_STRBUF_CAP' }
-  elseif ($k -eq 'limit-boottable') { $f = Get-LimitFact -K $k -Rel 'boot\lib_parse.fl' -Pattern $patternNFuncs -Label 'nfuncs >= N' -Latin1 -RequireUnique -Cmd 'Select-String -Path boot\lib_parse.fl -Pattern nfuncs' }
+  elseif ($k -eq 'limit-boottable') { $f = Get-LimitFact -K $k -Rel 'boot\lib_parse.fl' -Pattern $patternNFuncs -Label 'cap_funcs() return N (function/API table cap)' -Latin1 -RequireUnique -Cmd 'Select-String -Path boot\lib_parse.fl -Pattern cap_funcs' }
   elseif ($k -eq 'limit-blockchildren') { $f = Get-LimitFact -K $k -Rel 'boot\lib_parse.fl' -Pattern $patternBlockKids -Label 'cnt >= N (single-block direct children; parse_block tmp[N])' -Latin1 -RequireUnique -Cmd 'Select-String -Path boot\lib_parse.fl -Pattern cnt' }
   elseif ($k -eq 'limit-constpool') { $f = Get-LimitFact -K $k -Rel 'boot\lib_parse.fl' -Pattern $patternSpool -Label 'spcur >= N' -Latin1 -RequireUnique -Cmd 'Select-String -Path boot\lib_parse.fl -Pattern spcur' }
   elseif ($k -eq 'limit-bootsrcbytes') { $f = Get-LimitFact -K $k -Rel 'boot\b1_emit.fl' -Pattern $patternBootSrc -Label 'src buffer bytes' -Latin1 -RequireUnique -Note 'the buffer holding the source AFTER include splicing; NOT the same as limit-bootreadbuf (that one is per-file)' -Cmd 'Select-String -Path boot\b1_emit.fl -Pattern VirtualAlloc' }
-  elseif ($k -eq 'limit-bootreadbuf') { $f = Get-LimitFact -K $k -Rel 'boot\b1_emit.fl' -Pattern $patternBootReadBuf -Label 'read_file single-file buffer' -Latin1 -RequireUnique -Note 'reads ONE source file into fbuf (the VirtualAlloc that feeds it is 262144 too); this is a DIFFERENT thing from limit-bootsrcbytes = 524288, which is the POST-SPLICE buffer' -Cmd 'Select-String -Path boot\b1_emit.fl -Pattern read_file' }
+  elseif ($k -eq 'limit-bootreadbuf') { $f = Get-LimitFact -K $k -Rel 'boot\b1_emit.fl' -Pattern $patternBootReadBuf -Label 'read_file single-file buffer' -Latin1 -RequireUnique -Note 'reads ONE source file into fbuf (the same value feeds its VirtualAlloc); this is a DIFFERENT thing from limit-bootsrcbytes (the POST-SPLICE buffer). 2026-11-01: 262144 -> 524288 (lib_parse.fl crossed the old per-file 256 KiB wall)' -Cmd 'Select-String -Path boot\b1_emit.fl -Pattern read_file' }
   elseif ($k -eq 'limit-splicesize') { $f = Get-LimitFact -K $k -Rel 'boot\b1_emit.fl' -Pattern $patternSpliceCap -Label 'splice_file cap' -Latin1 -RequireUnique -Cmd 'Select-String -Path boot\b1_emit.fl -Pattern splice_file' }
   elseif ($k -eq 'app-winpanel-mainfl') { $f = Get-FactLinesBytes $k 'apps\winpanel\main.fl' '(Get-Item apps\winpanel\main.fl) + LF count' }
   elseif ($k -eq 'app-m2float-mainfl') { $f = Get-FactLinesBytes $k 'apps\m2_float\main.fl' '(Get-Item apps\m2_float\main.fl) + LF count' }
@@ -1055,11 +1131,11 @@ function Get-Fact([string]$k) {
   elseif ($k -eq 'checks-panel') { $f = Get-ChecksPanel }
   elseif ($k -eq 'product-flint') {
     $note = (Get-FlintIgnoreNote) + '; ' + (Get-FlintRebuildNote) + ' => the number changes on every rebuild'
-    $f = Get-ProductFact $k 'flint.exe' $note
+    $f = Get-ProductFact $k 'hlc.exe' $note
   }
   elseif ($k -eq 'product-flint-sha16') {
     $note = (Get-FlintIgnoreNote) + '; ' + (Get-FlintRebuildNote) + ' => the hash changes on every rebuild'
-    $f = Get-ProductShaFact $k 'flint.exe' $note
+    $f = Get-ProductShaFact $k 'hlc.exe' $note
   }
   elseif ($k -eq 'product-hello') { $f = Get-ProductFact $k 'examples\hello\hello.exe' }
   elseif ($k -eq 'product-window') { $f = Get-ProductFact $k 'examples\window\window.exe' }
@@ -1071,6 +1147,10 @@ function Get-Fact([string]$k) {
   elseif ($k -eq 'product-hello-sha16') { $f = Get-ProductShaFact $k 'examples\hello\hello.exe' (Get-ProductBuildNote 'reproducible') }
   elseif ($k -eq 'product-uigallery-sha16') { $f = Get-ProductShaFact $k 'apps\ui_gallery\ui_gallery.exe' (Get-ProductBuildNote 'not-reproducible') }
   elseif ($k -eq 'selfhost-shas') { $f = Get-SelfHostFact }
+  elseif ($k -eq 'selfhost-fixedpoint') { $f = Get-SelfHostExeFact $k }
+  elseif ($k -eq 'rebuild-hello') { $f = Get-RebuildFact $k 'examples\hello\hello.fl' 'examples\hello\hello.exe' @() }
+  elseif ($k -eq 'rebuild-winpanel') { $f = Get-RebuildFact $k 'apps\winpanel\main.fl' 'apps\winpanel\winpanel.exe' @('-gui') }
+  elseif ($k -eq 'rebuild-uigallery') { $f = Get-RebuildFact $k 'apps\ui_gallery\main.fl' 'apps\ui_gallery\ui_gallery.exe' @() }
   else { throw ('unknown key: ' + $k) }
   if ($null -eq $f) { throw ('no fact produced for key: ' + $k) }
   $script:Facts[$k] = $f

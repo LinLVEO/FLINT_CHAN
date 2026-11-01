@@ -1,0 +1,150 @@
+// slash3d.fl -- 3D 刀光原型：两道 3D 圆弧（竖劈 x-y / 横斩 x-z）-> 斜侧投影到 2D。
+// 世界坐标：x 右、y 下、z 深度。1 单位 = 1 像素。
+// 投影：sx = x - z*0.52, sy = y - z*0.34（斜侧视角，深度往右上偏）。
+include "fx.fl"
+
+int s3_cos[37];
+int s3_sin[37];
+int s3_ready = 0;
+
+int s3_init() {
+  if (s3_ready == 1) { return 1; }
+  s3_cos[0] = 1000; s3_sin[0] = 0;
+  s3_cos[1] = 985; s3_sin[1] = 174;
+  s3_cos[2] = 940; s3_sin[2] = 342;
+  s3_cos[3] = 866; s3_sin[3] = 500;
+  s3_cos[4] = 766; s3_sin[4] = 643;
+  s3_cos[5] = 643; s3_sin[5] = 766;
+  s3_cos[6] = 500; s3_sin[6] = 866;
+  s3_cos[7] = 342; s3_sin[7] = 940;
+  s3_cos[8] = 174; s3_sin[8] = 985;
+  s3_cos[9] = 0; s3_sin[9] = 1000;
+  s3_cos[10] = -174; s3_sin[10] = 985;
+  s3_cos[11] = -342; s3_sin[11] = 940;
+  s3_cos[12] = -500; s3_sin[12] = 866;
+  s3_cos[13] = -643; s3_sin[13] = 766;
+  s3_cos[14] = -766; s3_sin[14] = 643;
+  s3_cos[15] = -866; s3_sin[15] = 500;
+  s3_cos[16] = -940; s3_sin[16] = 342;
+  s3_cos[17] = -985; s3_sin[17] = 174;
+  s3_cos[18] = -1000; s3_sin[18] = 0;
+  s3_cos[19] = -985; s3_sin[19] = -174;
+  s3_cos[20] = -940; s3_sin[20] = -342;
+  s3_cos[21] = -866; s3_sin[21] = -500;
+  s3_cos[22] = -766; s3_sin[22] = -643;
+  s3_cos[23] = -643; s3_sin[23] = -766;
+  s3_cos[24] = -500; s3_sin[24] = -866;
+  s3_cos[25] = -342; s3_sin[25] = -940;
+  s3_cos[26] = -174; s3_sin[26] = -985;
+  s3_cos[27] = 0; s3_sin[27] = -1000;
+  s3_cos[28] = 174; s3_sin[28] = -985;
+  s3_cos[29] = 342; s3_sin[29] = -940;
+  s3_cos[30] = 500; s3_sin[30] = -866;
+  s3_cos[31] = 643; s3_sin[31] = -766;
+  s3_cos[32] = 766; s3_sin[32] = -643;
+  s3_cos[33] = 866; s3_sin[33] = -500;
+  s3_cos[34] = 940; s3_sin[34] = -342;
+  s3_cos[35] = 985; s3_sin[35] = -174;
+  s3_cos[36] = 1000; s3_sin[36] = 0;
+  s3_ready = 1;
+  return 1;
+}
+
+// 斜侧投影系数（2026-11-01 抽成函数常量：改这两处 = 全局改相机；原 52/34，现试 60/40）
+int s3_cam_x() { return 60; }
+int s3_cam_y() { return 40; }
+int s3_sx(int x, int z, int cam_x) { return x - z * s3_cam_x() / 100 - cam_x; }
+int s3_sy(int y, int z, int cam_y) { return y - z * s3_cam_y() / 100 - cam_y; }
+
+// 最近一次 s3_arc 的采样点（世界坐标 = 已加回 cam；2026-11-01，给粒子发射用）。
+int s3_px_x[128];
+int s3_px_y[128];
+int s3_px_n = 0;
+// 朝向镜像（2026-11-01）：1 = 以弧中心为轴左右翻转（左挥/右挥）。
+int s3_flip = 0;
+int s3_set_flip(int f) { s3_flip = f; return 1; }
+
+// 3D 弧：plane 0 = x-y（竖劈），1 = x-z（横斩）；a0/a1 角度（度），n 采样数。
+int s3_arc(struct GfxBuf *b, int cx, int cy, int cz, int R, int a0, int a1, int n, int base, int alpha, int cam_x, int cam_y, int plane) {
+  int i = 0;
+  int a = 0;
+  int idx = 0;
+  int co = 0;
+  int si = 0;
+  int px = 0;
+  int py = 0;
+  int pz = 0;
+  int sx = 0;
+  int sy = 0;
+  int ta = 0;
+  int mid = 0;
+  int aa = 0;
+  int col = 0;
+  int raw = 0;
+  int fr = 0;
+  int w = 0;
+  if (b == 0) { return 0; }
+  if (n <= 0) { return 0; }
+  if (s3_ready == 0) { s3_init(); }
+  s3_px_n = 0;
+  mid = (a0 + a1) / 2;
+  i = 0;
+  while (i <= n) {
+    raw = a0 + (a1 - a0) * i / n;
+    a = raw;
+    if (a < 0) { a = a + 360; }
+    if (a >= 360) { a = a - 360; }
+    idx = a / 10;
+    if (idx < 0) { idx = 0; }
+    if (idx > 35) { idx = 35; }
+    fr = a % 10;
+    co = s3_cos[idx] + (s3_cos[idx + 1] - s3_cos[idx]) * fr / 10;
+    si = s3_sin[idx] + (s3_sin[idx + 1] - s3_sin[idx]) * fr / 10;
+    if (plane == 0) {
+      px = cx + R * co / 1000;
+      py = cy + R * si / 1000;
+      pz = cz;
+    } else {
+      px = cx + R * co / 1000;
+      py = cy;
+      pz = cz + R * si / 1000;
+    }
+    sx = s3_sx(px, pz, cam_x);
+    sy = s3_sy(py, pz, cam_y);
+    if (s3_flip == 1) { sx = 2 * (cx - cam_x) - sx; }
+    ta = raw - mid;
+    if (ta < 0) { ta = 0 - ta; }
+    aa = alpha * (255 - ta * 255 / 400) / 255;
+    if (aa < 0) { aa = 0; }
+    col = fx_mixc(0x000B0E1A, base, aa);
+    // 月牙宽度渐变（2026-11-01 所有者口径"依旧月牙状并细长 / 末端尖一点"）：
+    // 二次方收尖 —— 中段保持 4px，越靠末端衰减越快，端点收成 1px。
+    w = 3 - ta * ta / 1000;
+    if (w < 0) { w = 0; }
+    gfx_rect(b, sx, sy, sx + 1 + w, sy + 1 + w, col);
+    if (s3_px_n < 128) {
+      s3_px_x[s3_px_n] = sx + cam_x;
+      s3_px_y[s3_px_n] = sy + cam_y;
+      s3_px_n = s3_px_n + 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 从最近一次 s3_arc 的采样点向上发射 cnt 个粒子（2026-11-01）：
+// vy = -up（向上），vx 在 -1/0/1 间轮转；life 24 帧。配合 fx_update_rise = 飘向空中后消散。
+int s3_emit_arc(struct Particle *ps, int n, int cnt, int up) {
+  int i = 0;
+  int k = 0;
+  if (ps == 0) { return 0; }
+  if (cnt <= 0) { return 0; }
+  if (s3_px_n <= 0) { return 0; }
+  while (i < cnt) {
+    k = i * s3_px_n / cnt;
+    if (k >= s3_px_n) { k = s3_px_n - 1; }
+    fx_emit(ps, n, s3_px_x[k], s3_px_y[k], (i * 7 % 3) - 1, 0 - up, 24);
+    i = i + 1;
+  }
+  return i;
+}

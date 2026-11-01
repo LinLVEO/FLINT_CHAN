@@ -1,0 +1,318 @@
+// apps\paintshop.fl -- FLC 原生像素画板 v5（清晰设置页 + 不崩的尺寸应用）
+//
+// 运行：hlc run apps\paintshop.fl
+// 画布页：左键画/右键擦；方向键移光标、空格画、C 擦；点色块选色；顶栏拖动窗口；
+//         右下角拖动改窗口；点右上方块进设置。
+// 设置页：Canvas W / H 用 -/+ 改，APPLY 生效（只改画布，窗口由右下角拖），BACK 返回，S 存 cfg。
+include "../lib/flgui_win32.fl"
+include "../lib/gfx.fl"
+include "../lib/io_lib.fl"
+include "../lib/str_lib.fl"
+
+api user32 int MoveWindow(int, int, int, int, int, int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api gdi32 int SetTextColor(int, int);
+api gdi32 int SetBkMode(int, int);
+
+int canvas_set(int *cv, int w, int h, int x, int y, int v) {
+  if (x < 0) { return 0; }
+  if (y < 0) { return 0; }
+  if (x >= w) { return 0; }
+  if (y >= h) { return 0; }
+  cv[y * w + x] = v;
+  return 1;
+}
+
+int is_hit(int mx, int my, int x0, int y0, int x1, int y1) {
+  if (mx < x0) { return 0; }
+  if (my < y0) { return 0; }
+  if (mx >= x1) { return 0; }
+  if (my >= y1) { return 0; }
+  return 1;
+}
+
+int umin(int a, int b) {
+  if (a < b) { return a; }
+  return b;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct GuiInput in;
+  struct DragSt dr;
+  struct PT pt;
+  int canvas[1024];
+  int pal[48];
+  int w = 16;
+  int h = 16;
+  int cell = 16;
+  int ox = 8;
+  int oy = 32;
+  int pxw = 0;
+  int pxh = 0;
+  int cw = 0;
+  int ch = 0;
+  int i = 0;
+  int x = 0;
+  int y = 0;
+  int cx = 0;
+  int cy = 0;
+  int cur = 1;
+  int run = 1;
+  int bx = 0;
+  int by = 0;
+  int page = 0;
+  int k = 0;
+  int v = 0;
+  int d = 0;
+  char cfg[64];
+  int n = 0;
+  int dirty = 0;
+  int gx = 0;
+  int gy = 0;
+  int palx = 0;
+  int resizing = 0;
+  int dw = 0;
+  int dh = 0;
+  char *s = 0;
+  char logb[8];
+  int step = 0;
+
+  n = std::file_read("paintshop.cfg", cfg, 63);
+  if (n > 0) {
+    cfg[n] = 0;
+    k = 0; v = 0; d = 0;
+    while (k < n) {
+      if (cfg[k] >= 48) { if (cfg[k] <= 57) { v = v * 10 + (cfg[k] - 48); } }
+      else {
+        if (d == 0) { if (v > 0) { w = v; d = 1; v = 0; } }
+        else { if (d == 1) { if (v > 0) { h = v; d = 2; v = 0; } } else { if (v > 0) { cell = v; } } }
+      }
+      k = k + 1;
+    }
+    if (d == 0) { if (v > 0) { w = v; } }
+    if (d == 1) { if (v > 0) { h = v; } }
+    if (d == 2) { if (v > 0) { cell = v; } }
+  }
+  if (w < 4) { w = 4; }
+  if (w > 32) { w = 32; }
+  if (h < 4) { h = 4; }
+  if (h > 32) { h = 32; }
+  if (cell < 4) { cell = 4; }
+  if (cell > 40) { cell = 40; }
+
+  pal[0] = 0;
+  pal[1] = 0x000B0E1A; pal[2] = 0x001B2340; pal[3] = 0x00E8F0FF;
+  pal[4] = 0x007FD8E8; pal[5] = 0x00E8663C; pal[6] = 0x00F2C14E;
+  pal[7] = 0x00FFFFFF; pal[8] = 0x00606060;
+  pal[9] = 0x00FF6B6B; pal[10] = 0x00FFA94D; pal[11] = 0x00FFD43B;
+  pal[12] = 0x00B2F2BB; pal[13] = 0x0069DB7C; pal[14] = 0x002F9E44;
+  pal[15] = 0x0096F2FF; pal[16] = 0x004DABF7; pal[17] = 0x001C7EDB;
+  pal[18] = 0x00B197FC; pal[19] = 0x00704BDB; pal[20] = 0x00F783AC;
+  pal[21] = 0x00D6336C; pal[22] = 0x00A61E4D; pal[23] = 0x00868E96;
+  pal[24] = 0x00495057; pal[25] = 0x002B8A8A; pal[26] = 0x0063E6BE;
+  pal[27] = 0x00C3FAE8; pal[28] = 0x00FFE8CC; pal[29] = 0x00FFC078;
+  pal[30] = 0x00E8590C; pal[31] = 0x00D9480F; pal[32] = 0x00364000;
+  pal[33] = 0x0074B816; pal[34] = 0x00A9E34B; pal[35] = 0x00C0EB75;
+  pal[36] = 0x003B5DB8; pal[37] = 0x00186CEB; pal[38] = 0x0074C0FF;
+  pal[39] = 0x006B1E8A; pal[40] = 0x009C36B3; pal[41] = 0x00DA77F2;
+  pal[42] = 0x00F1F3F5; pal[43] = 0x00CED4DA; pal[44] = 0x00868E96;
+  pal[45] = 0x00495057; pal[46] = 0x00212A33; pal[47] = 0x00FF0000;
+
+  pxw = w * cell;
+  pxh = h * cell;
+  cw = ox + pxw + 8 + (6 * 22) + 8;
+  ch = oy + pxh + 8;
+  if (cw < 420) { cw = 420; }
+  if (ch < 300) { ch = 300; }
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "PAINTSHOP";
+  g.x = 100;
+  g.y = 60;
+  g.w = cw;
+  g.h = ch;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, cw, ch) == 0) { return 92; }
+
+  i = 0;
+  while (i < w * h) { canvas[i] = 0; i = i + 1; }
+  cx = 0; cy = 0;
+  dr.h = 0; dr.on = 0; dr.sx = 0; dr.sy = 0; dr.wx = 0; dr.wy = 0; dr.w = 0; dr.ht = 0;
+
+  while (run == 1) {
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      logb[0] = 48 + page;
+      logb[1] = 48 + step;
+      std::file_write("paint.log", logb, 2);
+      step = 2;
+      v = gui_win_input(&g, &in);
+
+      // 暂时关掉右下角 resize（先确认基础不崩，再逐项加回）
+      if (in.pressed != 0) { gui_win_drag_begin(&dr, &g, in.my); }
+      v = gui_win_drag_frame(&dr);
+
+      if (in.pressed != 0) {
+        if (is_hit(in.mx, in.my, cw - 32, 2, cw - 4, 22) == 1) { page = 1; }
+      }
+
+      step = 3;
+      cell = umin((cw - 8 - 132 - 8) / w, (ch - 32 - 8) / h);
+      if (cell < 4) { cell = 4; }
+      if (cell > 40) { cell = 40; }
+      pxw = w * cell;
+      pxh = h * cell;
+      ox = 8;
+      oy = 32;
+      palx = ox + pxw + 8;
+
+      SetBkMode(sf.dc, 1);
+      SetTextColor(sf.dc, 0x00FFFFFF);
+
+      if (page == 0) {
+        bx = (in.mx - ox) / cell;
+        by = (in.my - oy) / cell;
+        if (bx >= 0) {
+          if (bx < w) {
+            if (by >= 0) {
+              if (by < h) { cx = bx; cy = by; }
+            }
+          }
+        }
+        if (is_hit(in.mx, in.my, ox, oy, ox + pxw, oy + pxh) == 1) {
+          if ((GetAsyncKeyState(1) & 0x8000) != 0) { canvas_set(canvas, w, h, bx, by, cur); }
+          if ((GetAsyncKeyState(2) & 0x8000) != 0) { canvas_set(canvas, w, h, bx, by, 0); }
+        }
+        if ((GetAsyncKeyState(0x25) & 0x8000) != 0) { if (cx > 0) { cx = cx - 1; } }
+        if ((GetAsyncKeyState(0x27) & 0x8000) != 0) { if (cx < w - 1) { cx = cx + 1; } }
+        if ((GetAsyncKeyState(0x26) & 0x8000) != 0) { if (cy > 0) { cy = cy - 1; } }
+        if ((GetAsyncKeyState(0x28) & 0x8000) != 0) { if (cy < h - 1) { cy = cy + 1; } }
+        if ((GetAsyncKeyState(0x20) & 0x8000) != 0) { canvas_set(canvas, w, h, cx, cy, cur); }
+        if ((GetAsyncKeyState(0x43) & 0x8000) != 0) { canvas_set(canvas, w, h, cx, cy, 0); }
+        if (in.pressed != 0) {
+          if (in.mx >= palx) {
+            if (in.my >= oy) {
+              k = (in.mx - palx) / 22;
+              d = (in.my - oy) / 22;
+              v = d * 6 + k;
+              if (v >= 0) { if (v < 48) { cur = v; } }
+            }
+          }
+        }
+
+        step = 4;
+        gfx_clear(&b, 0x00101820);
+        y = 0;
+        while (y < h) {
+          x = 0;
+          while (x < w) {
+            v = canvas[y * w + x];
+            if (v == 0) {
+              gfx_rect(&b, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, 0x00222A33);
+            } else {
+              gfx_rect(&b, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, pal[v]);
+            }
+            x = x + 1;
+          }
+          y = y + 1;
+        }
+        x = 0;
+        while (x <= w) { gfx_rect(&b, ox + x * cell, oy, ox + x * cell + 1, oy + pxh, 0x00303940); x = x + 1; }
+        y = 0;
+        while (y <= h) { gfx_rect(&b, ox, oy + y * cell, ox + pxw, oy + y * cell + 1, 0x00303940); y = y + 1; }
+        gfx_box(&b, ox + cx * cell, oy + cy * cell, ox + (cx + 1) * cell, oy + (cy + 1) * cell, 0x00FFFFFF);
+        step = 5;
+        k = 0;
+        while (k < 48) {
+          x = k % 6;
+          y = k / 6;
+          if (k == 0) {
+            gfx_rect(&b, palx + x * 22, oy + y * 22, palx + x * 22 + 20, oy + y * 22 + 20, 0x00404040);
+          } else {
+            gfx_rect(&b, palx + x * 22, oy + y * 22, palx + x * 22 + 20, oy + y * 22 + 20, pal[k]);
+          }
+          if (k == cur) { gfx_box(&b, palx + x * 22 - 2, oy + y * 22 - 2, palx + x * 22 + 22, oy + y * 22 + 22, 0x00FFFFFF); }
+          k = k + 1;
+        }
+        gfx_rect(&b, 0, 0, cw, 24, 0x00202830);
+        gfx_rect(&b, cw - 32, 2, cw - 4, 22, 0x00405060);
+        gfx_rect(&b, cw - 26, 7, cw - 10, 10, 0x00C0D0E0);
+        gfx_rect(&b, cw - 26, 13, cw - 10, 16, 0x00C0D0E0);
+        TextOutA(sf.dc, 8, 7, "PAINTSHOP", 9);
+      } else {
+        gfx_clear(&b, 0x00101820);
+        gfx_rect(&b, 0, 0, cw, 24, 0x00202830);
+        TextOutA(sf.dc, 10, 7, "SETTINGS", 8);
+        // W 行
+        TextOutA(sf.dc, 16, 52, "Canvas W:", 9);
+        gfx_rect(&b, 16, 80, 46, 108, 0x00304050);
+        TextOutA(sf.dc, 28, 88, "-", 1);
+        gfx_rect(&b, 56, 80, 116, 108, 0x00182028);
+        s = str([w]);
+        TextOutA(sf.dc, 64, 88, s, std::strlen(s));
+        gfx_rect(&b, 126, 80, 156, 108, 0x00304050);
+        TextOutA(sf.dc, 138, 88, "+", 1);
+        // H 行
+        TextOutA(sf.dc, 16, 128, "Canvas H:", 9);
+        gfx_rect(&b, 16, 156, 46, 184, 0x00304050);
+        TextOutA(sf.dc, 28, 164, "-", 1);
+        gfx_rect(&b, 56, 156, 116, 184, 0x00182028);
+        s = str([h]);
+        TextOutA(sf.dc, 64, 164, s, std::strlen(s));
+        gfx_rect(&b, 126, 156, 156, 184, 0x00304050);
+        TextOutA(sf.dc, 138, 164, "+", 1);
+        // APPLY / BACK
+        gfx_rect(&b, 16, 210, 126, 240, 0x002F9E44);
+        TextOutA(sf.dc, 40, 218, "APPLY", 5);
+        gfx_rect(&b, 140, 210, 250, 240, 0x002A3440);
+        TextOutA(sf.dc, 164, 218, "BACK", 4);
+        if (dirty == 1) { TextOutA(sf.dc, 260, 218, "*", 1); }
+        TextOutA(sf.dc, 16, 258, "S = save cfg", 12);
+        TextOutA(sf.dc, 16, 278, "drag bottom-right to resize", 27);
+
+        if (in.pressed != 0) {
+          if (is_hit(in.mx, in.my, 16, 80, 46, 108) == 1) { if (w > 4) { w = w - 1; dirty = 1; } }
+          if (is_hit(in.mx, in.my, 126, 80, 156, 108) == 1) { if (w < 32) { w = w + 1; dirty = 1; } }
+          if (is_hit(in.mx, in.my, 16, 156, 46, 184) == 1) { if (h > 4) { h = h - 1; dirty = 1; } }
+          if (is_hit(in.mx, in.my, 126, 156, 156, 184) == 1) { if (h < 32) { h = h + 1; dirty = 1; } }
+          if (is_hit(in.mx, in.my, 16, 210, 126, 240) == 1) {
+            cfg[0] = 48 + w / 10;
+            cfg[1] = 48 + w % 10;
+            cfg[2] = 10;
+            cfg[3] = 48 + h / 10;
+            cfg[4] = 48 + h % 10;
+            cfg[5] = 10;
+            cfg[6] = 48 + 16 / 10;
+            cfg[7] = 48 + 16 % 10;
+            std::file_write("paintshop.cfg", cfg, 8);
+            dirty = 0;
+          }
+          if (is_hit(in.mx, in.my, 140, 210, 250, 240) == 1) { page = 0; dirty = 0; }
+        }
+        if ((GetAsyncKeyState(0x53) & 0x8000) != 0) {
+          cfg[0] = 48 + w / 10;
+          cfg[1] = 48 + w % 10;
+          cfg[2] = 10;
+          cfg[3] = 48 + h / 10;
+          cfg[4] = 48 + h % 10;
+          cfg[5] = 10;
+          cfg[6] = 48 + 16 / 10;
+          cfg[7] = 48 + 16 % 10;
+          std::file_write("paintshop.cfg", cfg, 8);
+        }
+      }
+
+      step = 6;
+      gfx_present(&sf);
+      gui_win_frame_wait(&c);
+    }
+  }
+  return 0;
+}

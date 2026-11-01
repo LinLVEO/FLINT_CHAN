@@ -30,7 +30,7 @@
 //   criterion: contains -> field d=4 f0=11 f4=22
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f034_struct_field4.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
 //   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\docs\设计决策.md
 //

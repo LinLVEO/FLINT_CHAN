@@ -1,0 +1,328 @@
+// apps\paintshop2.fl -- FLC 像素画板（普通窗口 + BitBlt 版，B 路线）
+//
+// 与 paintshop.fl 的区别：不碰 FLGUI 的 layered/ULW，走普通窗口 + GetDC/BitBlt。
+// 操作：鼠标左键画、右键擦；方向键移光标、空格画、C 擦；点调色板选色。
+// 顶栏 SET 进设置页：W/H 用 -/+ 改，APPLY 写 cfg 并重建窗口/表面尺寸，BACK 返回。
+// 关窗退出。
+//
+// 2026-10-31 设置页落地：DIB 按 32x32 最大画布一次分配（Surf 的设计口径），
+//   改尺寸只改逻辑尺寸 + MoveWindow，不重建 DIB —— 避开旧版"改尺寸重建表面"的崩溃路径。
+include "../lib/ui_lib.fl"
+include "../lib/gfx.fl"
+include "../lib/io_lib.fl"
+
+api gdi32 int BitBlt(int, int, int, int, int, int, int, int, int);
+api kernel32 int Sleep(int);
+api user32 int AdjustWindowRect(int, int, int);
+api user32 int PostQuitMessage(int);
+api user32 int ScreenToClient(int, int);
+api user32 int GetAsyncKeyState(int);
+api user32 int MoveWindow(int, int, int, int, int, int);
+
+// 普通窗口的 WndProc：参数必须是指针（见 tmp\minwin.fl 的坑：int 四参会截断 lParam）
+int paint_proc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  if (msg == 0x14) { return 1; }
+  if (msg == 0x02) { PostQuitMessage(0); return 0; }
+  if (msg == 0x20) { SetCursor(LoadCursorA(0, 32512)); return 1; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int is_hit(int mx, int my, int x0, int y0, int x1, int y1) {
+  if (mx < x0) { return 0; }
+  if (my < y0) { return 0; }
+  if (mx >= x1) { return 0; }
+  if (my >= y1) { return 0; }
+  return 1;
+}
+
+int main() {
+  struct WNDCLASS wc;
+  struct Surf s;
+  struct GfxBuf b;
+  struct RECT rc;
+  struct MSG msg;
+  struct PT pt;
+  int *h = 0;
+  int *wdc = 0;
+  int canvas[1024];
+  int pal[48];
+  int w = 16;
+  int hgt = 16;
+  int cell = 16;
+  int ox = 8;
+  int oy = 30;
+  int cw = 0;
+  int chh = 0;
+  int maxw = 0;
+  int maxh = 0;
+  int palx = 0;
+  int i = 0;
+  int x = 0;
+  int y = 0;
+  int cx = 0;
+  int cy = 0;
+  int cur = 1;
+  int run = 1;
+  int bx = 0;
+  int by = 0;
+  int mx = 0;
+  int my = 0;
+  int k = 0;
+  int v = 0;
+  int d = 0;
+  int page = 0;
+  int dirty = 0;
+  int last_left = 0;
+  char *tb = 0;
+  char cfg[64];
+  int n = 0;
+  int left = 0;
+  int right = 0;
+
+  n = std::file_read("paintshop.cfg", cfg, 63);
+  if (n > 0) {
+    cfg[n] = 0;
+    k = 0; v = 0; d = 0;
+    while (k < n) {
+      if (cfg[k] >= 48) {
+        if (cfg[k] <= 57) { v = v * 10 + (cfg[k] - 48); }
+      } else {
+        if (d == 0) { if (v > 0) { w = v; d = 1; } }
+        else if (d == 1) { if (v > 0) { hgt = v; d = 2; } }
+        v = 0;
+      }
+      k = k + 1;
+    }
+    if (d == 0) { if (v > 0) { w = v; } }
+    else if (d == 1) { if (v > 0) { hgt = v; } }
+  }
+  if (w < 4) { w = 4; }
+  if (w > 32) { w = 32; }
+  if (hgt < 4) { hgt = 4; }
+  if (hgt > 32) { hgt = 32; }
+
+  pal[0] = 0;
+  pal[1] = 0x000B0E1A; pal[2] = 0x001B2340; pal[3] = 0x00E8F0FF;
+  pal[4] = 0x007FD8E8; pal[5] = 0x00E8663C; pal[6] = 0x00F2C14E;
+  pal[7] = 0x00FFFFFF; pal[8] = 0x00606060;
+  pal[9] = 0x00FF6B6B; pal[10] = 0x00FFA94D; pal[11] = 0x00FFD43B;
+  pal[12] = 0x00B2F2BB; pal[13] = 0x0069DB7C; pal[14] = 0x002F9E44;
+  pal[15] = 0x0096F2FF; pal[16] = 0x004DABF7; pal[17] = 0x001C7EDB;
+  pal[18] = 0x00B197FC; pal[19] = 0x00704BDB; pal[20] = 0x00F783AC;
+  pal[21] = 0x00D6336C; pal[22] = 0x00A61E4D; pal[23] = 0x00868E96;
+  pal[24] = 0x00495057; pal[25] = 0x002B8A8A; pal[26] = 0x0063E6BE;
+  pal[27] = 0x00C3FAE8; pal[28] = 0x00FFE8CC; pal[29] = 0x00FFC078;
+  pal[30] = 0x00E8590C; pal[31] = 0x00D9480F; pal[32] = 0x00364000;
+  pal[33] = 0x0074B816; pal[34] = 0x00A9E34B; pal[35] = 0x00C0EB75;
+  pal[36] = 0x003B5DB8; pal[37] = 0x00186CEB; pal[38] = 0x0074C0FF;
+  pal[39] = 0x006B1E8A; pal[40] = 0x009C36B3; pal[41] = 0x00DA77F2;
+  pal[42] = 0x00F1F3F5; pal[43] = 0x00CED4DA; pal[44] = 0x00868E96;
+  pal[45] = 0x00495057; pal[46] = 0x00212A33; pal[47] = 0x00FF0000;
+
+  cw = ox + w * cell + 12 + 6 * 22 + 8;
+  chh = oy + hgt * cell + 8;
+  if (chh < oy + 8 * 22 + 8) { chh = oy + 8 * 22 + 8; }
+
+  // DIB 按最大画布（32x32）一次分配；改尺寸只改 cw/chh，不重建
+  maxw = ox + 32 * cell + 12 + 6 * 22 + 8;
+  maxh = oy + 32 * cell + 8;
+  if (maxh < oy + 8 * 22 + 8) { maxh = oy + 8 * 22 + 8; }
+
+  wc.style = 0;
+  wc.fn = &paint_proc;
+  wc.cb1 = 0;
+  wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0;
+  wc.cur = LoadCursorA(0, 32512);
+  wc.brush = 0;
+  wc.menu = 0;
+  wc.cls = "PAINTSHOP2";
+  if (RegisterClassA(&wc) == 0) { return 1; }
+
+  rc.l = 0;
+  rc.t = 0;
+  rc.r = cw;
+  rc.b = chh;
+  AdjustWindowRect(&rc, 0x00CF0000, 0);
+  h = CreateWindowExA(0, "PAINTSHOP2", "FLC Paint (plain window)", 0x00CF0000,
+                      100, 80, rc.r - rc.l, rc.b - rc.t, 0, 0, 0, 0);
+  if (h == 0) { return 2; }
+
+  s.h = h;
+  s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = maxw; s.bh = maxh;
+  s.cw = cw; s.ch = chh;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0;
+  s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 3; }
+  if (gfx_attach(&b, &s, cw, chh) == 0) { return 4; }
+
+  ShowWindow(h, 1);
+  SetCursor(LoadCursorA(0, 32512));
+
+  i = 0;
+  while (i < w * hgt) { canvas[i] = 0; i = i + 1; }
+  cx = 0; cy = 0;
+  palx = ox + w * cell + 12;
+
+  while (run == 1) {
+    while (PeekMessageA(&msg, 0, 0, 0, 1) != 0) {
+      if (msg.message == 0x0012) { run = 0; }
+      DispatchMessageA(&msg);
+    }
+    if (run == 1) {
+      GetCursorPos(&pt);
+      ScreenToClient(h, &pt);
+      mx = pt.x;
+      my = pt.y;
+      left = 0;
+      right = 0;
+      if ((GetAsyncKeyState(1) & 0x8000) != 0) { left = 1; }
+      if ((GetAsyncKeyState(2) & 0x8000) != 0) { right = 1; }
+
+      if (page == 0) {
+        // —— 画布页 ——
+        bx = (mx - ox) / cell;
+        by = (my - oy) / cell;
+        if (bx >= 0) { if (bx < w) { if (by >= 0) { if (by < hgt) { cx = bx; cy = by; } } } }
+        if (mx >= ox) {
+          if (mx < ox + w * cell) {
+            if (my >= oy) {
+              if (my < oy + hgt * cell) {
+                if (left == 1) { if (cx >= 0) { if (cx < w) { if (cy >= 0) { if (cy < hgt) { canvas[cy * w + cx] = cur; } } } } }
+                if (right == 1) { if (cx >= 0) { if (cx < w) { if (cy >= 0) { if (cy < hgt) { canvas[cy * w + cx] = 0; } } } } }
+              }
+            }
+          }
+        }
+        if ((GetAsyncKeyState(0x25) & 0x8000) != 0) { if (cx > 0) { cx = cx - 1; } }
+        if ((GetAsyncKeyState(0x27) & 0x8000) != 0) { if (cx < w - 1) { cx = cx + 1; } }
+        if ((GetAsyncKeyState(0x26) & 0x8000) != 0) { if (cy > 0) { cy = cy - 1; } }
+        if ((GetAsyncKeyState(0x28) & 0x8000) != 0) { if (cy < hgt - 1) { cy = cy + 1; } }
+        if ((GetAsyncKeyState(0x20) & 0x8000) != 0) { canvas[cy * w + cx] = cur; }
+        if ((GetAsyncKeyState(0x43) & 0x8000) != 0) { canvas[cy * w + cx] = 0; }
+
+        if (left == 1) {
+          if (last_left == 0) {
+            if (is_hit(mx, my, cw - 46, 4, cw - 6, 26) == 1) { page = 1; dirty = 0; }
+          }
+          if (mx >= palx) {
+            if (my >= oy) {
+              k = (mx - palx) / 22;
+              d = (my - oy) / 22;
+              v = d * 6 + k;
+              if (v >= 0) { if (v < 48) { cur = v; } }
+            }
+          }
+        }
+
+        // 绘制画布页
+        gfx_clear(&b, 0x00101820);
+        gfx_rect(&b, 0, 0, cw, 26, 0x00202830);
+        gfx_rect(&b, cw - 46, 4, cw - 6, 26, 0x002F9E44);
+        TextOutA(s.dc, cw - 38, 8, "SET", 3);
+
+        y = 0;
+        while (y < hgt) {
+          x = 0;
+          while (x < w) {
+            v = canvas[y * w + x];
+            if (v == 0) {
+              gfx_rect(&b, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, 0x00222A33);
+            } else {
+              gfx_rect(&b, ox + x * cell, oy + y * cell, ox + (x + 1) * cell, oy + (y + 1) * cell, pal[v]);
+            }
+            x = x + 1;
+          }
+          y = y + 1;
+        }
+        x = 0;
+        while (x <= w) { gfx_rect(&b, ox + x * cell, oy, ox + x * cell + 1, oy + hgt * cell, 0x00303940); x = x + 1; }
+        y = 0;
+        while (y <= hgt) { gfx_rect(&b, ox, oy + y * cell, ox + w * cell, oy + y * cell + 1, 0x00303940); y = y + 1; }
+        gfx_box(&b, ox + cx * cell, oy + cy * cell, ox + (cx + 1) * cell, oy + (cy + 1) * cell, 0x00FFFFFF);
+        k = 0;
+        while (k < 48) {
+          x = k % 6;
+          y = k / 6;
+          if (k == 0) {
+            gfx_rect(&b, palx + x * 22, oy + y * 22, palx + x * 22 + 20, oy + y * 22 + 20, 0x00404040);
+          } else {
+            gfx_rect(&b, palx + x * 22, oy + y * 22, palx + x * 22 + 20, oy + y * 22 + 20, pal[k]);
+          }
+          if (k == cur) { gfx_box(&b, palx + x * 22 - 2, oy + y * 22 - 2, palx + x * 22 + 22, oy + y * 22 + 22, 0x00FFFFFF); }
+          k = k + 1;
+        }
+      } else {
+        // —— 设置页 ——
+        gfx_clear(&b, 0x00101820);
+        gfx_rect(&b, 0, 0, cw, 26, 0x00202830);
+        TextOutA(s.dc, 10, 8, "SETTINGS", 8);
+
+        TextOutA(s.dc, 16, 44, "Canvas W:", 9);
+        gfx_rect(&b, 16, 64, 46, 92, 0x00304050);
+        TextOutA(s.dc, 28, 72, "-", 1);
+        gfx_rect(&b, 56, 64, 116, 92, 0x00182028);
+        if (w >= 10) { tb = str([w]); TextOutA(s.dc, 64, 72, tb, 2); } else { tb = str([w]); TextOutA(s.dc, 64, 72, tb, 1); }
+        gfx_rect(&b, 126, 64, 156, 92, 0x00304050);
+        TextOutA(s.dc, 138, 72, "+", 1);
+
+        TextOutA(s.dc, 16, 110, "Canvas H:", 9);
+        gfx_rect(&b, 16, 130, 46, 158, 0x00304050);
+        TextOutA(s.dc, 28, 138, "-", 1);
+        gfx_rect(&b, 56, 130, 116, 158, 0x00182028);
+        if (hgt >= 10) { tb = str([hgt]); TextOutA(s.dc, 64, 138, tb, 2); } else { tb = str([hgt]); TextOutA(s.dc, 64, 138, tb, 1); }
+        gfx_rect(&b, 126, 130, 156, 158, 0x00304050);
+        TextOutA(s.dc, 138, 138, "+", 1);
+
+        gfx_rect(&b, 16, 180, 126, 210, 0x002F9E44);
+        TextOutA(s.dc, 40, 188, "APPLY", 5);
+        gfx_rect(&b, 140, 180, 250, 210, 0x002A3440);
+        TextOutA(s.dc, 164, 188, "BACK", 4);
+        TextOutA(s.dc, 16, 226, "APPLY = save cfg + resize", 25);
+        if (dirty == 1) { TextOutA(s.dc, 260, 188, "*", 1); }
+
+        if (left == 1) {
+          if (last_left == 0) {
+            if (is_hit(mx, my, 16, 64, 46, 92) == 1) { if (w > 4) { w = w - 1; dirty = 1; } }
+            if (is_hit(mx, my, 126, 64, 156, 92) == 1) { if (w < 32) { w = w + 1; dirty = 1; } }
+            if (is_hit(mx, my, 16, 130, 46, 158) == 1) { if (hgt > 4) { hgt = hgt - 1; dirty = 1; } }
+            if (is_hit(mx, my, 126, 130, 156, 158) == 1) { if (hgt < 32) { hgt = hgt + 1; dirty = 1; } }
+            if (is_hit(mx, my, 16, 180, 126, 210) == 1) {
+              cfg[0] = 48 + w / 10; cfg[1] = 48 + w % 10; cfg[2] = 10;
+              cfg[3] = 48 + hgt / 10; cfg[4] = 48 + hgt % 10; cfg[5] = 10;
+              cfg[6] = 48 + 16 / 10; cfg[7] = 48 + 16 % 10; cfg[8] = 10;
+              std::file_write("paintshop.cfg", cfg, 9);
+              cw = ox + w * cell + 12 + 6 * 22 + 8;
+              chh = oy + hgt * cell + 8;
+              if (chh < oy + 8 * 22 + 8) { chh = oy + 8 * 22 + 8; }
+              palx = ox + w * cell + 12;
+              s.cw = cw;
+              s.ch = chh;
+              gfx_attach(&b, &s, cw, chh);
+              rc.l = 0; rc.t = 0; rc.r = cw; rc.b = chh;
+              AdjustWindowRect(&rc, 0x00CF0000, 0);
+              MoveWindow(h, 100, 80, rc.r - rc.l, rc.b - rc.t, 1);
+              i = 0;
+              while (i < w * hgt) { canvas[i] = 0; i = i + 1; }
+              cx = 0; cy = 0;
+              dirty = 0;
+              page = 0;
+            }
+            if (is_hit(mx, my, 140, 180, 250, 210) == 1) { page = 0; dirty = 0; }
+          }
+        }
+      }
+
+      wdc = GetDC(h);
+      BitBlt(wdc, 0, 0, cw, chh, s.dc, 0, 0, 0x00CC0020);
+      ReleaseDC(h, wdc);
+      last_left = left;
+      Sleep(16);
+    }
+  }
+  return 0;
+}

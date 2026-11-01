@@ -4,7 +4,7 @@
 #
 # Steps, in this order (order matters -- step 0 rebuilds the compiler every gate uses, and no two
 # gates may overlap: a product rebuild while a regression runs has burned this project before):
-#   [0] build     gcc -O2 src\*.c -o flint.exe            (skip with -SkipBuild)
+#   [0] build     gcc -O2 src\*.c -o hlc.exe            (skip with -SkipBuild)
 #   [1] warn      gcc -O2 -Wall -Wextra -> warning count  (baseline 7, must not grow)
 #   [2] wx        test\wx-verify.ps1                      W^X / .idata / ASLR + header layout pin
 #   [3] debug     test\debug-verify.ps1 -BaselineExe ...   -debug audit layer
@@ -62,10 +62,31 @@
 #                 import or table slot is a regression; spending one LESS is a counting-rule change
 #                 that must be re-recorded, or a later regression back to the old level would slip
 #                 under the gate). A missing baseline and a meter failure are RED as well, and the
-#                 re-record command is printed. The ABSOLUTE status quo (a product at 96/96 imports
-#                 and 8/8 modules; boot's table at 512/512 with headroom 0) is printed as a loud
-#                 WARN but is not a red by itself -- it is pre-existing and pending budget
-#                 re-layout, and a gate that is red for the status quo trains people to ignore it.
+#                 re-record command is printed.
+#                 Since 2026-10-31 there is ALSO an ABSOLUTE layer: a FLINT product whose imports or
+#                 module count EXCEEDS MAX_IMPORTS/MAX_GROUPS (caps still read from src\pe.c, never
+#                 written in the script) is RED unless an attributed exception in test\ "budget
+#                 whitelist".json covers that exact count (Why / Owner / Due are required fields).
+#                 This layer exists because the regression layer alone cannot judge a status quo:
+#                 apps\studio_native\studio_win.exe was measured at 103 imports against a 96 soft
+#                 budget on 2026-10-31 and the gate was GREEN, since 103 was what the baseline had
+#                 recorded. AT the cap (96/96 imports, 8/8 modules; boot's table at its limit) is
+#                 still a loud WARN and not a red -- 96 is a ledger ruler, not a wall, because the
+#                 compiler allocates imports by actual use since 2026-10-24.
+#
+#   [15] gui     test\gui-smoke.ps1 -Exe build\paintshop2.exe   GUI smoke gate (opt-in, 2026-10-31):
+#                 the one question none of the steps above can answer -- "does the window program
+#                 actually get up?" It starts the exe, requires the process to STILL BE ALIVE after
+#                 -Seconds (the crash class that cost a whole evening: window creation fails and the
+#                 process exits instantly, so a human only sees "no window"), enumerates the pid's
+#                 top-level windows and requires one of the program's OWN windows (a console-subsystem
+#                 build also owns a console window, which must not be mistaken for the GUI), takes a
+#                 screenshot and requires the pixels to hold at least 8 distinct colours (a flat image
+#                 means the window is up but nothing was painted), then closes the window and
+#                 requires the process to exit by itself. Exit 0 = green, 1 = at least one FAIL.
+#                 DELIBERATELY NOT in the default $Only list: it opens a real window and takes the
+#                 foreground away from whoever is using the machine. Run it with -Only gui, on a
+#                 live desktop.
 #
 # Full output per step -> tmp\verify-all\<step>.log; the console shows the tail plus the parsed
 # "N / M" summary line. Exit code 0 only when every requested step is green.
@@ -74,15 +95,27 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File test\verify-all.ps1
 #   powershell ... -File test\verify-all.ps1 -SkipBuild
 #   powershell ... -File test\verify-all.ps1 -Only wx,debug
+#   powershell ... -File test\verify-all.ps1 -Only gui     (GUI smoke gate alone; opens a real window)
 param(
   [switch]$SkipBuild,
-  [string[]]$Only = @('build', 'warn', 'wx', 'debug', 'regress', 'boot', 'diffgate', 'audit', 'eqgate', 'bench', 'strict', 'loop', 'budget', 'doc'),
-  [string]$BaselineExe = '.\flint_before_aslr.exe',
+  [string[]]$Only = @('build', 'warn', 'wx', 'debug', 'regress', 'boot', 'diffgate', 'audit', 'eqgate', 'bench', 'strict', 'loop', 'budget', 'toolapi', 'doc'),
+  # 2026-10-31 repo hygiene: the pre-change baseline exes moved out of the repo root
+  # with the rest of the historical binaries -> archive\exe\. The wx/debug gates read them there.
+  [string]$BaselineExe = '.\archive\exe\flint_before_aslr.exe',
   [int]$TailLines = 6
 )
 $ErrorActionPreference = 'Continue'
+# 2026-10-24（无头门）：把**控制台代码页**钉成 UTF-8，与本门是否跑在私有桌面上无关。
+# 为什么必须钉：私有桌面/CREATE_NO_WINDOW 起的控制台，代码页 = 系统 OEM（中文机 = 936），
+#   而 flint 的 -stats / 各门自己的输出都是 **UTF-8 字节**；PowerShell 用 [Console]::OutputEncoding
+#   解码原生 stdout，9xx 页会把「寄存器槽」「通过」全解成乱码 ⇒ 门按中文/英文关键字匹配时
+#   会读到"没有这一行"，实测 debug 门在私有桌面上 115/6、差分门 1/243 全是这个假红。
+# 为什么写在这里：这是所有子门**唯一的入口**；SetConsoleOutputCP 作用于本进程的**共享控制台**，
+#   所有 `& powershell …` 子门（debug/diffgate/…）启动时都会从这个控制台取到 65001。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $logDir = Join-Path $root 'tmp\verify-all'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $results = @()
@@ -128,12 +161,12 @@ if (Want 'build') {
     Write-Host "=== [build] skipped (-SkipBuild) ==="
   } else {
     Write-Host ""
-    Write-Host "=== [build] rebuild flint.exe (gcc -O2) ==="
+    Write-Host "=== [build] rebuild hlc.exe (gcc -O2) ==="
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $src = (Get-ChildItem (Join-Path $root 'src\*.c')).FullName
     $out = & gcc -O2 @src -o $flint 2>&1
     $code = $LASTEXITCODE; $sw.Stop()
-    Add-Result 'build' 'rebuild flint.exe (gcc -O2)' $code $out ([Math]::Round($sw.Elapsed.TotalSeconds, 1))
+    Add-Result 'build' 'rebuild hlc.exe (gcc -O2)' $code $out ([Math]::Round($sw.Elapsed.TotalSeconds, 1))
     if ($code -ne 0) { Write-Host 'BUILD FAILED -- later steps would test a stale compiler, stopping.'; Pop-Location; exit 1 }
   }
 }
@@ -156,7 +189,23 @@ if (Want 'warn') {
 $ps = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File')
 Run-Gate 'wx'      'gate: product invariants (W^X / .idata / ASLR) + header layout pin' 'powershell' ($ps + @((Join-Path $root 'test\wx-verify.ps1')))
 Run-Gate 'debug'   'gate: -debug audit layer' 'powershell' ($ps + @((Join-Path $root 'test\debug-verify.ps1'), '-BaselineExe', $BaselineExe))
-Run-Gate 'regress' 'behaviour regression' 'node' @((Join-Path $root 'test\run-tests.js'))
+# 2026-10-20: run-tests launches samples that create REAL windows (ui1/ui2/ui_text/api3/align*_probe/
+#   wndproc_probe/rtptr5).  On the interactive desktop every one of them took the foreground away from
+#   the user (measured: 6 handoffs in one run).  SW_HIDE via STARTUPINFO does NOT help -- those samples
+#   call ShowWindow(SW_SHOW) explicitly, which overrides it.  So the whole step runs on a private
+#   desktop (tools\silent-gate.ps1).  -Stream echoes the child's own output, so run-tests' "<n> / <m>"
+#   summary line still lands in this step's log and the numbers parser below keeps working.
+$silent = Join-Path $root 'tools\silent-gate.ps1'
+if (Test-Path -LiteralPath $silent) {
+  Run-Gate 'regress' 'behaviour regression (children on a private desktop)' 'powershell' @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $silent,
+    '-Exe', 'node', '-Argv', (Join-Path $root 'test\run-tests.js'),
+    '-WorkDir', $root, '-Stream', '-TimeoutSec', '1800',
+    '-OutFile', (Join-Path $logDir 'regress-child.out.log'),
+    '-ErrFile', (Join-Path $logDir 'regress-child.err.log'))
+} else {
+  Run-Gate 'regress' 'behaviour regression' 'node' @((Join-Path $root 'test\run-tests.js'))
+}
 Run-Gate 'boot'    'boot compiler self-hosting verify' 'powershell' ($ps + @((Join-Path $root 'boot\verify.ps1')))
 # [6] full-sample two-compiler differential gate (T-20260919-010437). TimeoutSec 5 keeps it ~80s:
 #     only genuine hangs are affected (they are already recorded as HANG in the baseline).
@@ -197,10 +246,13 @@ Run-Gate 'loop'    'gate: real-app smoke (both compilers, run + dump byte compar
 #      re-recorded explicitly, otherwise a later "back to the old level" regression would slip
 #      under the gate (the same rule that makes the equivalence gate safe). A missing baseline and
 #      a meter failure are red too, with the re-record command printed.
-#      The ABSOLUTE status quo is printed as a loud WARN but is not a red by itself: the real app
-#      currently sits at 96/96 imports, 8/8 modules and boot's table at 512/512 (headroom 0). That
-#      is a pre-existing fact awaiting the planned budget re-layout, and a gate that is red for the
-#      status quo is a gate people learn to read as noise.
+#      The ABSOLUTE status quo is printed as a loud WARN and is not a red by itself: the real app
+#      currently sits at 90/96 imports and 8/8 modules. That is a pre-existing fact awaiting the
+#      planned budget re-layout, and a gate that is red for the status quo is a gate people learn to
+#      read as noise. OVER the soft budget is a different matter and IS a red (layer 2, 2026-10-31):
+#      a product above MAX_IMPORTS/MAX_GROUPS must be listed with an attributed exception (Why /
+#      Owner / Due) in test\ "budget whitelist".json, or the step fails. The whitelist is an
+#      exception ledger, not a silencer: stale entries and entries whose counts drifted are red too.
 #      The tool and baseline file names contain CJK characters and this file is an ASCII contract,
 #      so those paths are assembled from code points here (and echoed so the log says what ran).
 if (Want 'budget') {
@@ -245,6 +297,53 @@ if (Want 'budget') {
 #      trap already bit this project (test\flgui-verify.ps1) and bit this gate twice while it was
 #      still a .ps1. Node reads and writes UTF-8 unconditionally, so the whole bug class is gone.
 #      It prints "DOCGATE documents N / issues M", which this harness picks up as the summary.
+# --- [14] toolapi: editor + debugger control-plane contract tests ---
+# v5 (2026-10-22): the two official tools must stay machine-controllable. Both suites are
+# end-to-end HTTP/DAP tests that start their own server on a private port and kill it afterwards;
+# they never touch the 8899/8900 instances the user may be running.
+# Criteria = both suites exit 0 AND their own "passed/failed" lines add up.
+if (Want 'toolapi') {
+  Write-Host ""
+  Write-Host "=== [toolapi] editor + debugger control-plane contract tests ==="
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $lines = @()
+  $code = 0
+  $tp = 0; $tf = 0
+  foreach ($suite in @( @{ n = 'editor'; p = 'editor\api-test.mjs' }, @{ n = 'debugger'; p = 'debugger\api-test.mjs' } )) {
+    $file = Join-Path $root $suite.p
+    if (-not (Test-Path -LiteralPath $file)) {
+      $lines += ("MISSING " + $suite.p)
+      $code = 1
+      continue
+    }
+    $out = @(& node $file 2>&1 | ForEach-Object { [string]$_ })
+    $c = $LASTEXITCODE
+    if ($c -ne 0) { $code = 1 }
+    $joined = ($out | Select-Object -Last 6) -join "`n"
+    $m = [regex]::Match($joined, '通过\s*(\d+)\s*/\s*失败\s*(\d+)')
+    if (-not $m.Success) { $m = [regex]::Match($joined, '(\d+)\s*passed\s*/\s*(\d+)\s*failed') }
+    if ($m.Success) { $tp += [int]$m.Groups[1].Value; $tf += [int]$m.Groups[2].Value }
+    else { $code = 1; $lines += ($suite.n + ": no summary line in the last 6 lines") }
+    $lines += @("--- " + $suite.n + " (exit=" + $c + ") ---") + ($out | Select-Object -Last 12)
+  }
+  $lines += ("toolapi: 通过 " + $tp + " / 失败 " + $tf)
+  Add-Result 'toolapi' 'editor + debugger control-plane contract tests' $code $lines ([Math]::Round($sw.Elapsed.TotalSeconds, 1))
+}
+
+# [15] GUI smoke gate (2026-10-31, OPT-IN): the steps above judge bytes, samples and dumps; this is
+#      the only step that answers the question a human used to answer by double-clicking the exe --
+#      "did the window program really get up, appear, paint something, and quit?".
+#      It is NOT in the default $Only list on purpose: it opens a real window and takes the
+#      foreground away from whoever is at the machine, so a default run of this gate must never
+#      block on it. -Only gui runs it. The child prints a "gui smoke pass N / fail M" line, which the
+#      summary parser above picks up. The screenshot of the run lands in tmp\verify-all\gui-smoke.png
+#      and is kept even when the step is red (a flat image is the evidence for the D failure).
+Run-Gate 'gui' 'gate: GUI smoke (window up, alive, paints, exits cleanly)' 'powershell' ($ps + @(
+  (Join-Path $root 'test\gui-smoke.ps1'),
+  '-Exe', (Join-Path $root 'build\paintshop2.exe'),
+  '-Seconds', '3',
+  '-Shot', (Join-Path $logDir 'gui-smoke.png')))
+
 Run-Gate 'doc'     'gate: documentation (numbers vs meter, links, snapshot banners, meta blocks)' 'node' @((Join-Path $root 'test\docgate.mjs'))
 
 Pop-Location

@@ -1,0 +1,27 @@
+// dbgvar.fl -- sample target for debugger\api-test.mjs (R-D-* acceptance).
+//
+//   * three int locals (a, b, c) + one char* string literal, printed BY THE PROGRAM in ONE
+//     print -- the test compares what the debugger reads from the frame slots against the
+//     program's own stdout (external judge, no hand-copied expectations);
+//   * a helper function (bump) so the rbp chain can be walked for 2+ frames and cross-frame
+//     variable reads can be checked;
+//   * a long spin loop, so `pause` has a live process to interrupt after `continue`;
+//   * returns 42.
+//
+// NO includes: `print` is a language builtin. ASCII only.
+int bump(int x) {
+  int y = x + 1;
+  return y;
+}
+
+int main() {
+  int a = 1234;
+  int b = 0 - 5678;
+  int c = 9001;
+  char *msg = "flint-dbg";
+  int spin = 0;
+  print(["a=", a, " b=", b, " c=", c, " msg=", msg, "\n"]);
+  int d = bump(a);
+  while (spin < 2000000000) { spin = spin + 1; }
+  return 42;
+}

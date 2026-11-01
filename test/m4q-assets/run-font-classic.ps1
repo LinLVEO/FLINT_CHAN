@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 if (-not $Root) { $Root = Split-Path (Split-Path $here -Parent) -Parent }
 $old = Join-Path $here 'oldlib'
-$flint = Join-Path $Root 'flint.exe'
+$flint = Join-Path $Root 'hlc.exe'
 # All build products go to a throwaway dir under %TEMP% (never into the repo).
 $work = Join-Path ([IO.Path]::GetTempPath()) ('flint-font-classic-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $work | Out-Null

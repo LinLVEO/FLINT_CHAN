@@ -1,0 +1,75 @@
+// f092_walk_off.fl -- 平走走出平台必须掉下去（修"悬空"）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 地图 4x4：ty=2 整行平台(1)、ty=3 整行底(1)，其余空。
+// 角色 16x16 从 (0,0) 落到平台 y=16。
+//   bit0  初始落地 y == 16
+//   bit1  水平走 30 步后 x > 48（走到平台右半）
+//   bit2  继续 200 步：y > 16（走出平台后掉下去了）
+//   bit3  y > 100（确实掉下去，不是卡在边缘）
+//   bit4  onground == 0（在空中）
+//   bit5  静止在平台上（vx=0）时 onground 仍 1
+//   bit6  平台边缘 (x=48) 仍算站在地上
+//   bit7  确定性：同一序列跑两次 y 相同
+include "../../lib/body.fl"
+
+int walkoff_y(struct Grid *gp) {
+  struct Body b;
+  int i = 0;
+  body_init(&b, 0, 0, 16, 16);
+  i = 0;
+  while (i < 100) { body_step(gp, &b, 32768); i = i + 1; }
+  b.vx = 4 * 65536;
+  i = 0;
+  while (i < 230) { body_step(gp, &b, 32768); i = i + 1; }
+  return b.y / 65536;
+}
+
+int main() {
+  struct Grid g;
+  int map[16];
+  int mask = 0;
+  struct Body b;
+  int i = 0;
+
+  map[0] = 0; map[1] = 0; map[2] = 0; map[3] = 0;
+  map[4] = 0; map[5] = 0; map[6] = 0; map[7] = 0;
+  map[8] = 1; map[9] = 1; map[10] = 1; map[11] = 1;
+  map[12] = 1; map[13] = 1; map[14] = 1; map[15] = 1;
+  if (grid_init(&g, map, 4, 4, 16, 16) == 0) { return 1; }
+
+  if (body_init(&b, 0, 0, 16, 16) == 0) { return 2; }
+  i = 0;
+  while (i < 100) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y == 16 * 65536) {
+    if (b.onground == 1) { mask = mask | 1; }
+  }
+
+  b.vx = 4 * 65536;
+  i = 0;
+  while (i < 30) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.x > 48 * 65536) { mask = mask | 2; }
+
+  i = 0;
+  while (i < 200) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y > 16 * 65536) { mask = mask | 4; }
+  if (b.y > 100 * 65536) { mask = mask | 8; }
+  if (b.onground == 0) { mask = mask | 16; }
+
+  if (body_init(&b, 0, 0, 16, 16) == 0) { return 3; }
+  i = 0;
+  while (i < 100) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.onground == 1) {
+    if (b.x == 0) { mask = mask | 32; }
+  }
+
+  if (body_init(&b, 48, 16, 16, 16) == 0) { return 4; }
+  body_step(&g, &b, 32768);
+  if (b.onground == 1) { mask = mask | 64; }
+
+  if (walkoff_y(&g) == walkoff_y(&g)) { mask = mask | 128; }
+
+  print(["f092 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

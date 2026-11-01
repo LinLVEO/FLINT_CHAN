@@ -1,0 +1,106 @@
+// f072_grid_load.fl -- M1 文件管线：ASCII 地图 -> int 数组（mapload_ascii）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 每位一格：
+//   bit0 基本：2x2 "12\n34\n" -> m[0..3] = 1,2,3,4
+//   bit1 '.' -> 0（空格占位）
+//   bit2 '\r\n' 行尾：2 行各 1 字符
+//   bit3 多余行（> h）被丢弃：4 行喂 h=2，只留前 2 行
+//   bit4 短行（某行不足 w）：缺的格子保持预填 9，不崩
+//   bit5 空文件：返回 1、缓冲一格不动
+//   bit6 不存在的文件：返回 0
+//   bit7 真实地图 apps/map.txt（32x17）：三处抽查 m[0]=1、m[68]=3、m[543]=1
+include "../../lib/mapload.fl"
+
+int main() {
+  int mask = 0;
+  int buf[544];
+  int i = 0;
+  char *p = "test/tmp/f072_map.txt";
+
+  // bit0
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "12\n34\n", 6);
+  if (mapload_ascii(p, buf, 2, 2) == 1) {
+    if (buf[0] == 1) {
+      if (buf[1] == 2) {
+        if (buf[2] == 3) {
+          if (buf[3] == 4) { mask = mask | 1; }
+        }
+      }
+    }
+  }
+
+  // bit1
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "1.2\n3.4\n", 8);
+  if (mapload_ascii(p, buf, 3, 2) == 1) {
+    if (buf[1] == 0) {
+      if (buf[4] == 0) { mask = mask | 2; }
+    }
+  }
+
+  // bit2
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "7\r\n8\r\n", 6);
+  if (mapload_ascii(p, buf, 1, 2) == 1) {
+    if (buf[0] == 7) {
+      if (buf[1] == 8) { mask = mask | 4; }
+    }
+  }
+
+  // bit3
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "11\n22\n33\n44\n", 12);
+  if (mapload_ascii(p, buf, 2, 2) == 1) {
+    if (buf[0] == 1) {
+      if (buf[1] == 1) {
+        if (buf[2] == 2) {
+          if (buf[3] == 2) { mask = mask | 8; }
+        }
+      }
+    }
+  }
+
+  // bit4
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "1\n22\n", 4);
+  if (mapload_ascii(p, buf, 2, 2) == 1) {
+    if (buf[0] == 1) {
+      if (buf[1] == 9) {
+        if (buf[2] == 2) {
+          if (buf[3] == 2) { mask = mask | 16; }
+        }
+      }
+    }
+  }
+
+  // bit5
+  i = 0;
+  while (i < 16) { buf[i] = 9; i = i + 1; }
+  std::file_write(p, "", 0);
+  if (mapload_ascii(p, buf, 2, 2) == 1) {
+    if (buf[0] == 9) { mask = mask | 32; }
+  }
+
+  // bit6
+  if (mapload_ascii("test/tmp/f072_nope.txt", buf, 2, 2) == 0) { mask = mask | 64; }
+
+  // bit7
+  if (mapload_ascii("apps/map.txt", buf, 32, 17) == 1) {
+    if (buf[0] == 1) {
+      if (buf[68] == 3) {
+        if (buf[543] == 1) { mask = mask | 128; }
+      }
+    }
+  }
+
+  print(["f072 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

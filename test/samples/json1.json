@@ -1,0 +1,7 @@
+{
+  "cpu": { "temp": 42, "load": 0.75 },
+  "items": [ { "name": "alpha", "n": 1 }, { "name": "beta", "n": -7 } ],
+  "esc": "a\"b\\c\nd\u4F60",
+  "flag": true,
+  "nil": null
+}

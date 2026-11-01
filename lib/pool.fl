@@ -1,0 +1,71 @@
+// pool.fl -- 定长对象池（M5 第一刀）：一次分配 + 空闲栈，禁止每帧 new
+//
+// 用法：include "pool.fl"
+// 内存：调用方给两块数组 —— data 放对象字段（n * stride 个 int 槽）、free 放空闲下标栈。
+//   `new` 每调用一次是一次 VirtualAlloc；帧内零分配是 M5 的硬要求。
+// 口径：alloc 返回对象号（0..n-1），用尽返回 -1；free 成功 1 / 越界或重复 0。
+struct Pool { int *data; int *free; int n; int stride; int top; }
+
+// 初始化：free 栈按"0 先出"填好（free[i] = n-1-i、top = n）。返回 1。
+int pool_init(struct Pool *p, int *data, int *freebuf, int n, int stride) {
+  int i = 0;
+  if (p == 0) { return 0; }
+  if (data == 0) { return 0; }
+  if (freebuf == 0) { return 0; }
+  if (n <= 0) { return 0; }
+  if (stride <= 0) { return 0; }
+  p->data = data;
+  p->free = freebuf;
+  p->n = n;
+  p->stride = stride;
+  p->top = n;
+  while (i < n) {
+    freebuf[i] = n - 1 - i;
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 取一个对象号；用尽返回 -1。
+int pool_alloc(struct Pool *p) {
+  if (p == 0) { return -1; }
+  if (p->top <= 0) { return -1; }
+  p->top = p->top - 1;
+  return p->free[p->top];
+}
+
+// 归还对象号；越界/栈满返回 0。
+int pool_free(struct Pool *p, int idx) {
+  if (p == 0) { return 0; }
+  if (idx < 0) { return 0; }
+  if (idx >= p->n) { return 0; }
+  if (p->top >= p->n) { return 0; }
+  p->free[p->top] = idx;
+  p->top = p->top + 1;
+  return 1;
+}
+
+// 字段写：data[idx*stride + field] = v；越界返回 0。
+int pool_set(struct Pool *p, int idx, int field, int v) {
+  int base = 0;
+  if (p == 0) { return 0; }
+  if (idx < 0) { return 0; }
+  if (idx >= p->n) { return 0; }
+  if (field < 0) { return 0; }
+  if (field >= p->stride) { return 0; }
+  base = idx * p->stride;
+  p->data[base + field] = v;
+  return 1;
+}
+
+// 字段读：越界返回 0（0 是合法值，别用它判错，用 pool_set 的返回判）。
+int pool_get(struct Pool *p, int idx, int field) {
+  int base = 0;
+  if (p == 0) { return 0; }
+  if (idx < 0) { return 0; }
+  if (idx >= p->n) { return 0; }
+  if (field < 0) { return 0; }
+  if (field >= p->stride) { return 0; }
+  base = idx * p->stride;
+  return p->data[base + field];
+}

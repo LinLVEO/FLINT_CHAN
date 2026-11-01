@@ -1,0 +1,190 @@
+// chip8_core.fl — CHIP-8 核心（无 main）：指令执行 + 内存/显存辅助
+//   被两个前端共用：chip8.fl（无头自测）/ chip8_win.fl（真窗）
+//   内存与显存**不进 struct**：boot 的结构体表把字段数组长度与槽数都只留 3 位
+//   （≥1000 元素/≥1000 槽会截断），所以由调用方用局部数组持有、按指针传进来。
+struct C8 {
+  int v[16];
+  int stk[16];
+  int sp;
+  int pc;
+  int i;
+  int dt;
+  int st;
+  int rnd;
+  int key;      // 当前按下的 CHIP-8 键（0..15；-1 = 没按）
+  int keynew;   // 1 = 本帧刚按下（FX0A 等键用）
+}
+
+int c8_cls(int *fb) {
+  int k = 0;
+  while (k < 2048) { fb[k] = 0; k = k + 1; }
+  return 0;
+}
+
+int c8_reset(struct C8 *c, char *mem, int *fb) {
+  int k = 0;
+  while (k < 4096) { mem[k] = 0; k = k + 1; }
+  k = 0;
+  while (k < 16) { c->v[k] = 0; c->stk[k] = 0; k = k + 1; }
+  c->sp = 0;
+  c->pc = 0x200;
+  c->i = 0;
+  c->dt = 0;
+  c->st = 0;
+  c->rnd = 0x1234;
+  c->key = -1;
+  c->keynew = 0;
+  c8_cls(fb);
+  return 0;
+}
+
+// char 是 1 字节有符号 ⇒ 一律 & 0xFF 取回 0..255
+int c8_rd(char *mem, int a) { return mem[a] & 0xFF; }
+int c8_wr(char *mem, int a, int val) { mem[a] = val & 0xFF; return 0; }
+
+// 精灵 XOR 绘制：碰撞写进 VF（1 = 有像素被擦掉）
+int c8_draw(struct C8 *c, char *mem, int *fb, int x, int y, int n) {
+  c->v[0xF] = 0;
+  int r = 0;
+  while (r < n) {
+    int byte = c8_rd(mem, c->i + r);
+    int b = 0;
+    while (b < 8) {
+      if ((byte & (0x80 >> b)) != 0) {
+        int px = (x + b) % 64;
+        int py = (y + r) % 32;
+        int idx = py * 64 + px;
+        if (fb[idx] != 0) { c->v[0xF] = 1; }
+        fb[idx] = fb[idx] ^ 1;
+      }
+      b = b + 1;
+    }
+    r = r + 1;
+  }
+  return 0;
+}
+
+// 执行一条指令：1 = 正常；0 = 停机；负 = 不支持/非法
+int c8_exec(struct C8 *c, char *mem, int *fb) {
+  int op = (c8_rd(mem, c->pc) * 256 + c8_rd(mem, c->pc + 1)) & 0xFFFF;
+  int hi = op >> 12;
+  int x = (op >> 8) & 0xF;
+  int y = (op >> 4) & 0xF;
+  int n = op & 0xF;
+  int nn = op & 0xFF;
+  int nnn = op & 0xFFF;
+  c->pc = c->pc + 2;
+
+  if (hi == 0) {
+    if (nn == 0xE0) { c8_cls(fb); return 1; }
+    if (op == 0x00EE) {
+      if (c->sp <= 0) { return -1; }
+      c->sp = c->sp - 1;
+      c->pc = c->stk[c->sp];
+      return 1;
+    }
+    return 1;                                  // 0NNN（老 RCA 调用）：按 nop 处理
+  }
+  if (hi == 1) { c->pc = nnn; return 1; }
+  if (hi == 2) {
+    if (c->sp >= 16) { return -1; }
+    c->stk[c->sp] = c->pc;
+    c->sp = c->sp + 1;
+    c->pc = nnn;
+    return 1;
+  }
+  if (hi == 3) { if (c->v[x] == nn) { c->pc = c->pc + 2; } return 1; }
+  if (hi == 4) { if (c->v[x] != nn) { c->pc = c->pc + 2; } return 1; }
+  if (hi == 5) { if (c->v[x] == c->v[y]) { c->pc = c->pc + 2; } return 1; }
+  if (hi == 6) { c->v[x] = nn; return 1; }
+  if (hi == 7) { c->v[x] = (c->v[x] + nn) & 0xFF; return 1; }
+  if (hi == 8) {
+    int a = c->v[x];
+    int b = c->v[y];
+    if (n == 0) { c->v[x] = b; return 1; }
+    if (n == 1) { c->v[x] = a | b; return 1; }
+    if (n == 2) { c->v[x] = a & b; return 1; }
+    if (n == 3) { c->v[x] = a ^ b; return 1; }
+    if (n == 4) {
+      int s = a + b;
+      c->v[x] = s & 0xFF;
+      c->v[0xF] = 0;
+      if (s > 0xFF) { c->v[0xF] = 1; }
+      return 1;
+    }
+    if (n == 5) {
+      c->v[x] = (a - b) & 0xFF;
+      c->v[0xF] = 1;
+      if (a < b) { c->v[0xF] = 0; }
+      return 1;
+    }
+    if (n == 6) {
+      c->v[0xF] = a & 1;
+      c->v[x] = (a >> 1) & 0xFF;
+      return 1;
+    }
+    if (n == 7) {
+      c->v[x] = (b - a) & 0xFF;
+      c->v[0xF] = 1;
+      if (b < a) { c->v[0xF] = 0; }
+      return 1;
+    }
+    if (n == 0xE) {
+      c->v[0xF] = (a >> 7) & 1;
+      c->v[x] = (a << 1) & 0xFF;
+      return 1;
+    }
+    return -1;
+  }
+  if (hi == 9) { if (c->v[x] != c->v[y]) { c->pc = c->pc + 2; } return 1; }
+  if (hi == 0xA) { c->i = nnn; return 1; }
+  if (hi == 0xB) { c->pc = (nnn + c->v[0]) & 0xFFF; return 1; }
+  if (hi == 0xC) {
+    c->rnd = (c->rnd * 1103515245 + 12345) & 0x7FFFFFFF;
+    c->v[x] = ((c->rnd >> 16) & 0xFF) & nn;
+    return 1;
+  }
+  if (hi == 0xD) { c8_draw(c, mem, fb, c->v[x] % 64, c->v[y] % 32, n); return 1; }
+  if (hi == 0xE) {
+    if (n == 0xE) { if (c->key == c->v[x]) { c->pc = c->pc + 2; } return 1; }    // EX9E：按着就跳过
+    if (n == 0x1) { if (c->key != c->v[x]) { c->pc = c->pc + 2; } return 1; }    // EXA1：没按就跳过
+    return -1;
+  }
+  if (hi == 0xF) {
+    if (nn == 0x07) { c->v[x] = c->dt & 0xFF; return 1; }
+    if (nn == 0x0A) {                          // 等键：没按就**退回本条指令**（pc 不动），按下才写 VX 并消费
+      if (c->key >= 0) { c->v[x] = c->key; c->key = -1; c->keynew = 0; return 1; }
+      c->pc = c->pc - 2;
+      return 1;
+    }
+    if (nn == 0x15) { c->dt = c->v[x] & 0xFF; return 1; }
+    if (nn == 0x18) { c->st = c->v[x] & 0xFF; return 1; }
+    if (nn == 0x1E) { c->i = c->i + c->v[x]; return 1; }
+    if (nn == 0x29) { c->i = 0x50 + (c->v[x] & 0xF) * 5; return 1; }
+    if (nn == 0x33) {
+      int val = c->v[x] & 0xFF;
+      c8_wr(mem, c->i, val / 100);
+      c8_wr(mem, c->i + 1, (val / 10) % 10);
+      c8_wr(mem, c->i + 2, val % 10);
+      return 1;
+    }
+    if (nn == 0x55) {
+      int k = 0;
+      while (k <= x) { c8_wr(mem, c->i + k, c->v[k]); k = k + 1; }
+      return 1;
+    }
+    if (nn == 0x65) {
+      int k = 0;
+      while (k <= x) { c->v[k] = c8_rd(mem, c->i + k); k = k + 1; }
+      return 1;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+int c8_poke2(char *mem, int addr, int op) {
+  c8_wr(mem, addr, (op >> 8) & 0xFF);
+  c8_wr(mem, addr + 1, op & 0xFF);
+  return 0;
+}

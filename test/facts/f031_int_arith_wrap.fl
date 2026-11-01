@@ -32,7 +32,7 @@
 //   criterion: contains -> ovf=-2147483648
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f031_int_arith_wrap.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\src\main.c;
 //   E:\FLINT-lab\boot\lib_print.fl
 //

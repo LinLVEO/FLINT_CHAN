@@ -1,0 +1,131 @@
+// file_routes.fl — Studio 服务端的文件类路由（被 main.fl include 在 handle_req 之前）
+// 依赖：ap / apnum / find_sub / path_is / send_plain / g_ws / g_out 由 main.fl 提供
+
+// —— 基础 ——
+int sl(char *s) {
+  int i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  return i;
+}
+
+int hexv(int c) {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 65 && c <= 70) { return c - 55; }
+  if (c >= 97 && c <= 102) { return c - 87; }
+  return 0 - 1;
+}
+
+// JSON 字符串转义（写进 d 的 p 位置，返回新位置）
+int json_esc(char *d, int p, char *s, int n) {
+  int i = 0;
+  int c = 0;
+  while (i < n) {
+    c = s[i] & 255;
+    if (c == 34) { d[p] = 92; p = p + 1; d[p] = 34; p = p + 1; }
+    else if (c == 92) { d[p] = 92; p = p + 1; d[p] = 92; p = p + 1; }
+    else if (c == 10) { d[p] = 92; p = p + 1; d[p] = 110; p = p + 1; }
+    else if (c == 13) { d[p] = 92; p = p + 1; d[p] = 114; p = p + 1; }
+    else if (c == 9) { d[p] = 92; p = p + 1; d[p] = 116; p = p + 1; }
+    else if (c < 32) { }
+    else { d[p] = c; p = p + 1; }
+    i = i + 1;
+  }
+  return p;
+}
+
+// 从 JSON 文本取 "key":"value"（简单形态；\n \r \t \" \\ 反转义）
+int json_str(char *b, int off, int len, char *key, char *out, int cap) {
+  int k = find_sub(b, off, len, key);
+  int i = 0;
+  int n = 0;
+  int c = 0;
+  if (k < 0) { return 0 - 1; }
+  i = k + 1;
+  while (i < off + len && b[i] != ':') { i = i + 1; }
+  i = i + 1;
+  while (i < off + len && (b[i] == 32 || b[i] == 9)) { i = i + 1; }
+  if (i >= off + len || b[i] != 34) { return 0 - 1; }
+  i = i + 1;
+  while (i < off + len && n < cap - 1) {
+    c = b[i] & 255;
+    if (c == 34) { break; }
+    if (c == 92) {
+      i = i + 1;
+      if (i >= off + len) { break; }
+      c = b[i] & 255;
+      if (c == 110) { c = 10; }
+      else if (c == 114) { c = 13; }
+      else if (c == 116) { c = 9; }
+    }
+    out[n] = c; n = n + 1;
+    i = i + 1;
+  }
+  out[n] = 0;
+  return n;
+}
+
+// 取 query 里 ?key=... 的值（percent-decode；'&' 或空格或行尾结束）
+int qs_get(char *b, int off, int len, char *key, char *out, int cap) {
+  char pat[64];
+  int pl = 0;
+  int k = 0;
+  int i = 0;
+  int n = 0;
+  int c = 0;
+  int h = 0;
+  pl = ap(pat, 0, key);
+  pat[pl] = '=';
+  pl = pl + 1;
+  pat[pl] = 0;
+  k = find_sub(b, off, len, pat);
+  if (k < 0) { return 0 - 1; }
+  i = k + pl;
+  while (i < off + len && n < cap - 1) {
+    c = b[i] & 255;
+    if (c == 38 || c == 32) { break; }
+    if (c == 37 && i + 2 < off + len) {
+      h = hexv(b[i + 1] & 255) * 16 + hexv(b[i + 2] & 255);
+      c = h;
+      i = i + 3;
+    } else {
+      i = i + 1;
+    }
+    out[n] = c; n = n + 1;
+  }
+  out[n] = 0;
+  return n;
+}
+
+// 路径安全：拒绝绝对路径 / 盘符 / ".."（与 Node 版 E-PATH 同口径的保守版）
+int path_bad(char *p) {
+  int n = sl(p);
+  if (n <= 0) { return 1; }
+  if (p[0] == 92 || p[0] == 47) { return 1; }
+  if (n > 1 && p[1] == 58) { return 1; }
+  if (find_sub(p, 0, n, "..") >= 0) { return 1; }
+  return 0;
+}
+
+// 把相对路径拼到工作区根上（'/' 统一成 '\\'）
+int ws_join(char *out, char *rel) {
+  int n = 0;
+  int i = 0;
+  n = ap(out, 0, g_ws);
+  out[n] = 92; n = n + 1;
+  i = 0;
+  while (rel[i] != 0) {
+    if (rel[i] == 47) { out[n] = 92; } else { out[n] = rel[i]; }
+    n = n + 1;
+    i = i + 1;
+  }
+  out[n] = 0;
+  return n;
+}
+
+// 递归列 .fl 文件（返回写入 g_out 的条目数；条目形如 {"path":"a/b.fl"}）
+int list_fl(char *dir, int depth) {
+  int n = 0;
+  int i = 0;
+  // Win32 遍历：FindFirstFileA 需要 WIN32_FIND_DATA 结构体，先用 io_lib 的目录能力
+  return n;
+}

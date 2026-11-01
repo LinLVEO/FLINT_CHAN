@@ -209,6 +209,12 @@ int gui_kbd_shift_char(int c) {
 // M4b：`gui_key_pending` / `gui_key_last` **定义在 flgui_edit.fl**（消费方与它同文件：样本只 include 控件层
 //   也必须能编过）。平台层这里只用它们，不重复定义。
 int gui_kb_prev = 0;   // M4b：键盘兜底轮询的"按下沿"状态（0 = 三个编辑键都松着）
+// M4r 二修：**消息流驱动的 Ctrl 态**（与 `GuiWin.shift` 同一条口径：消息顺序为准，物理轮询只当兜底）。
+//   为什么需要它：Ctrl+Enter 是"编译"快捷键，回车那条消息若被当正文插进缓冲，每编译一次就多一个空行
+//   （真机实测 `tmp\probe-batch2.ps1 -Mode block`：前缀多 1 字节 0A）。而**在 app 消费字符那一刻**去轮询
+//   `GetAsyncKeyState` 会输给时序（一帧可能 30~80 ms，人松手早就松了）⇒ 必须在**回车那条消息**上用
+//   "消息流里记下的 Ctrl 态"判：同一批里 Ctrl 的 keydown 一定排在 Enter 之前。
+int gui_ctrl_down = 0;
 
 // ===== M4：DPI 读回（真窗口；内核里的 gui_dpi_scale 只认 ctx.dpi 这个数）=====
 // ⚠️ 口径（D6 拍板）：**只做"纯函数换算 ＋ 96dpi 真窗口对照"**，不引 per-monitor v2（不做 manifest、
@@ -247,7 +253,8 @@ int gui_win_tick = 0;      // 现场标定的定时器粒度（ms）；0 = 还�
 
 struct GuiWin { int *hwnd; int *cls; int x; int y; int w; int h; int alpha;
                 int down_prev; int ok; int frames; int kbd;
-                int shift; }
+                int shift;
+                int *imebuf; }
 //   ^ `shift` = **M4o 加的"消息驱动 Shift 态"**（1 = Shift 按着）。为什么必须有它（本刀真按键探针实测）：
 //     泵是**一批一批**取消息的（`while (PeekMessageA(...))`）—— 一次 pump 里可能同时拿到
 //     「Shift 按下 / Tab 按下 / Tab 抬起 / Shift 抬起」四条 ⇒ 处理 Tab 那一条时**去轮询物理键态**
@@ -256,12 +263,42 @@ struct GuiWin { int *hwnd; int *cls; int x; int y; int w; int h; int alpha;
 //     ⇒ 正解 = **方向从消息流里记**（WM_KEYDOWN/WM_KEYUP 的扫描码反查 VK_SHIFT）——它天然与
 //     "这条 Tab 消息"同序、不受泵的批处理影响。轮询那一路只留作"起窗时 Shift 已经按着"的兜底。
 
+// —— IME 诊断计数（排查"输入法到底有没有接上"用；app 可以读它们写日志）——
+int gui_ime_setctx_n = 0;   // WM_IME_SETCONTEXT 次数（>0 = 系统认为本窗可以接 IME）
+int gui_ime_start_n = 0;    // WM_IME_STARTCOMPOSITION
+int gui_ime_comp_n = 0;     // WM_IME_COMPOSITION
+int gui_ime_end_n = 0;      // WM_IME_ENDCOMPOSITION
+
+// ===== WM_IME_CHAR（0x0286）：**上屏的第二条路**（2026-10-25 真机取证）=====
+// 为什么必须收它：微软拼音**用数字键（或鼠标点）选候选**时**不发** `GCS_RESULTSTR` ——
+//   实测消息账本（`tmp\probe-trace.ps1 -Scenario cnnum`）：只有 4 条 WM_CHAR（C4 E3 BA C3）＋ 2 条
+//   WM_IME_CHAR（wParam 0xC4E3 / 0xBAC3），**一条 `WM_IME_COMPOSITION` 带 0x800 都没有** ⇒
+//   只认 `GCS_RESULTSTR` 的实现在这条路上"打了没反应"，而且合成态收不了尾（症状：之后连 ASCII 也进不去）。
+// 为什么泵拿不到：WM_IME_CHAR 是**发送消息**（wParam 直接给窗口过程），不进消息队列 ⇒ `PeekMessage` 看不见。
+//   ⇒ 窗口过程把它记进 `gui_ime_charq`，泵在一批消息**收尾时**统一转码（那时上屏结果已经在手，可去重）。
+// 编码：本窗是 ANSI 窗（RegisterClassA/CreateWindowExA）⇒ wParam 里是 **ANSI 字节**，不是 UTF-16：
+//   单字节 = 低 8 位；DBCS（本机 ACP=936）= **高字节首字节 / 低字节尾字节**（"你" ⇒ 0xC4E3）。
+int gui_ime_charq[32];      // 本批 WM_IME_CHAR 的 wParam 低 16 位
+int gui_ime_charqn = 0;
+// 本帧有没有"落在本窗口上的左键按下"（WM_LBUTTONDOWN 只有点在我们窗口上才会发到 wndproc）。
+//   app 用它决定要不要开拖：不用比较窗口句柄（`ptr` 与 `int *` 比较在 FLINT 里不可靠，实测恒假）。
+int gui_win_click = 0;
+
 // —— 窗口过程：只做"必须由消息驱动"的三件事 ——
 // WM_PAINT 必须派发并 ValidateRect（计划 §6.3：不派发 ⇒ 窗口永远脏 ⇒ 系统反复投递 ⇒ 内层 PeekMessage 死循环）
 int gui_win_proc(int *hwnd, int msg, int *wp, int *lp) {
   if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
   if (msg == 0x14) { return 1; }                                     // WM_ERASEBKGND：内容我们全画，不许系统擦（防闪）
   if (msg == 0x20) { SetCursor(LoadCursorA(0, 32512)); return 1; }   // WM_SETCURSOR：自己设箭头，别走 DefWindowProc 兜圈
+  if (msg == 0x0201) { gui_win_click = 1; }                          // WM_LBUTTONDOWN：这一下确实落在我们窗口上
+  if (msg == 0x0281) { gui_ime_setctx_n = gui_ime_setctx_n + 1; }    // WM_IME_SETCONTEXT（诊断）
+  if (msg == 0x0286) {                                              // WM_IME_CHAR：上屏第二路（见上）
+    if (gui_ime_charqn < 32) {
+      gui_ime_charq[gui_ime_charqn] = wp % 65536;
+      gui_ime_charqn = gui_ime_charqn + 1;
+    }
+    return 0;    // **吃掉**：不让 DefWindowProcA 再把它拆成 WM_CHAR（否则同一条文本两条路 ⇒ 两份）
+  }
 
   return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -276,6 +313,7 @@ int gui_win_make_tier(struct GuiWin *g, int kbd) {
   g->ok = 0;  g->down_prev = 0;
   g->frames = 0;
   g->shift = 0;                                         // M4o：消息驱动 Shift 态（起窗时先当作"没按"）
+  g->imebuf = 0;                                        // M4s：auto 档台账（app 打开时自己塞堆指针）
   gui_win_fend = 0;                                     // M4e：限速器状态复位（**模块级**，不挂在 GuiWin 上 ——
   gui_win_tick = 0;                                     //   这样不用 GuiWin 的老 app（m2_float）也能用同一个入口）
   if (kbd == 1) { g->kbd = 1; } else { g->kbd = 0; }   // 归一化：只认显式的 1，其余一律默认档
@@ -331,6 +369,153 @@ int gui_win_make_kbd(struct GuiWin *g) {
 //   ⇒ 批处理也不怕；② `GetAsyncKeyState(16)` 只覆盖"起窗那一刻 Shift 就已经按着"（那时没收到 keydown）。
 //   ⚠️ `GetAsyncKeyState` 是**已声明**的 api（零新导入）。
 
+// ===== M4r（2026-10-25，用户拍板）：**原生 IME（微软拼音）** =====
+// 为什么必须在库层做：① `WM_IME_*` 只有**消息泵**看得到（app 拿不到消息）；② IME 上屏的是 **UTF-16**，
+//   而本库全部文本是 **UTF-8** ⇒ 转码必须有一个人做，做在泵里最省事（app 只拿现成 UTF-8）。
+// 口径（**只做"能打中文"必需的三步**，不自己画候选窗、不做 TSF）：
+//   ① 合成串（preedit，`GCS_COMPSTR`）→ `gui_ime_comp`／`gui_ime_clen`（UTF-8）⇒ app 画在光标处；
+//   ② 上屏结果（`GCS_RESULTSTR`）→ `gui_ime_res`／`gui_ime_rlen`（UTF-8）⇒ app 插进缓冲后**自己置 0**；
+//   ③ `gui_ime_at()` 把光标位置报给 IME（`ImmSetCompositionWindow`）⇒ 候选框跟着光标走、不飘到窗口角落。
+// ⚠️ 合成期间 **WM_KEYDOWN 不再产出 ascii**（否则拼音字母会被当正文插进去）；见 WM_KEYDOWN 那段的 `ime` 门。
+// ⚠️ 导入预算：真 flint 的 96/96 早已降级为软预算（2026-10-24 拆墙），这 6 条新导入只吃记账、不拦人。
+api imm32 int ImmGetContext(ptr);
+api imm32 int ImmReleaseContext(ptr, int);
+api imm32 int ImmGetCompositionStringW(int, int, ptr, int);
+api imm32 int ImmSetCompositionWindow(int, ptr);
+api imm32 int ImmSetCandidateWindow(int, ptr);          // 候选框位置（不给就飘到窗口角落）
+api kernel32 int WideCharToMultiByte(int, int, ptr, int, ptr, int, ptr, ptr);
+api kernel32 int MultiByteToWideChar(int, int, ptr, int, ptr, int);   // WM_IME_CHAR 的 ANSI 字节 → UTF-16
+api kernel32 int GetACP();                                            // 当前 ANSI 代码页（本机 936）
+api user32 int ClientToScreen(ptr, ptr);
+
+struct CFORM { int dwStyle; int px; int py; int l; int t; int r; int b; }   // COMPOSITIONFORM（28 B 平铺）
+struct CANDFORM { int dwIndex; int dwStyle; int px; int py; int l; int t; int r; int b; }   // CANDIDATEFORM（32 B 平铺）
+
+api imm32 int ImmGetConversionStatus(int, ptr, ptr);   // 诊断：读 IME 转换模式（是否中文态）
+
+// 诊断：本窗的 IME 上下文是否存在 + 转换模式（0 = 取不到上下文）
+int gui_ime_ctxprobe(int *hwnd, int *out_mode, int *out_sent) {
+  int h = 0;
+  int m = 0;
+  int s = 0;
+  h = ImmGetContext(hwnd);
+  if (h == 0) { return 0; }
+  ImmGetConversionStatus(h, &m, &s);
+  ImmReleaseContext(hwnd, h);
+  *out_mode = m;
+  *out_sent = s;
+  return 1;
+}
+
+// 鼠标下这个点是不是"我们这个进程的窗口"（拖动前的归属判定；防"两个窗口一起被拖"）。
+// ⚠️ 不做句柄比较：句柄在 FLINT 里是 `int *`，跨 API 返回值的 `ptr == int*` 比较在 app 里实测恒假
+//   （症状：加上守卫后连自己的窗口也拖不动）。改用**进程号比较**（DWORD → 纯 int 比较）。
+api user32 ptr WindowFromPoint(ptr);
+api user32 int GetWindowThreadProcessId(ptr, ptr);
+api kernel32 int GetCurrentProcessId();
+int gui_win_hit_self() {
+  struct P pt;
+  int pid = 0;
+  GetCursorPos(&pt);
+  GetWindowThreadProcessId(WindowFromPoint(&pt), &pid);
+  if (pid == GetCurrentProcessId()) { return 1; }
+  return 0;
+}
+
+int gui_ime_on = 0;        // 1 = 正在合成（gui_ime_comp 有效）
+int gui_ime_cn = 0;        // 1 = IME 处于**中文态**（IME_CMODE_NATIVE）⇒ 字符归 IME，扫描码表闭嘴
+int gui_ime_clen = 0;      // 合成串字节数（UTF-8）
+char gui_ime_comp[256];    // 合成串（preedit，UTF-8）
+int gui_ime_rlen = 0;      // 待 app 取走的上屏结果字节数（取走后 app 置 0）
+char gui_ime_res[512];     // 上屏结果（UTF-8）
+int gui_ime_himc = 0;      // 合成期间的 IME 上下文（HIMC）
+char gui_ime_u16[512];     // UTF-16 中转缓冲
+char gui_ime_ansi[8];      // WM_IME_CHAR 的 ANSI 字节 → UTF-8 中转（前 2 字节输入，偏移 2 起输出）
+// 去重：空格/回车/点候选选词时 **GCS_RESULTSTR 与 WM_IME_CHAR 会同时来**（实测），
+//   数字键选词时**只有 WM_IME_CHAR**。⇒ 把刚由结果串交出的 UTF-8 记在这里，WM_IME_CHAR 逐字比对：
+//   对得上就跳过（那次是重复），对不上就追加（那是另一条上屏）。见泵尾那段。
+char gui_ime_dedup[256];
+int gui_ime_dedupn = 0;
+int gui_ime_deduppos = 0;
+
+// ===== M4s（2026-10-25，用户拍板）：**auto 档** —— 中文态下英文字母立刻可见 =====
+// 为什么需要它（真机取证 `tmp\imeprobe\probe-dbg.ps1`，逐条消息账本）：中文态按 'a' 时
+//   `WM_KEYDOWN` 的 wParam = **229（VK_PROCESSKEY）**，紧接着 `WM_IME_STARTCOMPOSITION` ——
+//   **IME 真的在合成**（微软拼音把字母当拼音吃）。旧实现那条 `!= 229` 的门把整条键掐掉 ⇒
+//   正文里一个字也不进；用户按 Esc 取消候选后**什么都不剩**（"中文态打英文打不进去"）。
+// 口径（用户原话"不用手动切中英，中英都能打"）：
+//   ① 字母**立刻**进正文（泵里把扫描码表翻出的字母记进本台账，app 每帧取走插入 —— 零延迟，
+//      不走 `in->key`/`gui_key_pending` 那条"一帧一个字符"的槽，所以连打也不丢）；
+//   ② **上屏那一刻撤回**：库层算出"本次合成会话插入了几个字节、内容是什么"（`gui_ime_auto_rn`
+//      ／`GuiWin.imebuf[64..]`），删字节由 app 做（它才看得见正文缓冲）；
+//   ③ 撤回时机 = **有上屏结果时**（不是 START 时）：按 Esc 取消候选 ⇒ 没有结果 ⇒ 字母留在正文
+//      —— 这正是判据 3（`ab` + Esc ⇒ 前缀 `ab`）要的行为；
+//   ④ 手动 Shift 切英文（`gui_ime_cn = 0`）⇒ 这条台账不记，走原来的 `in->key` 路，行为一字未动。
+// ⚠️ 只记**字母**（A-Z/a-z）：数字/空格是候选操作，记进来会把"选词"误当正文撤回。
+// ⚠️⚠️ **为什么台账内存是 app 给的、走 `GuiWin.imebuf` 而不是库里的全局指针/全局数组**（2026-10-25 实测）：
+//   ① **全局数组**：这台编译器的全局数据区余量极窄 —— 本 app 上实测「加 96 B 全局照跑、加 128 B 全局
+//      从仓库根启动即崩（exit=0xC0000409，崩在"文件列表有 9 条"那条路径）」⇒ 不许再加全局数组。
+//   ② **全局指针**：真 flint 能用（v1.10.0 起），但 **boot 编译器不支持指针类型的全局** ⇒ 自举端编不过
+//      （FLGUI 门三端样本 flgui13/18/19 当场 exit=12）⇒ 库里也不许加指针全局。
+//   ⇒ 折中：指针挂在 `struct GuiWin` 上（结构体字段本来就能存地址，`hwnd`/`cls` 就是先例），
+//     由 app 在打开 auto 档时 VirtualAlloc 一块 ≥128 B 的堆写进去；**没给（= 0）就安全降级**。
+//   布局：[0..63] = 本次已产出的字母队列 ｜ [64..127] = 待撤回字节的内容。
+int gui_ime_auto = 0;        // 1 = auto 档开启（app 起窗后置 1；默认 0 ⇒ 老 app 行为不变）
+int gui_ime_auto_n = 0;      // 已产出字母数
+int gui_ime_auto_p = 0;      // app 已取走并插入正文的字母数（= 台账的"已落盘"下标）
+int gui_ime_auto_base = 0;   // 本次合成会话在台账里的起点（= 触发字母的下标）
+int gui_ime_auto_rn = 0;     // 待撤回字节数（上屏那一刻算出；app 删完置 0）
+
+// UTF-16 → UTF-8（`wlen` = **UTF-16 码元个数**）。返回写出的字节数。
+int u16_to_u8(char *w, int wlen, char *o, int cap) {
+  if (wlen <= 0) { return 0; }
+  return WideCharToMultiByte(65001, 0, w, wlen, o, cap, 0, 0);
+}
+
+// 从 IME 上下文取一串（what = 8 合成串 / 2048 上屏结果），转成 UTF-8 写进 o。返回字节数。
+// ⚠️ `ImmGetCompositionStringW` 返回的是**字节数**（不是码元数）⇒ 码元数 = nb/2。
+// ⚠️ 先问"需要多少字节"再取：缓冲区固定 512 B，直接拿 512 去取，遇到超长结果时
+//   返回的是"需要的大小"⇒ nb/2 会大于缓冲能装的码元数 ⇒ 越界读（旧实现的真缺陷）。
+//    这里按需要的长度**截断**再取，`units` 再夹一次上限。
+int gui_ime_pull(int himc, int what, char *o, int cap) {
+  int need = 0;
+  int nb = 0;
+  int units = 0;
+  if (himc == 0) { return 0; }
+  need = ImmGetCompositionStringW(himc, what, 0, 0);   // 只要长度：dwBufLen = 0
+  if (need <= 0) { return 0; }                         // 没有这段串（或调用失败）
+  if (need > 512) { need = 512; }                      // 中转缓冲上限（宁可截断，不许越界）
+  nb = ImmGetCompositionStringW(himc, what, &gui_ime_u16[0], need);
+  if (nb <= 0) { return 0; }
+  units = nb / 2;
+  if (units > 256) { units = 256; }                    // gui_ime_u16 是 512 B = 256 个码元
+  return u16_to_u8(&gui_ime_u16[0], units, o, cap);
+}
+
+// 把光标位置报给 IME。**坐标必须是客户区坐标** —— COMPOSITIONFORM / CANDIDATEFORM 都要客户区；
+//   给屏幕坐标会让合成串/候选框整体偏掉"窗口在屏幕上的偏移量"（就"输入法位置跑得很偏"那个症状）。
+//   同时设两个：合成窗（拼音串跟手）＋ 候选窗（候选列表跟手）。返回 1 = 报进去了。
+int gui_ime_at(int *hwnd, int cx, int cy) {
+  struct CFORM cf;
+  struct CANDFORM cd;
+  int h = 0;
+  if (hwnd == 0) { return 0; }
+  h = ImmGetContext(hwnd);
+  if (h == 0) { return 0; }
+  cf.dwStyle = 2;            // CFS_POINT
+  cf.px = cx; cf.py = cy;
+  cf.l = cx; cf.t = cy; cf.r = cx + 2; cf.b = cy + 18;
+  ImmSetCompositionWindow(h, &cf);
+  cd.dwIndex = 0;
+  cd.dwStyle = 0x40;         // CFS_CANDIDATEPOS
+  cd.px = cx; cd.py = cy;
+  cd.l = cx; cd.t = cy; cd.r = cx + 2; cd.b = cy + 18;
+  ImmSetCandidateWindow(h, &cd);
+  ImmReleaseContext(hwnd, h);
+  return 1;
+}
+
+
 // 消息泵一步：返回 0 = 收到 WM_QUIT（退出）。TranslateMessage 留给 M4（WM_CHAR/IME）
 // 滚轮在这里取：WM_MOUSEWHEEL(0x020A) 的 wParam 高 16 位 = 带符号的"格数 × 120"。
 // ⚠️ wParam 读出来是"装过地址的值"（MSG.wparam 是 int* 字段）⇒ **不许落到全局 int**（语言硬规则），
@@ -347,6 +532,11 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
   int k = 0;
   // M4c 键盘档字符翻译用的局部量（`kc` = 表里查出来的 ASCII；`k` 上面那个 = 从扫描码反查到的 VK）
   int kc = 0;
+  // 本批消息里"合成刚开始"标记（**只本批有效**）：IME 的 STARTCOMPOSITION 常常晚于本批头几个 WM_KEYDOWN，
+  //   而那几个键在 IME 接管时 wParam 是 229 ⇒ 本来就不出字符；这条标记只是第二道网。
+  //   ⚠️ 2026-10-25 订正：旧实现用的是**跨帧粘住的** `gui_ime_on`，一旦 IME 不发 ENDCOMPOSITION
+  //   （数字键/鼠标选词那条路就是），`gui_ime_on` 永久为 1 ⇒ 之后每一批都把键作废 = "键盘彻底死了"。
+  int ime_started = 0;
   in->wheel = 0;                 // 本帧滚轮量（本轮）：由本函数独自负责清零 + 累加
   // ⚠️ **`in->key` 不是"每帧清零"的量**（与 wheel 不同，2026-09-22 M4b 实测踩到）：
   //   一次按键序列（如 "ok!"）会在**同一个 pump 里**产出多条 WM_CHAR，而界面**一帧只消费一个字符**
@@ -355,6 +545,21 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
   //     （消费方每取走一个减 1）。每帧开头：还有待消费的字符就**原样端过来**（下一条 WM_CHAR 再覆盖），否则清 0。
   if (gui_key_pending > 0) { in->key = gui_key_last; }
   else { in->key = 0; }
+  // ===== IME 态：每帧刷一次（**"中文态"= 文字由 IME 产出**，扫描码字符要闭嘴）=====
+  //   为什么每帧刷而不是靠消息：用户随时 Shift 切中/英，靠消息记会漏；一次 ImmGetContext 很便宜。
+  {
+    int imc0 = 0;
+    int imdm = 0;
+    int imds = 0;
+    imc0 = ImmGetContext(g->hwnd);
+    if (imc0 != 0) {
+      ImmGetConversionStatus(imc0, &imdm, &imds);
+      if (imdm / 1 % 2 != 0) { gui_ime_cn = 1; } else { gui_ime_cn = 0; }   // bit0 = IME_CMODE_NATIVE
+      ImmReleaseContext(g->hwnd, imc0);
+    } else {
+      gui_ime_cn = 0;
+    }
+  }
   while (PeekMessageA(&m, 0, 0, 0, 1) != 0) {
     if (m.message == 0x12) { return 0; }
     // ⚠️⚠️ **TranslateMessage 是"打字"的必经一步**（2026-09-22 M4b 真输入探针抓到的真 bug）：
@@ -364,15 +569,127 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
     // ⚠️⚠️ **M4c 实测订正：键盘档下 TranslateMessage 指望不上** —— 真按键、扫描码正确（实测 'K'=0x25、
     //   退格=0x0E）、消息投给本窗口（不是线程消息）、前台与线程焦点都是本窗，它**依然一条 WM_CHAR 都不产生**
     //   （账本 `D=2 C=0`，`tmp\m4c\` 与 `apps\flgui_demo\kb-probe.ps1` 的账目）。
-    //   ⇒ 键盘档（`g->kbd == 1`）**不调它**，改走下面 WM_KEYDOWN 分支里的"平台层自带翻译"（`ToAscii`）；
+    //   ⇒ 键盘档（`g->kbd == 1`）**不靠它拿字符**，改走下面 WM_KEYDOWN 分支里的"平台层自带翻译"；
     //     默认档（纯后台、不做文本输入）保持原样调它，行为一字不动。
-    if (g->kbd == 0) { TranslateMessage(&m); }
+    // ⚠️⚠️ **M4r（2026-10-25）补一刀：TranslateMessage 在两个档里都必须调** ——
+    //   它除了翻 WM_CHAR，还是**把按键喂给 IME 的唯一入口**（不调 ⇒ 输入法永不开始合成；
+    //   本轮实测：`ctx=1 mode=1025`（上下文在、中文态）但 `start=0`，拼音全被当 ASCII 吃掉）。
+    //   键盘档拿字符的路子不变（仍然是扫描码表），所以这里调它**不会**让字符变成两份：
+    //   WM_CHAR 只在默认档被消费（见下面 WM_CHAR 分支的 `g->kbd == 0` 门）。
+    TranslateMessage(&m);
     if (m.message == 0x020A) {
       wq = m.wparam;
       d = wq / 65536;
       d = d & 0xFFFF;
       if (d > 32767) { d = d - 65536; }
       in->wheel = in->wheel + d / 120;
+    }
+    // ===== IME（原生中文输入）：合成串 / 上屏结果 / 结束 =====
+    //   ⚠️ lParam 是"装过地址的值" ⇒ **只许除法取位**（`lparam / N % 2`），别做 `&`（同 WM_CHAR 那条实测口径）。
+    //   GCS_RESULTSTR = 0x800（上屏）｜GCS_COMPSTR = 0x8（还在打）
+    if (m.message == 0x010D) {                        // WM_IME_STARTCOMPOSITION
+      gui_ime_start_n = gui_ime_start_n + 1;
+      // auto 档：定下"本次合成会话"在台账里的起点 —— 起点 = **触发字母**的下标。
+      //   START 通常就排在触发那条 keydown 之后（实测账本：0100(W=00e5) → 0282 → 010d），
+      //   所以 `gui_ime_auto_n - 1` 正是那个字母；比它更早的字母（例如上一次被 Esc 取消的）
+      //   从此归"用户正文"，永不撤回（`mv` 那几步就是把它们从台账里裁掉）。
+      //   ⚠️ 一次合成里若重复 START（`gui_ime_on` 已经 1）⇒ 起点不许再动，否则会漏撤回。
+      if (gui_ime_auto != 0) {
+        if (gui_ime_on == 0) {
+          int ab = 0;      // 触发字母在台账里的下标
+          int mv = 0;      // 可裁掉的前缀长度（= 已经落盘、属于用户正文的字母）
+          if (gui_ime_auto_n > 0) { ab = gui_ime_auto_n - 1; }
+          mv = ab;
+          if (mv > gui_ime_auto_p) { mv = gui_ime_auto_p; }   // 只裁"已插入"的；还没插入的必须留着给 app
+          if (mv > 0) {
+            int q7 = 0;
+            if (g->imebuf != 0) {
+              while (mv + q7 < gui_ime_auto_n) { g->imebuf[q7] = g->imebuf[mv + q7]; q7 = q7 + 1; }
+            }
+            gui_ime_auto_n = gui_ime_auto_n - mv;
+            gui_ime_auto_p = gui_ime_auto_p - mv;
+            ab = ab - mv;
+          }
+          gui_ime_auto_base = ab;
+        }
+      }
+      // 上一段若没收到 ENDCOMPOSITION（实测有这条：数字键选词后 IME 不结束合成）⇒ 这里先还掉旧句柄，
+      //   不留脏 HIMC（还错/漏还都会让后面的 ImmGetCompositionStringW 取不到串）。
+      if (gui_ime_himc != 0) { ImmReleaseContext(g->hwnd, gui_ime_himc); gui_ime_himc = 0; }
+      gui_ime_himc = ImmGetContext(g->hwnd);
+      gui_ime_on = 1;
+      gui_ime_clen = 0;
+      ime_started = 1;
+      gui_ime_dedupn = 0;      // 新一段合成 ⇒ 上一条上屏的去重账作废
+      gui_ime_deduppos = 0;
+    }
+    if (m.message == 0x010F) {                        // WM_IME_COMPOSITION
+      gui_ime_comp_n = gui_ime_comp_n + 1;
+      if (gui_ime_himc == 0) { gui_ime_himc = ImmGetContext(g->hwnd); }
+      if (m.lparam / 2048 % 2 != 0) {                 // 上屏结果（GCS_RESULTSTR = 0x800）
+        // **追加**而不是覆盖：一批消息里可能有多段结果（同一帧里连打两下），覆盖会把前一段吞掉。
+        //   同时把这段 UTF-8 记进去重账：空格/回车选词时 WM_IME_CHAR 会把同一段文本再送一遍。
+        //   去重账也是**追加**（不重置读位置）：一段合成里多段结果时，WM_IME_CHAR 按同样顺序来。
+        if (gui_ime_rlen < 512) {
+          int kk2 = 0;
+          int q2 = 0;
+          kk2 = gui_ime_pull(gui_ime_himc, 2048, &gui_ime_res[gui_ime_rlen], 512 - gui_ime_rlen);
+          if (kk2 > 0) {
+            q2 = 0;
+            while (q2 < kk2) {
+              if (gui_ime_dedupn < 256) {
+                gui_ime_dedup[gui_ime_dedupn] = gui_ime_res[gui_ime_rlen + q2];
+                gui_ime_dedupn = gui_ime_dedupn + 1;
+              }
+              q2 = q2 + 1;
+            }
+            gui_ime_rlen = gui_ime_rlen + kk2;
+            // auto 档：上屏结果到手 ⇒ 标出"本次合成会话里已插入正文的字母"待撤回（删字节由 app 做）。
+            //   只算**已落盘**那段（台账 base..p，p = app 已取走并插入的个数）⇒ 与正文里紧贴光标的
+            //   字节一一对应；还没插入的（p..n）直接作废 —— 它们本来就要被上屏结果取代，留着就是重复。
+            if (gui_ime_auto != 0) {
+              int rn2 = 0;
+              int q8 = 0;
+              if (gui_ime_auto_p > gui_ime_auto_base) { rn2 = gui_ime_auto_p - gui_ime_auto_base; }
+              if (rn2 > 64) { rn2 = 64; }
+              if (rn2 > 0) {
+                if (g->imebuf != 0) {
+                  while (q8 < rn2) { g->imebuf[64 + q8] = g->imebuf[gui_ime_auto_base + q8]; q8 = q8 + 1; }
+                  gui_ime_auto_rn = rn2;
+                }
+              }
+              gui_ime_auto_n = 0;
+              gui_ime_auto_p = 0;
+              gui_ime_auto_base = 0;
+            }
+          }
+        }
+        gui_ime_clen = 0;
+      }
+      if (m.lparam / 8 % 2 != 0) {                    // 合成串（preedit，GCS_COMPSTR = 0x8）
+        gui_ime_clen = gui_ime_pull(gui_ime_himc, 8, &gui_ime_comp[0], 256);
+        // 合成态以**合成串有没有**为准（不以 START/END 记账为准）：空串 ⇒ 这一段的 preedit 已经没了。
+        if (gui_ime_clen > 0) { gui_ime_on = 1; } else { gui_ime_on = 0; }
+      }
+    }
+    if (m.message == 0x010E) {                        // WM_IME_ENDCOMPOSITION
+      gui_ime_end_n = gui_ime_end_n + 1;
+      gui_ime_on = 0;
+      gui_ime_clen = 0;
+      // auto 档：合成结束**但没有任何上屏文本** ⇒ 这是"取消"（Esc / 点空处）。正文里那些立刻可见的
+      //   字母就留着（判据 3：`ab` + Esc ⇒ 前缀恰好 `ab`），台账清零即可。
+      //   ⚠️ 只能在这里判 `gui_ime_rlen == 0`：数字键选词那条路的结果是 **WM_IME_CHAR**（发送消息，
+      //   泵尾才处理），此刻 `gui_ime_charqn` 已经 >0 ⇒ 不能当"取消"清零，否则那条路就不撤回了。
+      if (gui_ime_auto != 0) {
+        if (gui_ime_rlen == 0) {
+          if (gui_ime_charqn == 0) {
+            gui_ime_auto_n = 0;
+            gui_ime_auto_p = 0;
+            gui_ime_auto_base = 0;
+          }
+        }
+      }
+      if (gui_ime_himc != 0) { ImmReleaseContext(g->hwnd, gui_ime_himc); gui_ime_himc = 0; }
     }
     // WM_CHAR(0x0102)：已经过键盘布局/IME 翻译的字符（wParam 低位 = 字符码）。
     //   控制字符由 WM_KEYDOWN 那条路单独处理 ⇒ 这里跳过（否则 8/13/27 会被当成"字符"重复算一次）。
@@ -384,6 +701,8 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
     //       ⇒ 取低位一律"**在赋值表达式里**取模"，别先存中间变量再写。
     if (m.message == 0x0102) {
       gui_key_char_n = gui_key_char_n + 1;
+      // M4r：键盘档不消费 WM_CHAR（字符由扫描码表产出；这里再收一次会**变成两份**）
+      if (g->kbd == 0) {
       in->key = m.wparam % 65536;
       // 只把"可打印"记成待消费：>= 32 且 != 127（控制字符走 WM_KEYDOWN 那条路）；
       // 0x7F..0xA0 是 C1 控制区（含 DEL/光标键被翻译出来的噪声）⇒ 当垃圾丢掉（真 flint 的消息参数写进
@@ -394,10 +713,16 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
           else { if (in->key <= 126) { gui_key_pending = gui_key_pending + 1; gui_key_last = in->key; } }
         }
       }
+      }
     }
     // WM_KEYDOWN(0x0100)：退格(VK_BACK 8) / 回车(VK_RETURN 13) / Esc(VK_ESCAPE 27)
     if (m.message == 0x0100) {
       gui_key_down_n = gui_key_down_n + 1;
+      // ★ **VK_PROCESSKEY(229) = 这条键归 IME**（中文态下字母 / 选词空格 / 选词数字键全是 229）⇒ 整段跳过：
+      //   不产出字符，也不做退格/回车/Esc（合成中的退格改的是拼音，不是正文）。
+      //   ⚠️ 2026-10-25 订正：旧门是 `gui_ime_on == 0`（按合成态记账判）—— IME 不发 ENDCOMPOSITION 时
+      //   （数字键/鼠标选词那条路实测就是不發）`gui_ime_on` 永久为 1 ⇒ 键盘彻底不出字。改成按**这条消息**判。
+      if (m.wparam % 65536 != 229) {
       // M4c 诊断：这条按键是"投给本窗口的"还是"投给线程的"（后者 TranslateMessage 翻不出字符）
       if (m.hwnd == 0) { gui_key_null_n = gui_key_null_n + 1; }
       gui_key_vk_last = m.wparam % 65536;    // 诊断：IME 接管时这里会是 229（VK_PROCESSKEY）
@@ -413,8 +738,18 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
       if (k == 0) { k = m.wparam % 65536; }
       gui_key_vk_used = k;
       if (k == 8) { in->key = 8; }
-      if (k == 13) { in->key = 13; }
+      if (k == 13) {
+        // Ctrl+Enter = 应用的"编译/运行"类快捷键 ⇒ **不产出回车字符**（否则每按一次就多一个空行）。
+        //   判据用**消息流里的 Ctrl 态**（同批 Ctrl keydown 一定在前），物理轮询只当"起窗时就按着"的兜底。
+        if (gui_ctrl_down == 0) {
+          if ((GetAsyncKeyState(17) & 0x8000) == 0) { in->key = 13; }
+        }
+      }
       if (k == 27) { in->key = 27; }
+      // —— Ctrl 态从消息流里记（左右 Ctrl：VK_CONTROL 17 / VK_LCONTROL 162 / VK_RCONTROL 163）——
+      if (k == 17) { gui_ctrl_down = 1; }
+      if (k == 162) { gui_ctrl_down = 1; }
+      if (k == 163) { gui_ctrl_down = 1; }
       // M4o：**Shift 态从消息流里记**（VK 从扫描码反查）—— 见 `struct GuiWin.shift` 那段实测注记：
       //   泵是一批一批取消息的 ⇒ 在 Tab 那一条上去轮询物理键态会读到"Shift 已经抬起来了"（方向丢掉）。
       if (k == 16) { g->shift = 1; }
@@ -443,6 +778,11 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
       //   只在这条键**没被上面的控制键认领**时翻译（否则同一条消息会被算两次）。
       if (g->kbd == 1) {
         if (in->key == 0) {
+          // ⚠️ M4r 订正：**不再按"中文态"闭嘴上表的扫描码翻译** —— 实测有一档状态是
+          //   `IME_CMODE_NATIVE` 亮着、但输入法并没真的开合成（字母直通）⇒ 那条门会让**什么都插不进去**。
+          //   现在的口径：扫描码照出；被 IME 吃掉的键在上面的 `VK_PROCESSKEY` 门已经整条跳过，
+          //   再留一道"本批刚开始合成 ⇒ 本批字符作废"的网（见函数末尾 `ime_started` 收尾）
+          //   ⇒ 拼音字母不会漏进正文，而"没合成"时 ASCII 照常能打。
           kc = gui_kbd_vk_ascii(k);
           if (kc != 0) {
             // **Shift 判据内联**（不另立函数：函数预算只剩 1 格）——消息流优先、物理轮询兜底，
@@ -474,6 +814,77 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
           }
         }
       }
+      } else {
+        // ★★ M4s（2026-10-25 四修）**auto 档**：这条键归 IME（wParam = 229），但**字母照样立刻进正文**。
+        //   为什么能这么干（真机账本 `tmp\imeprobe\probe-dbg.ps1`）：中文态按 a ⇒ 0100(W=00e5) →
+        //   010d START → 010f 合成串 —— IME 把字母当拼音吃，**一个正文字节都不产出**；用户按 Esc 取消后
+        //   什么都不剩（"中文态打英文打不进去"）。扫描码在 lParam 里始终是真键 ⇒ 库内 US 表照翻。
+        //   ⚠️ 只收**字母**：数字/空格/标点是候选操作（选词、翻页、上屏），混进撤回账会把选词当正文删。
+        //   ⚠️ 这里只**记账**（`GuiWin.imebuf` 前半段），插进正文是 app 的事（它才看得见缓冲）。
+        if (gui_ime_auto != 0) {
+          if (gui_ime_cn != 0) {
+            if (g->kbd == 1) {
+              k = MapVirtualKeyA(m.lparam / 65536 % 256, 1) % 65536;
+              if (k == 0) { k = m.wparam % 65536; }
+              // 合成中按退格（2026-10-27）：IME 删的是**拼音字母**，而 auto 档已经把对应字母
+              //   "边打边插"进正文了 ⇒ 只删拼音会让正文里那个字母留下（用户实测：
+              //   "退格得先删输入法自己的字符段，才能删输入进 IDE 里的"）。
+              //   这里把**本会话已落盘**的那一个字母也撤掉：账减一 + 记进 rbuf（rn = 1），
+              //   app 侧现有那段"逐字节核对再删"的逻辑会把它从正文删掉（对不上就不删，绝不误伤）。
+              if (k == 8) {
+                if (gui_ime_auto_p > gui_ime_auto_base) {
+                  if (g->imebuf != 0) {
+                    g->imebuf[64] = g->imebuf[gui_ime_auto_p - 1];
+                    gui_ime_auto_rn = 1;
+                  }
+                  gui_ime_auto_p = gui_ime_auto_p - 1;
+                  if (gui_ime_auto_n > 0) { gui_ime_auto_n = gui_ime_auto_n - 1; }
+                }
+                kc = 0;
+              } else {
+                kc = gui_kbd_vk_ascii(k);
+              }
+              if (kc != 0) {
+                if (g->shift == 1) {                                   // 消息流 Shift 态优先
+                  kc = gui_kbd_shift_char(kc);
+                  if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+                } else {
+                  if ((GetAsyncKeyState(16) & 0x8000) != 0) {           // 兜底：物理键态
+                    kc = gui_kbd_shift_char(kc);
+                    if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+                  } else {
+                    if ((GetAsyncKeyState(20) & 1) != 0) {             // CapsLock
+                      if (kc >= 97) { if (kc <= 122) { kc = kc - 32; } }
+                    }
+                  }
+                }
+              }
+              if (kc >= 65) {
+                if (kc <= 90) {
+                  if (g->imebuf != 0) {
+                    if (gui_ime_auto_n < 64) {
+                      g->imebuf[gui_ime_auto_n] = kc;
+                      gui_ime_auto_n = gui_ime_auto_n + 1;
+                      gui_key_tr_n = gui_key_tr_n + 1;                   // 诊断：与 in->key 那条路分开记
+                    }
+                  }
+                }
+              }
+              if (kc >= 97) {
+                if (kc <= 122) {
+                  if (g->imebuf != 0) {
+                    if (gui_ime_auto_n < 64) {
+                      g->imebuf[gui_ime_auto_n] = kc;
+                      gui_ime_auto_n = gui_ime_auto_n + 1;
+                      gui_key_tr_n = gui_key_tr_n + 1;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }   // VK_PROCESSKEY：auto 档从这里补字母；auto 关着就整条不出文本（老行为）
     }
     // M4o：**WM_KEYUP(0x0101)** —— 只干一件事：把"消息驱动 Shift 态"清掉。
     //   ⚠️ 与 WM_KEYDOWN 同一条纪律：**扫描码必须"在赋值表达式里"取**（消息参数是"装过地址的值"，
@@ -488,8 +899,94 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
       if (k == 16) { g->shift = 0; }
       if (k == 160) { g->shift = 0; }
       if (k == 161) { g->shift = 0; }
+      if (k == 17) { gui_ctrl_down = 0; }       // Ctrl 抬起（消息流口径，见 gui_ctrl_down 段）
+      if (k == 162) { gui_ctrl_down = 0; }
+      if (k == 163) { gui_ctrl_down = 0; }
     }
     DispatchMessageA(&m);
+  }
+  // ===== WM_IME_CHAR（上屏第二路）：一批消息收完后统一转码 =====
+  //   为什么放在这里（不是每条消息里）：① 它是**发送消息**，窗口过程只能把它记进队列；
+  //   ② 走到这里时本批的 GCS_RESULTSTR 已经取过 ⇒ 能按文本逐字去重（空格选词两条都会来）。
+  if (gui_ime_charqn > 0) {
+    int ci = 0;
+    int cw = 0;
+    int lo = 0;
+    int hi = 0;
+    int nn = 0;
+    int wl = 0;
+    int kk = 0;
+    int hit = 0;
+    int q = 0;
+    while (ci < gui_ime_charqn) {
+      cw = gui_ime_charq[ci] % 65536;
+      lo = cw % 256;
+      hi = cw / 256 % 256;
+      nn = 0;
+      if (hi != 0) { gui_ime_ansi[0] = hi; gui_ime_ansi[1] = lo; nn = 2; }   // DBCS：高字节首 / 低字节尾
+      else { if (lo >= 128) { gui_ime_ansi[0] = lo; nn = 1; } }              // 单字节非 ASCII
+      if (nn != 0) {
+        wl = MultiByteToWideChar(GetACP(), 0, &gui_ime_ansi[0], nn, &gui_ime_u16[0], 256);
+        if (wl > 0) {
+          kk = u16_to_u8(&gui_ime_u16[0], wl, &gui_ime_ansi[2], 4);
+          if (kk > 0) {
+            hit = 0;
+            if (gui_ime_deduppos + kk <= gui_ime_dedupn) {
+              hit = 1;
+              q = 0;
+              while (q < kk) {
+                if ((gui_ime_ansi[2 + q] & 255) != (gui_ime_dedup[gui_ime_deduppos + q] & 255)) { hit = 0; }
+                q = q + 1;
+              }
+            }
+            if (hit != 0) {
+              // 这段文本刚由 GCS_RESULTSTR 交过（空格/回车/点候选选词）⇒ 丢掉，别插两份
+              gui_ime_deduppos = gui_ime_deduppos + kk;
+              if (gui_ime_deduppos >= gui_ime_dedupn) { gui_ime_dedupn = 0; gui_ime_deduppos = 0; }
+            } else {
+              // 另一条上屏（数字键/鼠标选词）⇒ 就是唯一来源，追加进结果缓冲
+              gui_ime_dedupn = 0;
+              gui_ime_deduppos = 0;
+              if (gui_ime_rlen + kk <= 512) {
+                q = 0;
+                while (q < kk) { gui_ime_res[gui_ime_rlen + q] = gui_ime_ansi[2 + q]; q = q + 1; }
+                gui_ime_rlen = gui_ime_rlen + kk;
+                // auto 档：**数字键/鼠标选词**这条上屏路也要撤回（它不发 GCS_RESULTSTR，只在
+                //   WM_IME_CHAR 里给文本）。账法与上面结果串那条完全一致：只算已落盘（base..p）那段。
+                if (gui_ime_auto != 0) {
+                  int rn3 = 0;
+                  int q9 = 0;
+                  if (gui_ime_auto_p > gui_ime_auto_base) { rn3 = gui_ime_auto_p - gui_ime_auto_base; }
+                  if (rn3 > 64) { rn3 = 64; }
+                  if (rn3 > 0) {
+                    if (g->imebuf != 0) {
+                      while (q9 < rn3) { g->imebuf[64 + q9] = g->imebuf[gui_ime_auto_base + q9]; q9 = q9 + 1; }
+                      gui_ime_auto_rn = rn3;
+                    }
+                  }
+                  gui_ime_auto_n = 0;
+                  gui_ime_auto_p = 0;
+                  gui_ime_auto_base = 0;
+                }
+              }
+              // 文本已上屏 ⇒ preedit 没了（这条路 IME 不发 ENDCOMPOSITION，得自己收尾）
+              gui_ime_on = 0;
+              gui_ime_clen = 0;
+            }
+          }
+        }
+      }
+      ci = ci + 1;
+    }
+    gui_ime_charqn = 0;
+  }
+  // ★ 合成**在本批消息里**开始 ⇒ 本批产出的扫描码字符整批作废（拼音字母不是正文）。
+  //   为什么放在这里而不是逐条判断：IME 的 WM_IME_STARTCOMPOSITION 往往在 WM_KEYDOWN 之后才到队列，
+  //   逐条判断会漏掉同一个批里的前几个字母（实测症状：输入 "nihao" 正文里漏进几个拉丁字母）。
+  //   ⚠️ 只看**本批**的 `ime_started`，不看跨帧的 `gui_ime_on`（后者会因 IME 不发 END 而卡死，见上）。
+  if (ime_started != 0) {
+    if (gui_key_pending > 0) { gui_key_pending = 0; gui_key_last = 0; }
+    in->key = 0;
   }
   return 1;
 }

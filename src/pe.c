@@ -56,8 +56,16 @@
 //   该 app 的导入函数声明数正好 64 个，加上内置的 `ExitProcess`（槽 0）→ 65 > 64 → 编译期报
 //   「导入函数总数超过上限 64」。上限本身只是**编译器侧的固定数组容量**（PE 布局按实际用量现算，
 //   不受它影响），所以放宽是安全的；给到 96 留出余量，别再一步一撞。
-#define MAX_IMPORTS 96            // 导入函数总数上限
-#define MAX_GROUPS  8             // 导入模块数上限
+//
+// ===== 2026-10-24（容量第二批）：这两个数**不再是硬上限** =====
+//   导入表/模块表改成按 `gen->napis` / 实际模块数 **malloc + realloc**（原来 MAX_IMPORTS 同时
+//   当"ImpGroup.names 的数组长度""api_slot 等三张表的长度""hint_item_rva 的二维长度"，
+//   四堵墙其实是同一堆固定数组）。现在**超出照编**，只受内存约束。
+//   为什么还留这两个宏：它们是**台账口径** —— docs 里的"导入预算 96/8"、tools\导入预算.ps1、
+//   预算门的基线都拿它们当量尺（"离预算还有几格"）。真正拦人的墙已经拆了，数字只当尺子用：
+//   超了 = WARN/记账，不是编译错误。
+#define MAX_IMPORTS 96            // 软预算（台账口径）：导入函数总数；超出不报错
+#define MAX_GROUPS  8             // 软预算（台账口径）：导入模块数；超出不报错
 // v1.4.28（B1-3）：导入模块名（写出名）上限 —— ImpGroup.dll 是 char[64] ⇒ 63 字节 + NUL。
 //   超长会被写出端静默截断（见下方 pe_import_module_name_len 的注释），故 parse.c 在默认档就拦。
 #define IMPORT_DLL_NAME_MAX 63
@@ -175,7 +183,13 @@ static void opt_header(Buf *b, uint32_t size_of_image, uint32_t size_of_code,
   //   把 DllCharacteristics 开成 DYNAMIC_BASE、甚至改 ImageBase，产物行为都不变（已实测）。
   //   DllCharacteristics 见下方 I20/I21（v1.4.14 起 = 0x0160）。
   w16(b, 0x0160);            // DllCharacteristics: DYNAMIC_BASE|HIGH_ENTROPY_VA|NX_COMPAT（v1.4.14 开 ASLR）
-  w64(b, 0x100000);          // SizeOfStackReserve
+  // v2026-10-24：SizeOfStackReserve 1 MiB → **16 MiB**。理由：本语言的局部量**全在栈帧里**
+  //   （数组、结构体数组都是帧槽，`int buf[10000]` = 80KB 栈、struct 数组按槽递增），
+  //   1 MiB 是 Windows 默认值，一个像样的 GUI 程序就会 0xC00000FD（栈溢出）；
+  //   栈保留是**虚拟保留**、按需提交，加大不占物理内存。与 boot 侧
+  //   （boot\b1_emit.fl 的 StackReserve）必须同口径 —— 两端不一致会让等价门/差分门
+  //   把同一个源码编出两个 PE 头（见等价门「指纹」比对）。
+  w64(b, 0x1000000);         // SizeOfStackReserve（16 MiB）
   w64(b, 0x1000);            // SizeOfStackCommit
   w64(b, 0x100000);          // SizeOfHeapReserve
   w64(b, 0x1000);            // SizeOfHeapCommit
@@ -216,10 +230,13 @@ static void section_header(Buf *b, const char *name, uint32_t virtual_size,
 }
 
 // —— 导入模块（一个 DLL 一组）——
+// 2026-10-24：`names` 从固定数组 `char *names[MAX_IMPORTS]` 改成**动态**（cap_names 记容量）。
+//   原写法让"每个模块最多 MAX_IMPORTS 个函数"这个容量墙和全局上限共用同一个数字，拆墙时最容易漏。
 typedef struct {
   char dll[64];        // 模块文件名（如 kernel32.dll）
   int nfuncs;          // 本模块函数数
-  char *names[MAX_IMPORTS]; // 函数名
+  int cap_names;       // names 的容量（0 = 还没分配）
+  char **names;        // 函数名（动态，见 group_add）
 } ImpGroup;
 
 // —— v1.4.28（B1-3）：导入模块名（写出名）的**长度口径单点** ——
@@ -246,8 +263,20 @@ void pe_import_module_name(const char *declared, char *out, size_t cap) {
     snprintf(out, cap, "%s.dll", declared);
 }
 
-static void group_add(ImpGroup *g, const char *name) {
-  g->names[g->nfuncs++] = strdup(name);
+// 追加一个函数名（2026-10-24：动态扩容，返回 0 = 成功 / -1 = 内存不足）。
+//   ⚠️ 调用方必须用返回值判错 —— 旧实现是 void，越界写不报错（静默坏导入表）。
+static int group_add(ImpGroup *g, const char *name) {
+  if (g->nfuncs == g->cap_names) {
+    int nc = g->cap_names ? g->cap_names * 2 : 8;
+    char **nn = realloc(g->names, (size_t)nc * sizeof(char *));
+    if (!nn) return -1;
+    g->names = nn;
+    g->cap_names = nc;
+  }
+  g->names[g->nfuncs] = strdup(name);
+  if (!g->names[g->nfuncs]) return -1;
+  g->nfuncs++;
+  return 0;
 }
 
 // —— v1.4.6：写 `.rsrc` 节内容（资源树 + 清单正文）——
@@ -274,28 +303,36 @@ static void rsrc_write(Buf *b, uint32_t rsrc_rva) {
   buf_bytes(b, (const uint8_t *)MANIFEST_XML, mlen);
 }
 
-// —— 主入口：打包成 exe ——
-// 布局（RVA）：.text 0x1000 起 = code（含字符串/double 常量区）→ 导入描述符区 → 各模块
-// （INT / IAT / Hint/Name / DLL 名）；.data **紧贴 .text 之后**（两节虚拟地址必须连续，见文件头）。
-// 回填：gen->disp_off（ExitProcess）→ 槽 0；gen->api_sites → 各自 API 的槽；
-//   gen->guses → 各全局变量 `[rip+disp32]`（**必须在本函数回填**：.data 的 RVA 取决于 .text 大小）。
-int pe_build(GenResult *gen, Buf *out, char **err) {
-  buf_init(out);
-  if (err) *err = NULL;
+// —— v1.10.3（B1 第一块）：导入模块表收集 ——
+//   从 pe_build 抽出的第一段（原 317~384 行）：行为必须与抽前**逐字节不变**
+//   （判据 = tools\bytecmp.ps1 两份编译器对 test\samples 全部产物 SHA256 相同）。
+//   组 0 = kernel32（ExitProcess + kernel32 系 API）；其余按声明序。
+typedef struct {
+  ImpGroup *groups;
+  int ngroups;
+  int total;
+  int *api_slot;    // apis[i] → 全局 IAT 槽序（S1 修复后）
+  int *api_group;   // apis[i] → 所在导入组下标
+  int *api_pos;     // apis[i] → 组内函数序
+} ImportTable;
 
-  const uint32_t code_len = (uint32_t)gen->code.len;
-
-  // —— 1. 组装模块表：组 0 = kernel32（ExitProcess + kernel32 系 API）；其余按声明序 ——
-  ImpGroup groups[MAX_GROUPS];
+static int pe_collect_imports(GenResult *gen, ImportTable *it, char **err) {
+  // 2026-10-24（容量第二批）：三张 api_* 表按**实际声明数**分配；模块表按实际模块数翻倍扩容。
+  //   旧写法 `int api_slot[MAX_IMPORTS]` 等 = 编译器侧的容量墙（PE 布局本来就是按实际用量现算的）。
+  int cap_groups = MAX_GROUPS;      // 只是**初始容量**（软预算口径），不够就翻倍
+  ImpGroup *groups = calloc((size_t)cap_groups, sizeof(ImpGroup));
+  int *api_slot = malloc((size_t)(gen->napis + 1) * sizeof(int));
+  int *api_group = malloc((size_t)(gen->napis + 1) * sizeof(int));
+  int *api_pos = malloc((size_t)(gen->napis + 1) * sizeof(int));
+  if (!groups || !api_slot || !api_group || !api_pos) {
+    if (err) *err = "内存不足（导入表）";
+    return -1;
+  }
   int ngroups = 0;
-  int api_slot[MAX_IMPORTS];   // apis[i] → 全局 IAT 槽序（= 组基址 + 组内序，S1 修复后）
-  int api_group[MAX_IMPORTS];  // apis[i] → 所在导入组下标（组装循环记录）
-  int api_pos[MAX_IMPORTS];    // apis[i] → 组内函数序（0 起；组 0 的 ExitProcess 占 0）
   int total = 0;
 
-  memset(groups, 0, sizeof(groups));
   snprintf(groups[0].dll, sizeof(groups[0].dll), "kernel32.dll");
-  group_add(&groups[0], "ExitProcess");
+  if (group_add(&groups[0], "ExitProcess") != 0) { if (err) *err = "内存不足（导入名表）"; return -1; }
   ngroups = 1;
   total = 1;                   // 槽 0 = ExitProcess
 
@@ -309,19 +346,26 @@ int pe_build(GenResult *gen, Buf *out, char **err) {
     for (int g = 0; g < ngroups; g++)
       if (strcmp(groups[g].dll, fn) == 0) { gi = g; break; }
     if (gi < 0) {
-      if (ngroups >= MAX_GROUPS) { if (err) *err = "导入模块超过 8 个"; return -1; }
+      if (ngroups == cap_groups) {                     // 无硬上限：翻倍（只受内存约束）
+        int nc = cap_groups * 2;
+        ImpGroup *ng = realloc(groups, (size_t)nc * sizeof(ImpGroup));
+        if (!ng) { if (err) *err = "内存不足（导入模块表）"; return -1; }
+        memset(ng + cap_groups, 0, (size_t)(nc - cap_groups) * sizeof(ImpGroup));
+        groups = ng;
+        cap_groups = nc;
+      }
       gi = ngroups;
       snprintf(groups[gi].dll, sizeof(groups[gi].dll), "%s", fn);
       ngroups++;
     }
     ImpGroup *g = &groups[gi];
-    if (g->nfuncs >= MAX_IMPORTS || total >= MAX_IMPORTS) {
-      if (err) *err = "导入函数总数超过上限 " STR(MAX_IMPORTS) "（见 pe.c MAX_IMPORTS）";
-      return -1;
-    }
     api_group[i] = gi;
     api_pos[i] = g->nfuncs;   // 组内追加位置（组 0 的 ExitProcess 已占 0）
-    group_add(g, a->import_name ? a->import_name : a->name);   // v1.1.0：导入表写真名
+    // v1.1.0：导入表写真名
+    if (group_add(g, a->import_name ? a->import_name : a->name) != 0) {
+      if (err) *err = "内存不足（导入名表）";
+      return -1;
+    }
     total++;
   }
 
@@ -331,21 +375,413 @@ int pe_build(GenResult *gen, Buf *out, char **err) {
   //  GetSystemMetrics 的调用点会指向 GetTickCount 的 IAT 槽 → 正常程序静默调错函数。
   // 组 0 基址 0 且含 ExitProcess（组内位置 0 = 全局槽 0），与 iat_slot_rva 排布完全一致。
   {
-    int base_slot[MAX_GROUPS];
+    int *base_slot = malloc((size_t)ngroups * sizeof(int));
+    if (!base_slot) { if (err) *err = "内存不足（导入槽表）"; return -1; }
     base_slot[0] = 0;
     for (int g = 1; g < ngroups; g++)
       base_slot[g] = base_slot[g - 1] + groups[g - 1].nfuncs;
     for (int i = 0; i < gen->napis; i++)
       api_slot[i] = base_slot[api_group[i]] + api_pos[i];
+    free(base_slot);
   }
 
-  // —— 2. 纯计算布局（Buf 顺序写，先全部算好）——
-  // 各模块布局 RVA
-  uint32_t mod_int_rva[MAX_GROUPS], mod_iat_rva[MAX_GROUPS];
-  uint32_t mod_dll_rva[MAX_GROUPS];                    // desc Name 字段用
-  uint32_t hint_item_rva[MAX_GROUPS][MAX_IMPORTS]; // 模块 g 内函数 f 的 hintname RVA
-  uint32_t iat_slot_rva[MAX_IMPORTS];              // 全局槽序 → IAT 槽 RVA
+  it->groups = groups;
+  it->ngroups = ngroups;
+  it->total = total;
+  it->api_slot = api_slot;
+  it->api_group = api_group;
+  it->api_pos = api_pos;
+  return 0;
+}
 
+// —— 主入口：打包成 exe ——
+// 布局（RVA）：.text 0x1000 起 = code（含字符串/double 常量区）→ 导入描述符区 → 各模块
+// （INT / IAT / Hint/Name / DLL 名）；.data **紧贴 .text 之后**（两节虚拟地址必须连续，见文件头）。
+// 回填：gen->disp_off（ExitProcess）→ 槽 0；gen->api_sites → 各自 API 的槽；
+//   gen->guses → 各全局变量 `[rip+disp32]`（**必须在本函数回填**：.data 的 RVA 取决于 .text 大小）。
+// —— v1.10.3（B1 第二块）：回填 FF15 disp（导入 IAT 槽）与全局变量 [rip+disp32] ——
+//   抽出的两段（原「3. 回填 FF15 disp」与「3b. 回填全局变量」）；行为必须逐字节不变。
+static void pe_patch_sites(GenResult *gen, const int *api_slot, const uint32_t *iat_slot_rva, uint32_t data_rva) {
+  {
+    uint32_t d = iat_slot_rva[0] - (TEXT_RVA + (uint32_t)gen->disp_off + 4);
+    buf_patch_u32(&gen->code, gen->disp_off, d);
+  }
+  for (size_t i = 0; i < gen->napi_sites; i++) {
+    int slot = api_slot[gen->api_sites[i].api];
+    uint32_t d = iat_slot_rva[slot] - (TEXT_RVA + (uint32_t)gen->api_sites[i].off + 4);
+    buf_patch_u32(&gen->code, gen->api_sites[i].off, d);
+  }
+  for (size_t i = 0; i < gen->nguses; i++) {
+    GUse *u = &gen->guses[i];
+    int64_t tgt = (int64_t)data_rva + gen->globals[u->gi].doff;
+    int64_t insn_end = (int64_t)TEXT_RVA + (int64_t)u->off + 4;
+    buf_patch_u32(&gen->code, u->off, (uint32_t)(tgt - insn_end));
+  }
+}
+
+// —— v1.10.3（B1 第三块）：写 PE 头 + 节表（原「4. 写头」段）——
+//   参数整包传（结构体），行为必须逐字节不变（判据 = tools\bytecmp.ps1）。
+typedef struct {
+  int nsec_all, has_debug, has_admin, two_sec, want_gui;
+  uint32_t strtab_off, size_of_image;
+  uint32_t text_raw_size, data_raw_size, rsrc_raw_size;
+  uint32_t hdr_size, desc_rva, desc_bytes;
+  uint32_t rsrc_rva, rsrc_vsize, rsrc_raw_ptr;
+  uint32_t idata_rva, idata_vsize, idata_raw_size, idata_raw_ptr;
+  uint32_t entry_rva, text_vsize, text_sec_va;
+  uint32_t data_rva, data_vsize, data_raw_ptr;
+  uint32_t dbg_line_vs, dbg_info_vs, dbg_abbrev_vs;
+  uint32_t dbg_line_rva, dbg_info_rva, dbg_abbrev_rva;
+  uint32_t dbg_line_rs, dbg_info_rs, dbg_abbrev_rs;
+  uint32_t dbg_line_raw, dbg_info_raw, dbg_abbrev_raw;
+  uint32_t name_off_line, name_off_info, name_off_abbrev;
+  uint32_t text_char, data_char, idata_char;
+} PeHdrPack;
+
+static void pe_write_headers(Buf *out, const PeHdrPack *h) {
+  dos_header(out);
+  buf_bytes(out, (const uint8_t *)"PE\0\0", 4);
+  coff_header(out, h->nsec_all, h->has_debug ? h->strtab_off : 0, 0);
+  opt_header(out, h->size_of_image, h->text_raw_size,
+             h->data_raw_size + h->rsrc_raw_size +
+                 (h->has_debug ? (h->dbg_line_rs + h->dbg_info_rs + h->dbg_abbrev_rs) : 0),
+             h->hdr_size,
+             h->desc_rva, h->desc_bytes, h->rsrc_rva, h->rsrc_vsize, h->idata_rva, h->idata_vsize, h->entry_rva,
+             (uint16_t)(h->want_gui ? 2 : 3));   // v1.4.28：-gui → GUI 子系统（其余字段一字不动）
+  section_header(out, ".text", h->text_vsize, h->text_sec_va, h->text_raw_size, h->hdr_size,
+                 h->text_char);   // CODE|EXECUTE|READ
+  if (h->two_sec)
+    section_header(out, ".data", h->data_vsize, h->data_rva, h->data_raw_size, h->data_raw_ptr,
+                   h->data_char); // INITIALIZED_DATA|READ|WRITE
+  if (h->has_admin)
+    section_header(out, ".rsrc", h->rsrc_vsize, h->rsrc_rva, h->rsrc_raw_size, h->rsrc_raw_ptr,
+                   RSRC_CHAR);     // INITIALIZED_DATA|READ（v1.4.6：清单资源）
+  // v1.4.13：.idata（IAT 自成节）—— 节表必须按 RVA 升序，所以它排在所有加载节之后、调试节之前
+  section_header(out, ".idata", h->idata_vsize, h->idata_rva, h->idata_raw_size, h->idata_raw_ptr,
+                 h->idata_char);  // INITIALIZED_DATA|READ（非执行）
+  if (h->has_debug) {
+    // 节名走 /nnn 形式（指向字符串表内的偏移）——PE 镜像不支持 >8 字符的节名，这是唯一出路
+    char n1[16], n2[16], n3[16];
+    snprintf(n1, sizeof(n1), "/%u", (unsigned)h->name_off_line);
+    snprintf(n2, sizeof(n2), "/%u", (unsigned)h->name_off_info);
+    snprintf(n3, sizeof(n3), "/%u", (unsigned)h->name_off_abbrev);
+    section_header(out, n1, h->dbg_line_vs, h->dbg_line_rva, h->dbg_line_rs, h->dbg_line_raw, DBG_CHAR);
+    section_header(out, n2, h->dbg_info_vs, h->dbg_info_rva, h->dbg_info_rs, h->dbg_info_raw, DBG_CHAR);
+    section_header(out, n3, h->dbg_abbrev_vs, h->dbg_abbrev_rva, h->dbg_abbrev_rs, h->dbg_abbrev_raw, DBG_CHAR);
+  }
+}
+
+// —— v1.10.3（B1 第四块）：写各节内容（原第 5~9c 段）——
+//   代码 + 导入描述符 + 模块数据 + .data + .rsrc + .idata + 调试节 + COFF 字符串表。
+//   行为必须逐字节不变（判据 = tools\bytecmp.ps1）。
+typedef struct {
+  int two_sec, has_admin, has_debug, ngroups;
+  ImpGroup *groups;
+  uint32_t code_len, desc_rva, hdr_size, text_raw_size;
+  uint32_t data_raw_ptr, data_vsize, data_raw_size;
+  uint32_t rsrc_raw_ptr, rsrc_raw_size, rsrc_rva;
+  uint32_t idata_raw_ptr, idata_raw_size;
+  uint32_t *mod_int_rva, *mod_dll_rva, *mod_iat_rva;
+  uint32_t **hint_item_rva;
+  uint32_t dbg_line_raw, dbg_info_raw, dbg_abbrev_raw;
+  uint32_t dbg_line_rs, dbg_info_rs, dbg_abbrev_rs;
+  uint32_t strtab_off, strtab_size;
+  Buf dbg_line, dbg_info, dbg_abbrev;
+} PeBodyPack;
+
+static void pe_write_sections(Buf *out, const PeBodyPack *b, GenResult *gen) {
+  // —— 5. 代码（含字符串区/double 常量区）——
+  buf_bytes(out, gen->code.data, b->code_len);
+  while (out->len < b->hdr_size + (b->desc_rva - TEXT_RVA)) buf_byte(out, 0);
+
+  // —— 6. 导入描述符区（每模块 20B + 全零终止）——
+  for (int g = 0; g < b->ngroups; g++) {
+    w32(out, b->mod_int_rva[g]);   // OriginalFirstThunk（INT）
+    w32(out, 0);                   // TimeDateStamp
+    w32(out, 0);                   // ForwarderChain
+    w32(out, b->mod_dll_rva[g]);   // Name
+    w32(out, b->mod_iat_rva[g]);   // FirstThunk（IAT）
+  }
+  wz(out, 20);                     // 终止描述符
+
+  // —— 7. 各模块数据（按布局顺序：INT → hintnames → dll 名；IAT 已挪进 .idata）——
+  for (int g = 0; g < b->ngroups; g++) {
+    ImpGroup *grp = &b->groups[g];
+    for (int f = 0; f < grp->nfuncs; f++)
+      w64(out, (uint64_t)b->hint_item_rva[g][f]);
+    w64(out, 0);
+    for (int f = 0; f < grp->nfuncs; f++) {
+      w16(out, 0);              // Hint
+      buf_bytes(out, (const uint8_t *)grp->names[f], strlen(grp->names[f]));
+      buf_byte(out, 0);
+    }
+    buf_bytes(out, (const uint8_t *)grp->dll, strlen(grp->dll));
+    buf_byte(out, 0);
+  }
+
+  // —— 8. 补到 .text 的 SizeOfRawData ——
+  while (out->len < b->hdr_size + b->text_raw_size) buf_byte(out, 0);
+
+  // —— 9. .data 节内容（全局变量按声明序；doff 已由 parse 算好）——
+  if (b->two_sec) {
+    while (out->len < b->data_raw_ptr) buf_byte(out, 0);
+    for (uint32_t i = 0; i < b->data_vsize; i++) buf_byte(out, 0);
+    for (int i = 0; i < gen->nglobals; i++) {
+      GlobalVar *g = &gen->globals[i];
+      if (g->init_len <= 0) continue;
+      size_t at = b->data_raw_ptr + (size_t)g->doff;
+      for (int k = 0; k < g->init_len; k++)
+        out->data[at + (size_t)k] = g->init[k];
+    }
+    while (out->len < b->data_raw_ptr + b->data_raw_size) buf_byte(out, 0);
+  }
+
+  // —— 9b. .rsrc 节内容（仅 -admin）——
+  if (b->has_admin) {
+    while (out->len < b->rsrc_raw_ptr) buf_byte(out, 0);
+    rsrc_write(out, b->rsrc_rva);
+    while (out->len < b->rsrc_raw_ptr + b->rsrc_raw_size) buf_byte(out, 0);
+  }
+
+  // —— 9d. .idata 节内容（IAT 块：初值 = Hint/Name RVA）——
+  {
+    while (out->len < b->idata_raw_ptr) buf_byte(out, 0);
+    for (int g = 0; g < b->ngroups; g++) {
+      ImpGroup *grp = &b->groups[g];
+      for (int f = 0; f < grp->nfuncs; f++)
+        w64(out, (uint64_t)b->hint_item_rva[g][f]);
+      w64(out, 0);
+    }
+    while (out->len < b->idata_raw_ptr + b->idata_raw_size) buf_byte(out, 0);
+  }
+
+  // —— 9c. 调试节内容 + COFF 字符串表 ——
+  if (b->has_debug) {
+    while (out->len < b->dbg_line_raw) buf_byte(out, 0);
+    buf_bytes(out, b->dbg_line.data, b->dbg_line.len);
+    while (out->len < b->dbg_line_raw + b->dbg_line_rs) buf_byte(out, 0);
+    while (out->len < b->dbg_info_raw) buf_byte(out, 0);
+    buf_bytes(out, b->dbg_info.data, b->dbg_info.len);
+    while (out->len < b->dbg_info_raw + b->dbg_info_rs) buf_byte(out, 0);
+    while (out->len < b->dbg_abbrev_raw) buf_byte(out, 0);
+    buf_bytes(out, b->dbg_abbrev.data, b->dbg_abbrev.len);
+    while (out->len < b->dbg_abbrev_raw + b->dbg_abbrev_rs) buf_byte(out, 0);
+    while (out->len < b->strtab_off) buf_byte(out, 0);
+    w32(out, b->strtab_size);
+    buf_bytes(out, (const uint8_t *)".debug_line", strlen(".debug_line"));   buf_byte(out, 0);
+    buf_bytes(out, (const uint8_t *)".debug_info", strlen(".debug_info"));   buf_byte(out, 0);
+    buf_bytes(out, (const uint8_t *)".debug_abbrev", strlen(".debug_abbrev")); buf_byte(out, 0);
+  }
+}
+
+// —— v1.10.3（B1 第五块）：产物不变量断言（原 I2~I17，纯只读检查）——
+//   抽出的两块（I2..I13 与 I16/I17）逐字搬运，判据必须与原处等价：
+//   断言只在布局违规时触发，正常产物的字节一个都不受影响（bytecmp 证明）。
+typedef struct {
+  int has_admin, has_debug, napis, total, ngroups;
+  ImpGroup *groups;
+  uint32_t data_rva, text_vsize, rsrc_rva, data_vsize, rsrc_vsize;
+  uint32_t data_raw_ptr, text_file_end, code_len, desc_rva, desc_bytes;
+  uint32_t *mod_dll_rva, *mod_iat_rva;
+  uint32_t **hint_item_rva;
+  uint32_t *iat_slot_rva;
+  int *api_slot, *api_group;
+  uint32_t entry_rva, text_sec_va, text_sec_char, size_of_image;
+  uint32_t idata_rva, idata_vsize, prev_loaded_vend, loaded_file_end;
+  uint32_t dbg_line_rva, dbg_line_vs, dbg_info_rva, dbg_info_vs, dbg_abbrev_rva, dbg_abbrev_vs;
+  uint32_t dbg_line_raw, name_off_line, name_off_info, name_off_abbrev, strtab_size;
+} PeCheck;
+
+static int pe_check_layout(const PeCheck *c, char **err) {
+  // ========== 产物不变量断言（v1.3.3：把只写在注释里的规律变成编译期检查） ==========
+  // 依据 `新路候选.md` §4.2：8 条产物不变量里，此前只有 I5（代码上限）与 I8（决策 33 的 rsp≡0）有断言，
+  // 其余 6 条只靠「写对 + 注释」，其中 5 条已真实发生过 bug（4 条静默错值 / 静默损坏）。
+  // 本块把 I2 / I3 / I4 / I6 / I7 落成检查；机制与 I5 一致（err 出参 → main.c 打成
+  // 「FLINT: PE 打包失败: …」）。
+  // ⚠️ 设计纪律：断言必须写成「两个**独立**算出来的量之间的关系」（相等/覆盖），
+  //    如果只是把左边的算式重述一遍，那它就是**永远不触发的装饰** —— 实验 3 会用变体逐个复核这一点。
+  {
+    // I2 两节虚拟地址必须"紧贴"：只允许按 SEC_ALIGN 向上取整，不得再有额外空隙。
+    //    ⚠️ 2026-09-15 调研①修正：「留空隙 Windows 拒载」不是孤立的实测规律 —— MSDN PE Format 明文
+    //    「In an image file, the VAs for sections must be assigned by the linker so that they are in
+    //     ascending order and adjacent, and they must be a multiple of the SectionAlignment value」
+    //    （即 **升序 + 紧邻 + SA 倍数** 三条一起是规范 must）。（原注释写"实测规律"，是因为当时没查到规范。）
+    //    触发条件是**空隙本身**（SizeOfImage 与文件偏移两个混淆项已排除）。
+    if (c->data_rva != align_up(TEXT_RVA + c->text_vsize, SEC_ALIGN)) {
+      if (err) *err = "内部布局违规(I2)：.data 与 .text 之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 data_rva 算式";
+      return -1;
+    }
+    // I11（v1.4.6）三节同族：`.rsrc` 也必须紧贴前一节（升序 + 紧邻 + SA 倍数，PE 规范 must）。
+    //    独立复算：这次从「前一节的**末尾**」按 SEC_ALIGN 取整推，而不是重述 c->rsrc_rva 的赋值式。
+    if (c->has_admin) {
+      if (c->rsrc_rva != align_up(c->data_rva + c->data_vsize, SEC_ALIGN)) {
+        if (err) *err = "内部布局违规(I11)：.rsrc 与前一节之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 rsrc_rva 算式";
+        return -1;
+      }
+      // I10（v1.4.6）资源链完整性：数据项必须**正好**收在清单正文之前，且清单不越出节尾。
+      //    为什么值得断言：清单偏移写错时系统**静默忽略**整个资源（双击不提权、不报错），
+      //    这类失败在回归里只能靠"产物字节"看出来 —— 而断言能在编译期直接拦下。
+      const uint32_t mlen = (uint32_t)strlen(MANIFEST_XML);
+      const uint32_t de_end = 0x48 + 16;                 // 数据项（0x48 起 16 字节）的末尾，独立再算一遍
+      if (de_end != RSRC_MF_OFF || c->rsrc_rva + RSRC_MF_OFF + mlen > c->rsrc_rva + c->rsrc_vsize) {
+        if (err) *err = "内部布局违规(I10)：资源数据项/清单正文越出 .rsrc 节（系统读不到清单→双击不提权且不报错）——请检查 RSRC_* 偏移与 rsrc_vsize 算式";
+        return -1;
+      }
+    }
+    // I3 节文件区间不得重叠：.data 必须正好排在 .text 文件末尾之后（按 FILE_ALIGN 取整）。
+    //    🐞 历史真 bug：c->data_raw_ptr 写死 0x400 → .data 的零字节盖在 .text 代码中段
+    //    （表现为"某个下标写了没效果"）；编译**静默通过**、产物 0xC0000005。
+    if (c->data_raw_ptr != align_up(c->text_file_end, FILE_ALIGN)) {
+      if (err) *err = "内部布局违规(I3)：.data 文件偏移不落在 .text 末尾之后（节文件区间重叠，会静默覆盖代码）——请检查 data_raw_ptr 算式";
+      return -1;
+    }
+    // I4 .text 声明的 VirtualSize 必须覆盖**放进它里面的每一样东西**
+    //    （代码 + 导入描述符区 + INT/IAT + hintname + dll 名）。
+    //    ⚠️ 这里刻意**不复用布局游标 text_end**，而是按各结构的实际落点重新推一遍 need：
+    //    独立算两遍，才能抓住「游标推进对了、但声明尺寸算错」这一类历史真 bug（VirtualSize 只声明约 0x120 字节）。
+    uint32_t need = TEXT_RVA + c->code_len;
+    if (c->desc_rva + c->desc_bytes > need) need = c->desc_rva + c->desc_bytes;
+    for (int g = 0; g < c->ngroups; g++) {
+      uint32_t dll_end = c->mod_dll_rva[g] + (uint32_t)strlen(c->groups[g].dll) + 1;
+      if (dll_end > need) need = dll_end;
+      for (int f = 0; f < c->groups[g].nfuncs; f++) {
+        uint32_t hn_end = c->hint_item_rva[g][f] + 2 + (uint32_t)strlen(c->groups[g].names[f]) + 1;
+        if (hn_end > need) need = hn_end;
+      }
+    }
+    // v1.4.13：**IAT 已不在 .text 里**（挪进 `.idata`）⇒ 这条不再把 IAT 槽算进 .text 的 VirtualSize；
+    //   IAT 的覆盖由下面的 I17 单独保证（若漏改一处让槽留在 .text，I17 会拒出产物）。
+    if (TEXT_RVA + c->text_vsize < need) {
+      if (err) *err = "内部布局违规(I4)：.text 的 VirtualSize 装不下节内结构（代码/导入描述符/导入表）——请检查 text_vsize 算式";
+      return -1;
+    }
+    // I6 导入槽序必须与「声明所属模块组」同构（S1 修复的不变量）。
+    //    🐞 历史真 bug：c->api_slot 按声明序记、布局却按组内连续排 → 跨 DLL 交错声明时
+    //    调用点指向别人家的 IAT 槽（静默调错函数，最危险的一类）。
+    for (int i = 0; i < c->napis; i++) {
+      uint32_t s = c->iat_slot_rva[c->api_slot[i]];
+      uint32_t gbeg = c->mod_iat_rva[c->api_group[i]];
+      uint32_t gend = gbeg + (uint32_t)c->groups[c->api_group[i]].nfuncs * 8;
+      if (s < gbeg || s >= gend) {
+        if (err) *err = "内部布局违规(I6)：导入槽序与声明模块组不同构（调用点会指向别的 IAT 槽、静默调错函数）——请检查 api_slot 算式";
+        return -1;
+      }
+    }
+    // I7 入口点必须落在第一节（.text）的虚拟区间内，且该节必须可执行。
+    //    ⚠️ 诚实标注：这是本组里**最弱**的一条 —— 当前 c->entry_rva 与 c->text_sec_va 都取自 TEXT_RVA，天然成立。
+    //    它的价值只在"将来有人调换节序 / 把这两个值拆开"时兜底（本轮已把它们抽成独立参数，使这条断言有对象可查）。
+    {
+      int in_range = (c->entry_rva >= c->text_sec_va) &&
+                     ((uint64_t)c->entry_rva + 16 <= (uint64_t)c->text_sec_va + (uint64_t)c->text_vsize);
+      int exec_ok  = (c->text_sec_char & 0x20000000u) != 0;   // MEM_EXECUTE=0x20000000
+      if (!in_range || !exec_ok) {
+        if (err) *err = "内部布局违规(I7)：入口点不在可执行的第一节虚拟区间内——请检查节序与入口点算式";
+        return -1;
+      }
+    }
+    // I9 SizeOfImage 必须是 SectionAlignment 的整数倍。
+    //    📖 规范依据（MSDN PE Format，SizeOfImage 字段）：「The size (in bytes) of the image, including
+    //    all headers, as the image is loaded in memory. **It must be a multiple of SectionAlignment.**」
+    //    加上它的**非重述**部分：镜像**页尾必须落在 SizeOfImage 之内** —— 内存里 0x140000000+SizeOfImage
+    //    往上到页边界那段虽然加载器会映射，但不属于"声明的镜像"；I1（扫发射字节找绝对地址）正是拿
+    //    SizeOfImage 当扫描上界，所以这条同时护住 I1 的**完备性**（页尾那段漏扫会让 I1 假绿）。
+    //    🐞 历史真 bug（2026-09-15 调研①按规范复核 69 个产物时抓到）：单节分支的 c->size_of_image
+    //    没按 SEC_ALIGN 取整 → 8/69 产物违反 must（main.exe 0x7008、student.exe 0x6440、
+    //    dblcmp1/dblcompound1/dblconst1/dblfield1/dblparam1/dblprint1）；能跑（加载器自己按页映射），
+    //    738 项回归也看不见（样本恰好都小）——属"断言买到回归买不到的东西"。
+    if (c->size_of_image != align_up(c->size_of_image, SEC_ALIGN)) {
+      if (err) *err = "内部布局违规(I9)：SizeOfImage 不是 SectionAlignment 的整数倍（违反 PE 规范 must，且让 I1 漏扫页尾）——请检查 size_of_image 是否漏了 align_up";
+      return -1;
+    }
+    // I12（v1.4.11，`-debug`）调试节链：升序 + 紧邻 + SEC_ALIGN 倍数（与 I2/I11 同族，PE 规范 must）。
+    //    独立复算：从**前一节末尾**按 SEC_ALIGN 推，不是重述上面的赋值式。
+    if (c->has_debug) {
+      // v1.4.13：`.idata` 是最后一个参与加载的节 ⇒ 调试节链紧贴它
+      uint32_t prev_end_rva = c->idata_rva + c->idata_vsize;
+      if (c->dbg_line_rva != align_up(prev_end_rva, SEC_ALIGN) ||
+          c->dbg_info_rva != align_up(c->dbg_line_rva + c->dbg_line_vs, SEC_ALIGN) ||
+          c->dbg_abbrev_rva != align_up(c->dbg_info_rva + c->dbg_info_vs, SEC_ALIGN)) {
+        if (err) *err = "内部布局违规(I12)：调试节之间出现额外虚拟地址空隙（规范要求节 VA 升序且紧邻）——请检查 dbg_*_rva 算式";
+        return -1;
+      }
+      // I1 扫描域护栏②：被排除在 I1 之外的字节必须**正好**是调试节，且该节不可执行 ——
+      //   否则"限定扫描域"就成了给 I1 挖一个永久漏洞。
+      if (c->dbg_line_raw != align_up(c->loaded_file_end, FILE_ALIGN) || (DBG_CHAR & 0x20000000u) != 0) {
+        if (err) *err = "内部布局违规(I1/扫描域)：被 I1 排除的字节不正好是（不可执行的）调试节 —— 会漏扫绝对地址，请检查 dbg_line_raw 算式";
+        return -1;
+      }
+      // I13（v1.4.11）：COFF 字符串表偏移必须与三个 `/nnn` 名字对得上。写错 = 工具读不出节名，
+      //   而实测"节名读不出"会让 bfd 直接判 `file format not recognized`（objdump/addr2line/gdb 三通道全瞎）。
+      if (c->name_off_line != 4 ||
+          c->name_off_info != c->name_off_line + (uint32_t)strlen(".debug_line") + 1 ||
+          c->name_off_abbrev != c->name_off_info + (uint32_t)strlen(".debug_info") + 1 ||
+          c->strtab_size != c->name_off_abbrev + (uint32_t)strlen(".debug_abbrev") + 1) {
+        if (err) *err = "内部布局违规(I13)：COFF 字符串表偏移与节名不匹配（工具会读不出节名 → 整个文件不可识别）——请检查 name_off_*/strtab_size 算式";
+        return -1;
+      }
+    }
+  }
+
+  // ========== I16 / I17（v1.4.13）：IAT 必须**独占自己的非执行页** ==========
+  // 为什么值得断言：本轮改动的**全部目的**就是"loader 写 IAT 时不要放开代码页"。这条性质只靠
+  //   "看起来挪对了"是靠不住的（布局是一堆 cursor 算术，漏改一处就悄悄退回去），所以钉成判据。
+  {
+    // I16a 页隔离：`.idata` 与 `.text` 不得落在同一页（页 = SEC_ALIGN）。
+    //   独立复算：两节的**页号**各自从 RVA 算出来再比 —— 不复述 c->idata_rva 的赋值式。
+    if (c->idata_rva / SEC_ALIGN <= (TEXT_RVA + c->text_vsize - 1) / SEC_ALIGN) {
+      if (err) *err = "内部布局违规(I16)：.idata 与 .text 落在同一页（loader 写 IAT 会连带放开代码页）——请检查 idata_rva 算式";
+      return -1;
+    }
+    // I16b 紧邻：`.idata` 必须紧贴前一节末尾（升序 + 紧邻 + SEC_ALIGN 倍数，PE 规范 must）
+    if (c->idata_rva != align_up(c->prev_loaded_vend, SEC_ALIGN)) {
+      if (err) *err = "内部布局违规(I16)：.idata 与前一节之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 idata_rva 算式";
+      return -1;
+    }
+    // I17 覆盖 + 防半挪：每个 IAT 槽必须落在 `.idata` 区间内，且 `.text` 区间内一个都不许有
+    for (int k = 0; k < c->total; k++) {
+      uint32_t sl = c->iat_slot_rva[k];
+      if (sl < c->idata_rva || sl + 8 > c->idata_rva + c->idata_vsize) {
+        if (err) *err = "内部布局违规(I17)：IAT 槽没有落在 .idata 区间内（防半挪状态）——请检查 mod_iat_rva 算式";
+        return -1;
+      }
+      if (sl >= TEXT_RVA && sl < TEXT_RVA + c->text_vsize) {
+        if (err) *err = "内部布局违规(I17)：.text 区间内仍有 IAT 槽（代码页会被 loader 临时放开）——请检查布局";
+        return -1;
+      }
+    }
+    // （`.idata` 的特征位由下面的 I14/I15 从**产物字节**读回检查：不可执行、且不许 W|X；
+    //   **IAT 数据目录（索引 12）的读回也在那里** —— 这里绝不能读 `out`：此刻产物头还没写进去）
+  }
+
+  return 0;
+}
+
+int pe_build(GenResult *gen, Buf *out, char **err) {
+  buf_init(out);
+  if (err) *err = NULL;
+
+  const uint32_t code_len = (uint32_t)gen->code.len;
+
+  // —— 1. 组装模块表（v1.10.3 已抽成 pe_collect_imports；这里只留别名，行为逐字节不变）——
+  ImportTable it;
+  if (pe_collect_imports(gen, &it, err) != 0) return -1;
+  ImpGroup *groups = it.groups;
+  int ngroups = it.ngroups;
+  int total = it.total;
+  int *api_slot = it.api_slot;
+  int *api_group = it.api_group;
+
+  // —— 2. 纯计算布局（Buf 顺序写，先全部算好）——
+  // 各模块布局 RVA（2026-10-24：全部按实际模块数/槽数分配，见文件上方 MAX_IMPORTS 的注释）
+  uint32_t *mod_int_rva = calloc((size_t)ngroups, sizeof(uint32_t));
+  uint32_t *mod_iat_rva = calloc((size_t)ngroups, sizeof(uint32_t));
+  uint32_t *mod_dll_rva = calloc((size_t)ngroups, sizeof(uint32_t));  // desc Name 字段用
+  uint32_t **hint_item_rva = calloc((size_t)ngroups, sizeof(uint32_t *)); // 模块 g 内函数 f 的 hintname RVA
+  uint32_t *iat_slot_rva = calloc((size_t)(total ? total : 1), sizeof(uint32_t)); // 全局槽序 → IAT 槽 RVA
+  if (!mod_int_rva || !mod_iat_rva || !mod_dll_rva || !hint_item_rva || !iat_slot_rva) {
+    if (err) *err = "内存不足（导入布局表）";
+    return -1;
+  }
   uint32_t cursor = align_up(TEXT_RVA + code_len, 8);
   uint32_t desc_rva = cursor;
   uint32_t desc_bytes = (uint32_t)(ngroups + 1) * 20;
@@ -357,6 +793,8 @@ int pe_build(GenResult *gen, Buf *out, char **err) {
     ImpGroup *grp = &groups[g];
     mod_int_rva[g] = cursor;
     cursor += (uint32_t)(grp->nfuncs + 1) * 8;
+    hint_item_rva[g] = malloc((size_t)(grp->nfuncs ? grp->nfuncs : 1) * sizeof(uint32_t));
+    if (!hint_item_rva[g]) { if (err) *err = "内存不足（导入提示名表）"; return -1; }
     for (int f = 0; f < grp->nfuncs; f++) {
       hint_item_rva[g][f] = cursor;
       cursor += 2 + (uint32_t)strlen(grp->names[f]) + 1;
@@ -374,10 +812,10 @@ int pe_build(GenResult *gen, Buf *out, char **err) {
   uint32_t text_vsize = align_up(text_end - TEXT_RVA, 8);
   uint32_t text_raw_size = align_up(text_vsize, FILE_ALIGN);
 
-  // ⚠️ v1.3.0 硬约束：代码不得越过上限（见 flint.h FLINT_MAX_TEXT）。
+  // ⚠️ v1.3.0 硬约束：代码不得越过上限（见 flint.h FLINT_MAX_TEXT；2026-10-24 由 1 MiB 抬到 16 MiB）。
   //   越过就会与 .data 的地址重叠 → 全局变量指到代码字节上（静默错值）。宁可编译期拦下。
   if (text_vsize > FLINT_MAX_TEXT) {
-    if (err) *err = "代码段超过 1 MiB 上限（FLINT_MAX_TEXT）——请精简代码";
+    if (err) *err = "代码段超过 16 MiB 上限（FLINT_MAX_TEXT）——请精简代码";
     return -1;
   }
 
@@ -547,313 +985,65 @@ int pe_build(GenResult *gen, Buf *out, char **err) {
   //      只写"地址与大小"、**没有 must**（原文已抓取核对）；GNU ld 会写（本机实测 size=0x200）。
   //      本轮拍板 = 只加断言、**零产物变化**（见任务卡 T-20260917-230135）。
 
-  // ========== 产物不变量断言（v1.3.3：把只写在注释里的规律变成编译期检查） ==========
-  // 依据 `新路候选.md` §4.2：8 条产物不变量里，此前只有 I5（代码上限）与 I8（决策 33 的 rsp≡0）有断言，
-  // 其余 6 条只靠「写对 + 注释」，其中 5 条已真实发生过 bug（4 条静默错值 / 静默损坏）。
-  // 本块把 I2 / I3 / I4 / I6 / I7 落成检查；机制与 I5 一致（err 出参 → main.c 打成
-  // 「FLINT: PE 打包失败: …」）。
-  // ⚠️ 设计纪律：断言必须写成「两个**独立**算出来的量之间的关系」（相等/覆盖），
-  //    如果只是把左边的算式重述一遍，那它就是**永远不触发的装饰** —— 实验 3 会用变体逐个复核这一点。
-  {
-    // I2 两节虚拟地址必须"紧贴"：只允许按 SEC_ALIGN 向上取整，不得再有额外空隙。
-    //    ⚠️ 2026-09-15 调研①修正：「留空隙 Windows 拒载」不是孤立的实测规律 —— MSDN PE Format 明文
-    //    「In an image file, the VAs for sections must be assigned by the linker so that they are in
-    //     ascending order and adjacent, and they must be a multiple of the SectionAlignment value」
-    //    （即 **升序 + 紧邻 + SA 倍数** 三条一起是规范 must）。（原注释写"实测规律"，是因为当时没查到规范。）
-    //    触发条件是**空隙本身**（SizeOfImage 与文件偏移两个混淆项已排除）。
-    if (data_rva != align_up(TEXT_RVA + text_vsize, SEC_ALIGN)) {
-      if (err) *err = "内部布局违规(I2)：.data 与 .text 之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 data_rva 算式";
-      return -1;
-    }
-    // I11（v1.4.6）三节同族：`.rsrc` 也必须紧贴前一节（升序 + 紧邻 + SA 倍数，PE 规范 must）。
-    //    独立复算：这次从「前一节的**末尾**」按 SEC_ALIGN 取整推，而不是重述 rsrc_rva 的赋值式。
-    if (HAS_ADMIN) {
-      if (rsrc_rva != align_up(data_rva + data_vsize, SEC_ALIGN)) {
-        if (err) *err = "内部布局违规(I11)：.rsrc 与前一节之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 rsrc_rva 算式";
-        return -1;
-      }
-      // I10（v1.4.6）资源链完整性：数据项必须**正好**收在清单正文之前，且清单不越出节尾。
-      //    为什么值得断言：清单偏移写错时系统**静默忽略**整个资源（双击不提权、不报错），
-      //    这类失败在回归里只能靠"产物字节"看出来 —— 而断言能在编译期直接拦下。
-      const uint32_t mlen = (uint32_t)strlen(MANIFEST_XML);
-      const uint32_t de_end = 0x48 + 16;                 // 数据项（0x48 起 16 字节）的末尾，独立再算一遍
-      if (de_end != RSRC_MF_OFF || rsrc_rva + RSRC_MF_OFF + mlen > rsrc_rva + rsrc_vsize) {
-        if (err) *err = "内部布局违规(I10)：资源数据项/清单正文越出 .rsrc 节（系统读不到清单→双击不提权且不报错）——请检查 RSRC_* 偏移与 rsrc_vsize 算式";
-        return -1;
-      }
-    }
-    // I3 节文件区间不得重叠：.data 必须正好排在 .text 文件末尾之后（按 FILE_ALIGN 取整）。
-    //    🐞 历史真 bug：data_raw_ptr 写死 0x400 → .data 的零字节盖在 .text 代码中段
-    //    （表现为"某个下标写了没效果"）；编译**静默通过**、产物 0xC0000005。
-    if (data_raw_ptr != align_up(text_file_end, FILE_ALIGN)) {
-      if (err) *err = "内部布局违规(I3)：.data 文件偏移不落在 .text 末尾之后（节文件区间重叠，会静默覆盖代码）——请检查 data_raw_ptr 算式";
-      return -1;
-    }
-    // I4 .text 声明的 VirtualSize 必须覆盖**放进它里面的每一样东西**
-    //    （代码 + 导入描述符区 + INT/IAT + hintname + dll 名）。
-    //    ⚠️ 这里刻意**不复用布局游标 text_end**，而是按各结构的实际落点重新推一遍 need：
-    //    独立算两遍，才能抓住「游标推进对了、但声明尺寸算错」这一类历史真 bug（VirtualSize 只声明约 0x120 字节）。
-    uint32_t need = TEXT_RVA + code_len;
-    if (desc_rva + desc_bytes > need) need = desc_rva + desc_bytes;
-    for (int g = 0; g < ngroups; g++) {
-      uint32_t dll_end = mod_dll_rva[g] + (uint32_t)strlen(groups[g].dll) + 1;
-      if (dll_end > need) need = dll_end;
-      for (int f = 0; f < groups[g].nfuncs; f++) {
-        uint32_t hn_end = hint_item_rva[g][f] + 2 + (uint32_t)strlen(groups[g].names[f]) + 1;
-        if (hn_end > need) need = hn_end;
-      }
-    }
-    // v1.4.13：**IAT 已不在 .text 里**（挪进 `.idata`）⇒ 这条不再把 IAT 槽算进 .text 的 VirtualSize；
-    //   IAT 的覆盖由下面的 I17 单独保证（若漏改一处让槽留在 .text，I17 会拒出产物）。
-    if (TEXT_RVA + text_vsize < need) {
-      if (err) *err = "内部布局违规(I4)：.text 的 VirtualSize 装不下节内结构（代码/导入描述符/导入表）——请检查 text_vsize 算式";
-      return -1;
-    }
-    // I6 导入槽序必须与「声明所属模块组」同构（S1 修复的不变量）。
-    //    🐞 历史真 bug：api_slot 按声明序记、布局却按组内连续排 → 跨 DLL 交错声明时
-    //    调用点指向别人家的 IAT 槽（静默调错函数，最危险的一类）。
-    for (int i = 0; i < gen->napis; i++) {
-      uint32_t s = iat_slot_rva[api_slot[i]];
-      uint32_t gbeg = mod_iat_rva[api_group[i]];
-      uint32_t gend = gbeg + (uint32_t)groups[api_group[i]].nfuncs * 8;
-      if (s < gbeg || s >= gend) {
-        if (err) *err = "内部布局违规(I6)：导入槽序与声明模块组不同构（调用点会指向别的 IAT 槽、静默调错函数）——请检查 api_slot 算式";
-        return -1;
-      }
-    }
-    // I7 入口点必须落在第一节（.text）的虚拟区间内，且该节必须可执行。
-    //    ⚠️ 诚实标注：这是本组里**最弱**的一条 —— 当前 entry_rva 与 text_sec_va 都取自 TEXT_RVA，天然成立。
-    //    它的价值只在"将来有人调换节序 / 把这两个值拆开"时兜底（本轮已把它们抽成独立参数，使这条断言有对象可查）。
-    {
-      int in_range = (entry_rva >= text_sec_va) &&
-                     ((uint64_t)entry_rva + 16 <= (uint64_t)text_sec_va + (uint64_t)text_vsize);
-      int exec_ok  = (TEXT_SEC_CHAR & 0x20000000u) != 0;   // MEM_EXECUTE=0x20000000
-      if (!in_range || !exec_ok) {
-        if (err) *err = "内部布局违规(I7)：入口点不在可执行的第一节虚拟区间内——请检查节序与入口点算式";
-        return -1;
-      }
-    }
-    // I9 SizeOfImage 必须是 SectionAlignment 的整数倍。
-    //    📖 规范依据（MSDN PE Format，SizeOfImage 字段）：「The size (in bytes) of the image, including
-    //    all headers, as the image is loaded in memory. **It must be a multiple of SectionAlignment.**」
-    //    加上它的**非重述**部分：镜像**页尾必须落在 SizeOfImage 之内** —— 内存里 0x140000000+SizeOfImage
-    //    往上到页边界那段虽然加载器会映射，但不属于"声明的镜像"；I1（扫发射字节找绝对地址）正是拿
-    //    SizeOfImage 当扫描上界，所以这条同时护住 I1 的**完备性**（页尾那段漏扫会让 I1 假绿）。
-    //    🐞 历史真 bug（2026-09-15 调研①按规范复核 69 个产物时抓到）：单节分支的 size_of_image
-    //    没按 SEC_ALIGN 取整 → 8/69 产物违反 must（main.exe 0x7008、student.exe 0x6440、
-    //    dblcmp1/dblcompound1/dblconst1/dblfield1/dblparam1/dblprint1）；能跑（加载器自己按页映射），
-    //    738 项回归也看不见（样本恰好都小）——属"断言买到回归买不到的东西"。
-    if (size_of_image != align_up(size_of_image, SEC_ALIGN)) {
-      if (err) *err = "内部布局违规(I9)：SizeOfImage 不是 SectionAlignment 的整数倍（违反 PE 规范 must，且让 I1 漏扫页尾）——请检查 size_of_image 是否漏了 align_up";
-      return -1;
-    }
-    // I12（v1.4.11，`-debug`）调试节链：升序 + 紧邻 + SEC_ALIGN 倍数（与 I2/I11 同族，PE 规范 must）。
-    //    独立复算：从**前一节末尾**按 SEC_ALIGN 推，不是重述上面的赋值式。
-    if (HAS_DEBUG) {
-      // v1.4.13：`.idata` 是最后一个参与加载的节 ⇒ 调试节链紧贴它
-      uint32_t prev_end_rva = idata_rva + idata_vsize;
-      if (dbg_line_rva != align_up(prev_end_rva, SEC_ALIGN) ||
-          dbg_info_rva != align_up(dbg_line_rva + dbg_line_vs, SEC_ALIGN) ||
-          dbg_abbrev_rva != align_up(dbg_info_rva + dbg_info_vs, SEC_ALIGN)) {
-        if (err) *err = "内部布局违规(I12)：调试节之间出现额外虚拟地址空隙（规范要求节 VA 升序且紧邻）——请检查 dbg_*_rva 算式";
-        return -1;
-      }
-      // I1 扫描域护栏②：被排除在 I1 之外的字节必须**正好**是调试节，且该节不可执行 ——
-      //   否则"限定扫描域"就成了给 I1 挖一个永久漏洞。
-      if (dbg_line_raw != align_up(loaded_file_end, FILE_ALIGN) || (DBG_CHAR & 0x20000000u) != 0) {
-        if (err) *err = "内部布局违规(I1/扫描域)：被 I1 排除的字节不正好是（不可执行的）调试节 —— 会漏扫绝对地址，请检查 dbg_line_raw 算式";
-        return -1;
-      }
-      // I13（v1.4.11）：COFF 字符串表偏移必须与三个 `/nnn` 名字对得上。写错 = 工具读不出节名，
-      //   而实测"节名读不出"会让 bfd 直接判 `file format not recognized`（objdump/addr2line/gdb 三通道全瞎）。
-      if (name_off_line != 4 ||
-          name_off_info != name_off_line + (uint32_t)strlen(".debug_line") + 1 ||
-          name_off_abbrev != name_off_info + (uint32_t)strlen(".debug_info") + 1 ||
-          strtab_size != name_off_abbrev + (uint32_t)strlen(".debug_abbrev") + 1) {
-        if (err) *err = "内部布局违规(I13)：COFF 字符串表偏移与节名不匹配（工具会读不出节名 → 整个文件不可识别）——请检查 name_off_*/strtab_size 算式";
-        return -1;
-      }
-    }
-  }
+  // —— 2c. 不变量断言（v1.10.3 抽成 pe_check_layout）——
+  PeCheck ck = {
+      .has_admin = HAS_ADMIN, .has_debug = HAS_DEBUG, .napis = gen->napis, .total = total, .ngroups = ngroups,
+      .groups = groups, .mod_dll_rva = mod_dll_rva, .mod_iat_rva = mod_iat_rva, .hint_item_rva = hint_item_rva,
+      .iat_slot_rva = iat_slot_rva, .api_slot = api_slot, .api_group = api_group,
+      .data_rva = data_rva, .text_vsize = text_vsize, .rsrc_rva = rsrc_rva,
+      .data_vsize = data_vsize, .rsrc_vsize = rsrc_vsize, .data_raw_ptr = data_raw_ptr,
+      .text_file_end = text_file_end, .code_len = code_len, .desc_rva = desc_rva, .desc_bytes = desc_bytes,
+      .entry_rva = entry_rva, .text_sec_va = text_sec_va, .text_sec_char = TEXT_SEC_CHAR,
+      .size_of_image = size_of_image, .idata_rva = idata_rva, .idata_vsize = idata_vsize,
+      .prev_loaded_vend = prev_loaded_vend, .loaded_file_end = loaded_file_end,
+      .dbg_line_rva = dbg_line_rva, .dbg_line_vs = dbg_line_vs, .dbg_info_rva = dbg_info_rva,
+      .dbg_info_vs = dbg_info_vs, .dbg_abbrev_rva = dbg_abbrev_rva, .dbg_abbrev_vs = dbg_abbrev_vs,
+      .dbg_line_raw = dbg_line_raw, .name_off_line = name_off_line, .name_off_info = name_off_info,
+      .name_off_abbrev = name_off_abbrev, .strtab_size = strtab_size,
+  };
+  if (pe_check_layout(&ck, err) != 0) return -1;
 
-  // ========== I16 / I17（v1.4.13）：IAT 必须**独占自己的非执行页** ==========
-  // 为什么值得断言：本轮改动的**全部目的**就是"loader 写 IAT 时不要放开代码页"。这条性质只靠
-  //   "看起来挪对了"是靠不住的（布局是一堆 cursor 算术，漏改一处就悄悄退回去），所以钉成判据。
-  {
-    // I16a 页隔离：`.idata` 与 `.text` 不得落在同一页（页 = SEC_ALIGN）。
-    //   独立复算：两节的**页号**各自从 RVA 算出来再比 —— 不复述 idata_rva 的赋值式。
-    if (idata_rva / SEC_ALIGN <= (TEXT_RVA + text_vsize - 1) / SEC_ALIGN) {
-      if (err) *err = "内部布局违规(I16)：.idata 与 .text 落在同一页（loader 写 IAT 会连带放开代码页）——请检查 idata_rva 算式";
-      return -1;
-    }
-    // I16b 紧邻：`.idata` 必须紧贴前一节末尾（升序 + 紧邻 + SEC_ALIGN 倍数，PE 规范 must）
-    if (idata_rva != align_up(prev_loaded_vend, SEC_ALIGN)) {
-      if (err) *err = "内部布局违规(I16)：.idata 与前一节之间出现额外虚拟地址空隙（Windows 会拒载）——请检查 idata_rva 算式";
-      return -1;
-    }
-    // I17 覆盖 + 防半挪：每个 IAT 槽必须落在 `.idata` 区间内，且 `.text` 区间内一个都不许有
-    for (int k = 0; k < total; k++) {
-      uint32_t sl = iat_slot_rva[k];
-      if (sl < idata_rva || sl + 8 > idata_rva + idata_vsize) {
-        if (err) *err = "内部布局违规(I17)：IAT 槽没有落在 .idata 区间内（防半挪状态）——请检查 mod_iat_rva 算式";
-        return -1;
-      }
-      if (sl >= TEXT_RVA && sl < TEXT_RVA + text_vsize) {
-        if (err) *err = "内部布局违规(I17)：.text 区间内仍有 IAT 槽（代码页会被 loader 临时放开）——请检查布局";
-        return -1;
-      }
-    }
-    // （`.idata` 的特征位由下面的 I14/I15 从**产物字节**读回检查：不可执行、且不许 W|X；
-    //   **IAT 数据目录（索引 12）的读回也在那里** —— 这里绝不能读 `out`：此刻产物头还没写进去）
-  }
+  // —— 3+3b. 回填调用点与全局变量 disp（v1.10.3 抽成 pe_patch_sites）——
+  pe_patch_sites(gen, api_slot, iat_slot_rva, data_rva);
 
-  // —— 3. 回填 FF15 disp（导入表）——
-  // ExitProcess：槽 0；API 调用点：api_slot[api]
-  {
-    uint32_t d = iat_slot_rva[0] - (TEXT_RVA + (uint32_t)gen->disp_off + 4);
-    buf_patch_u32(&gen->code, gen->disp_off, d);
-  }
-  for (size_t i = 0; i < gen->napi_sites; i++) {
-    int slot = api_slot[gen->api_sites[i].api];
-    uint32_t d = iat_slot_rva[slot] - (TEXT_RVA + (uint32_t)gen->api_sites[i].off + 4);
-    buf_patch_u32(&gen->code, gen->api_sites[i].off, d);
-  }
-
-  // —— 3b. 回填全局变量 `[rip+disp32]` ——
-  //   disp = 目标地址 - 指令尾地址 = (data_rva + globals[gi].doff) - (TEXT_RVA + off + 4)
-  //   ⚠️ 这里用的是 code 内**拼接后全局偏移**（gen->guses 已转好），与 DblRef 那种
-  //   「目标在 code 尾部」的回填是两套基准，别混。
-  for (size_t i = 0; i < gen->nguses; i++) {
-    GUse *u = &gen->guses[i];
-    int64_t tgt = (int64_t)data_rva + gen->globals[u->gi].doff;
-    int64_t insn_end = (int64_t)TEXT_RVA + (int64_t)u->off + 4;
-    buf_patch_u32(&gen->code, u->off, (uint32_t)(tgt - insn_end));
-  }
-
-  // —— 4. 写头 ——
-  dos_header(out);
-  buf_bytes(out, (const uint8_t *)"PE\0\0", 4);
-  coff_header(out, NSEC_ALL, HAS_DEBUG ? strtab_off : 0, 0);
-  opt_header(out, size_of_image, text_raw_size,
-             data_raw_size + rsrc_raw_size + (HAS_DEBUG ? (dbg_line_rs + dbg_info_rs + dbg_abbrev_rs) : 0),
-             hdr_size,
-             desc_rva, desc_bytes, rsrc_rva, rsrc_vsize, idata_rva, idata_vsize, entry_rva,
-             (uint16_t)(gen->want_gui ? 2 : 3));   // v1.4.28：-gui → GUI 子系统（其余字段一字不动）
-  section_header(out, ".text", text_vsize, text_sec_va, text_raw_size, hdr_size,
-                 TEXT_SEC_CHAR);   // CODE|EXECUTE|READ
-  if (TWO_SEC)
-    section_header(out, ".data", data_vsize, data_rva, data_raw_size, data_raw_ptr,
-                   DATA_SEC_CHAR); // INITIALIZED_DATA|READ|WRITE
-  if (HAS_ADMIN)
-    section_header(out, ".rsrc", rsrc_vsize, rsrc_rva, rsrc_raw_size, rsrc_raw_ptr,
-                   RSRC_CHAR);     // INITIALIZED_DATA|READ（v1.4.6：清单资源）
-  // v1.4.13：`.idata`（IAT 自成节）—— 节表必须按 RVA 升序，所以它排在所有加载节之后、调试节之前
-  section_header(out, ".idata", idata_vsize, idata_rva, idata_raw_size, idata_raw_ptr,
-                 IDATA_SEC_CHAR);  // INITIALIZED_DATA|READ（非执行）
-  if (HAS_DEBUG) {
-    // 节名走 `/nnn` 形式（指向字符串表内的偏移）——PE 镜像不支持 >8 字符的节名，这是唯一出路
-    char n1[16], n2[16], n3[16];
-    snprintf(n1, sizeof(n1), "/%u", (unsigned)name_off_line);
-    snprintf(n2, sizeof(n2), "/%u", (unsigned)name_off_info);
-    snprintf(n3, sizeof(n3), "/%u", (unsigned)name_off_abbrev);
-    section_header(out, n1, dbg_line_vs, dbg_line_rva, dbg_line_rs, dbg_line_raw, DBG_CHAR);
-    section_header(out, n2, dbg_info_vs, dbg_info_rva, dbg_info_rs, dbg_info_raw, DBG_CHAR);
-    section_header(out, n3, dbg_abbrev_vs, dbg_abbrev_rva, dbg_abbrev_rs, dbg_abbrev_raw, DBG_CHAR);
-  }
+  // —— 4. 写头（v1.10.3 抽成 pe_write_headers）——
+  PeHdrPack hp = {
+      .nsec_all = NSEC_ALL, .has_debug = HAS_DEBUG, .has_admin = HAS_ADMIN,
+      .two_sec = TWO_SEC, .want_gui = gen->want_gui,
+      .strtab_off = strtab_off, .size_of_image = size_of_image,
+      .text_raw_size = text_raw_size, .data_raw_size = data_raw_size, .rsrc_raw_size = rsrc_raw_size,
+      .hdr_size = hdr_size, .desc_rva = desc_rva, .desc_bytes = desc_bytes,
+      .rsrc_rva = rsrc_rva, .rsrc_vsize = rsrc_vsize, .rsrc_raw_ptr = rsrc_raw_ptr,
+      .idata_rva = idata_rva, .idata_vsize = idata_vsize,
+      .idata_raw_size = idata_raw_size, .idata_raw_ptr = idata_raw_ptr,
+      .entry_rva = entry_rva, .text_vsize = text_vsize, .text_sec_va = text_sec_va,
+      .data_rva = data_rva, .data_vsize = data_vsize, .data_raw_ptr = data_raw_ptr,
+      .dbg_line_vs = dbg_line_vs, .dbg_info_vs = dbg_info_vs, .dbg_abbrev_vs = dbg_abbrev_vs,
+      .dbg_line_rva = dbg_line_rva, .dbg_info_rva = dbg_info_rva, .dbg_abbrev_rva = dbg_abbrev_rva,
+      .dbg_line_rs = dbg_line_rs, .dbg_info_rs = dbg_info_rs, .dbg_abbrev_rs = dbg_abbrev_rs,
+      .dbg_line_raw = dbg_line_raw, .dbg_info_raw = dbg_info_raw, .dbg_abbrev_raw = dbg_abbrev_raw,
+      .name_off_line = name_off_line, .name_off_info = name_off_info, .name_off_abbrev = name_off_abbrev,
+      .text_char = TEXT_SEC_CHAR, .data_char = DATA_SEC_CHAR, .idata_char = IDATA_SEC_CHAR,
+  };
+  pe_write_headers(out, &hp);
   while (out->len < hdr_size) buf_byte(out, 0);
 
-  // —— 5. 代码（含字符串区/double 常量区）——
-  buf_bytes(out, gen->code.data, code_len);
-  while (out->len < hdr_size + (desc_rva - TEXT_RVA)) buf_byte(out, 0);
-
-  // —— 6. 导入描述符区（每模块 20B + 全零终止）——
-  for (int g = 0; g < ngroups; g++) {
-    w32(out, mod_int_rva[g]);   // OriginalFirstThunk（INT）
-    w32(out, 0);                // TimeDateStamp
-    w32(out, 0);                // ForwarderChain
-    w32(out, mod_dll_rva[g]);   // Name
-    w32(out, mod_iat_rva[g]);   // FirstThunk（IAT）
-  }
-  wz(out, 20);                  // 终止描述符
-
-  // —— 7. 各模块数据（按布局顺序：INT → hintnames → dll 名；**IAT 已挪进 `.idata`**，见 9d）——
-  for (int g = 0; g < ngroups; g++) {
-    ImpGroup *grp = &groups[g];
-    // INT：每项 = 对应 Hint/Name RVA，末项 0
-    for (int f = 0; f < grp->nfuncs; f++)
-      w64(out, (uint64_t)hint_item_rva[g][f]);
-    w64(out, 0);
-    // Hint/Name 块
-    for (int f = 0; f < grp->nfuncs; f++) {
-      w16(out, 0);              // Hint
-      buf_bytes(out, (const uint8_t *)grp->names[f], strlen(grp->names[f]));
-      buf_byte(out, 0);
-    }
-    // DLL 名
-    buf_bytes(out, (const uint8_t *)grp->dll, strlen(grp->dll));
-    buf_byte(out, 0);
-  }
-
-  // —— 8. 补到 .text 的 SizeOfRawData ——
-  while (out->len < hdr_size + text_raw_size) buf_byte(out, 0);
-
-  // —— 9. v1.3.0 .data 节内容 ——
-  // 全局变量按声明序摆放（doff 由 parse 算好，此处只按偏移落字节）。
-  // ⚠️ data_raw_ptr 是**文件偏移**，data_rva 是**运行时地址**，两者不要混用。
-  if (TWO_SEC) {
-    while (out->len < data_raw_ptr) buf_byte(out, 0);
-    // 先把整节铺零，再按 doff 覆盖初值（未初始化/未覆盖部分 = 0，即 C 的零初始化语义）
-    for (uint32_t i = 0; i < data_vsize; i++) buf_byte(out, 0);
-    for (int i = 0; i < gen->nglobals; i++) {
-      GlobalVar *g = &gen->globals[i];
-      if (g->init_len <= 0) continue;
-      size_t at = data_raw_ptr + (size_t)g->doff;
-      for (int b = 0; b < g->init_len; b++)
-        out->data[at + (size_t)b] = g->init[b];
-    }
-    while (out->len < data_raw_ptr + data_raw_size) buf_byte(out, 0);
-  }
-
-  // —— 9b. v1.4.6 `.rsrc` 节内容（仅 -admin）——
-  //   与 .data 同一纪律：先垫到**文件偏移**，再顺序写节内容，最后补齐到 SizeOfRawData。
-  if (HAS_ADMIN) {
-    while (out->len < rsrc_raw_ptr) buf_byte(out, 0);
-    rsrc_write(out, rsrc_rva);
-    while (out->len < rsrc_raw_ptr + rsrc_raw_size) buf_byte(out, 0);
-  }
-
-  // —— 9d. v1.4.13 `.idata` 节内容（IAT 块：初值 = Hint/Name RVA，loader 加载时覆写成真实地址）——
-  //   与 .data/.rsrc 同一纪律：先垫到**文件偏移**、再顺序写内容、最后补齐到 SizeOfRawData。
-  {
-    while (out->len < idata_raw_ptr) buf_byte(out, 0);
-    for (int g = 0; g < ngroups; g++) {
-      ImpGroup *grp = &groups[g];
-      for (int f = 0; f < grp->nfuncs; f++)
-        w64(out, (uint64_t)hint_item_rva[g][f]);
-      w64(out, 0);                 // 每组末项 0 终止
-    }
-    while (out->len < idata_raw_ptr + idata_raw_size) buf_byte(out, 0);
-  }
-
-  // —— 9c. v1.4.11 `-debug`：三个调试节内容 + COFF 字符串表 ——
-  //   与 .data/.rsrc 同一纪律：先垫到**文件偏移**、再顺序写内容、最后补齐到 SizeOfRawData。
-  if (HAS_DEBUG) {
-    while (out->len < dbg_line_raw) buf_byte(out, 0);
-    buf_bytes(out, dbg_line.data, dbg_line.len);
-    while (out->len < dbg_line_raw + dbg_line_rs) buf_byte(out, 0);
-    while (out->len < dbg_info_raw) buf_byte(out, 0);
-    buf_bytes(out, dbg_info.data, dbg_info.len);
-    while (out->len < dbg_info_raw + dbg_info_rs) buf_byte(out, 0);
-    while (out->len < dbg_abbrev_raw) buf_byte(out, 0);
-    buf_bytes(out, dbg_abbrev.data, dbg_abbrev.len);
-    while (out->len < dbg_abbrev_raw + dbg_abbrev_rs) buf_byte(out, 0);
-    // 字符串表（COFF 风格）：[u32 总长][名字\0 …]，**首个名字就在偏移 4**（实测真实镜像如此）
-    while (out->len < strtab_off) buf_byte(out, 0);
-    w32(out, strtab_size);
-    buf_bytes(out, (const uint8_t *)".debug_line", strlen(".debug_line"));   buf_byte(out, 0);
-    buf_bytes(out, (const uint8_t *)".debug_info", strlen(".debug_info"));   buf_byte(out, 0);
-    buf_bytes(out, (const uint8_t *)".debug_abbrev", strlen(".debug_abbrev")); buf_byte(out, 0);
-  }
+  // —— 5~9c. 写各节内容（v1.10.3 抽成 pe_write_sections）——
+  PeBodyPack bp = {
+      .two_sec = TWO_SEC, .has_admin = HAS_ADMIN, .has_debug = HAS_DEBUG, .ngroups = ngroups,
+      .groups = groups,
+      .code_len = code_len, .desc_rva = desc_rva, .hdr_size = hdr_size, .text_raw_size = text_raw_size,
+      .data_raw_ptr = data_raw_ptr, .data_vsize = data_vsize, .data_raw_size = data_raw_size,
+      .rsrc_raw_ptr = rsrc_raw_ptr, .rsrc_raw_size = rsrc_raw_size, .rsrc_rva = rsrc_rva,
+      .idata_raw_ptr = idata_raw_ptr, .idata_raw_size = idata_raw_size,
+      .mod_int_rva = mod_int_rva, .mod_dll_rva = mod_dll_rva, .mod_iat_rva = mod_iat_rva,
+      .hint_item_rva = hint_item_rva,
+      .dbg_line_raw = dbg_line_raw, .dbg_info_raw = dbg_info_raw, .dbg_abbrev_raw = dbg_abbrev_raw,
+      .dbg_line_rs = dbg_line_rs, .dbg_info_rs = dbg_info_rs, .dbg_abbrev_rs = dbg_abbrev_rs,
+      .strtab_off = strtab_off, .strtab_size = strtab_size,
+      .dbg_line = dbg_line, .dbg_info = dbg_info, .dbg_abbrev = dbg_abbrev,
+  };
+  pe_write_sections(out, &bp, gen);
 
   // ========== I1（v1.3.4）：产物内不得出现「指向本镜像的绝对地址」 ==========
   // 真实形态的不变量（替换掉原注释里那条**假**不变量「无 ASLR 是全局变量方案的前提」，已实测证伪）：

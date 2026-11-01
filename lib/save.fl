@@ -1,0 +1,57 @@
+// save.fl -- 存档（M7 第一版）：二进制序列化 + 校验 + 文件往返
+//
+// 用法：include "save.fl"（带进 io_lib.fl）
+// 格式：'F' 'S' 版本(1) 保留(0) + n 个 int（4 字节小端）。没有长度字段，
+//   元素数由 len 推出；读取端必须自己给 len（file_read 的返回值）。
+// 边界：魔数/版本/长度不对一律返回 -1（响亮失败），不写半截数据。
+include "io_lib.fl"
+
+// 打包到调用方缓冲：返回写入字节数；参数非法/cap 不够返回 -1。
+int save_pack(char *buf, int cap, int *data, int n) {
+  int i = 0;
+  int v = 0;
+  if (buf == 0) { return -1; }
+  if (data == 0) { return -1; }
+  if (n < 0) { return -1; }
+  if (cap < 4 + n * 4) { return -1; }
+  buf[0] = 70;   // 'F'
+  buf[1] = 83;   // 'S'
+  buf[2] = 1;
+  buf[3] = 0;
+  i = 0;
+  while (i < n) {
+    v = data[i];
+    buf[4 + i * 4] = v & 255;
+    buf[4 + i * 4 + 1] = (v >> 8) & 255;
+    buf[4 + i * 4 + 2] = (v >> 16) & 255;
+    buf[4 + i * 4 + 3] = (v >> 24) & 255;
+    i = i + 1;
+  }
+  return 4 + n * 4;
+}
+
+// 解包：返回元素数；魔数/版本/长度非法返回 -1。
+int save_unpack(char *buf, int len, int *data, int cap) {
+  int n = 0;
+  int i = 0;
+  int v = 0;
+  if (buf == 0) { return -1; }
+  if (data == 0) { return -1; }
+  if (len < 4) { return -1; }
+  if (buf[0] != 70) { return -1; }
+  if (buf[1] != 83) { return -1; }
+  if (buf[2] != 1) { return -1; }
+  n = (len - 4) / 4;
+  if (n < 0) { return -1; }
+  if (n > cap) { return -1; }
+  i = 0;
+  while (i < n) {
+    v = buf[4 + i * 4] & 255;
+    v = v | ((buf[4 + i * 4 + 1] & 255) << 8);
+    v = v | ((buf[4 + i * 4 + 2] & 255) << 16);
+    v = v | ((buf[4 + i * 4 + 3] & 255) << 24);
+    data[i] = v;
+    i = i + 1;
+  }
+  return n;
+}

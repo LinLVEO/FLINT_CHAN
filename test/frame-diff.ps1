@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 # 练习副本改动：原先写死 E:\FLINT\... → 会去跑原件的编译器。改成按本脚本位置推导，副本自包含。
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root    = Split-Path -Parent $here
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $boot    = Join-Path $root 'boot\b1_emit.exe'
 $objdump = 'E:\mingw64\bin\objdump.exe'
 $work    = Join-Path $env:TEMP 'flint-framediff'
@@ -18,7 +18,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $probe = Join-Path $work 'probe.fl'
 Copy-Item -LiteralPath $Src -Destination $probe -Force
 
-$outFlint = Join-Path $work 'out_flint.exe'
+$outFlint = Join-Path $work 'out_hlc.exe'
 $outBoot  = Join-Path $work 'probe.exe'
 foreach ($f in @($outFlint, $outBoot)) { if (Test-Path $f) { Remove-Item $f -Force } }
 

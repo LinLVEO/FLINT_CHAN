@@ -1,0 +1,7 @@
+// spec6_tover.fl -- boot-only capacity negative: per=2 * 60000 = 120000 slots > 99999 => boot must refuse (-241), never silently truncate.
+struct P { int a; int b; int c; }
+int main() {
+  struct P big[60000];
+  big[0].a = 1;
+  return big[0].a;
+}

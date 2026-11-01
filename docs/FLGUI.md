@@ -1,15 +1,15 @@
-# FLGUI — FLINT 的 immediate-mode GUI 库
+# FLGUI — FLINT_CHAN 的 immediate-mode GUI 库
 
 > 🧭 元信息（机检）：类型=对外 ｜ 快照=否
 > 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`
 > 引用我=`docs\README.md` ｜ 我引用=`lib\flgui*.fl`、`test\flgui-verify.ps1` ｜ 最后复核=2026-10-19 `test\docgate.mjs`
 
-FLGUI 是 FLINT 自己的界面库，**immediate-mode**：没有保留的控件树，也没有回调注册。
+FLGUI 是 FLINT_CHAN 自己的界面库，**immediate-mode**：没有保留的控件树，也没有回调注册。
 每一帧程序按顺序调用控件函数，控件当场读输入、改自己的状态、往一条命令表里追加绘制命令；
 帧末由平台层把命令表解释成像素。跨帧要活下来的量（勾选态、滚动偏移、焦点、动画起点）
 放在库内一个按 ID 索引的状态池里，而不是放在控件对象里。
 
-四层都是纯 FLINT，不含 C，也不借用外部 UI 框架：
+四层都是纯 FLINT_CHAN，不含 C，也不借用外部 UI 框架：
 
 ```
 lib\flgui.fl          内核：ID / 状态池 / 布局游标 / 命令表 / 裁剪·透明度·字体档栈 / 主题 / 动画
@@ -26,7 +26,7 @@ lib\flgui_win32.fl    平台层：建窗 / 消息泵 / 输入采集 / 字体 / D
 
 ## Abstract (English)
 
-This document describes FLGUI, FLINT's immediate-mode GUI library, layered from the core
+This document describes FLGUI, FLINT_CHAN's immediate-mode GUI library, layered from the core
 command buffer and state pool, through widgets and text editing, down to the Win32
 window, input and software-rendering platform layer. It gives a complete minimal window
 program, a table of available widgets and their entry points, and the real semantics of
@@ -272,7 +272,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\flgui-verify.ps1
 
 它编译并运行 `test\samples\flgui*.fl`（无头、合成输入、双端逐字节对账，老 dump 基线
 只许新增不许改动），并跑语义判据（光标条契约、输入灵敏度、UI 美术、焦点链、焦点可见性、
-多字体档等）。当前检查数：<!--fact:flgui-checks-->210/210<!--/fact-->。
+多字体档等）。当前检查数：<!--fact:flgui-checks-->213/213<!--/fact-->。
 
 确认变化有意义之后才重录基线：`... -WriteBaseline`。真输入（真鼠标拖动、真滚轮、真键盘）
 另有一组探针，不在无头门里；无头样本钉的是库内契约，真输入探针钉的是平台层，两层各留

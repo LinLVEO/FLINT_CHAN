@@ -1,0 +1,54 @@
+// f074_actor.fl -- M2 角色状态机：actor_frame / actor_state_for
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  站（state 0）任何 tick -> 帧 0
+//   bit1  走（state 1）tick 0..7 -> 帧 1
+//   bit2  走 tick 8..15 -> 帧 2
+//   bit3  走 tick 16 -> 帧 1（下一轮）
+//   bit4  走 tick 23 -> 帧 1（第二轮后半段仍正确，跨轮不漂）
+//   bit5  state 2（攻，占位）-> 帧 0
+//   bit6  actor_state_for(0) == 0
+//   bit7  actor_state_for(1) == 1 且 actor_state_for(-1) == 1（非 0 都算移动）
+include "../../lib/actor.fl"
+
+int main() {
+  int mask = 0;
+  int f = 0;
+
+  f = actor_frame(0, 0);
+  if (f == 0) {
+    f = actor_frame(0, 999);
+    if (f == 0) { mask = mask | 1; }
+  }
+
+  f = actor_frame(1, 0);
+  if (f == 1) {
+    f = actor_frame(1, 7);
+    if (f == 1) { mask = mask | 2; }
+  }
+
+  f = actor_frame(1, 8);
+  if (f == 2) {
+    f = actor_frame(1, 15);
+    if (f == 2) { mask = mask | 4; }
+  }
+
+  f = actor_frame(1, 16);
+  if (f == 1) { mask = mask | 8; }
+
+  f = actor_frame(1, 23);
+  if (f == 1) { mask = mask | 16; }
+
+  f = actor_frame(2, 5);
+  if (f == 0) { mask = mask | 32; }
+
+  if (actor_state_for(0) == 0) { mask = mask | 64; }
+
+  if (actor_state_for(1) == 1) {
+    if (actor_state_for(-1) == 1) { mask = mask | 128; }
+  }
+
+  print(["f074 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

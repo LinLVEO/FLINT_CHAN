@@ -1,6 +1,6 @@
 // main.fl -- exit code AS output: a tool that needs no printf to be asserted.
 //
-// Build: flint.exe examples\exitcode\main.fl -o examples\exitcode\exitcode.exe
+// Build: hlc.exe examples\exitcode\main.fl -o examples\exitcode\exitcode.exe
 // Run:   examples\exitcode\exitcode.exe <word>   -> exit code = (sum of the word's bytes) & 255
 //        examples\exitcode\exitcode.exe          -> usage line, exit 1
 //

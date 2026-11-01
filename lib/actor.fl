@@ -1,0 +1,24 @@
+// actor.fl -- 极简角色动画状态机（M2 第一版：站/走，不含攻）
+//
+// 用法：include "actor.fl"（带进 sprite.fl）
+// 状态常量用裸 int（enum 属线 B，未拍板，不擅动语言）：
+//   0 = 站（帧 0）｜1 = 走（帧 1/2 每 8 tick 交替）｜2 = 攻（占位，回帧 0）
+// 为什么是一个函数而不是查表：状态机规则只有两条，写成 if 链最直白；
+//   等状态数过 3~5 再换查表（那时正好是 enum 该立项的时候）。
+include "sprite.fl"
+
+// 状态 + 累计 tick -> 精灵帧号（0..2）
+int actor_frame(int state, int tick) {
+  if (state == 0) { return 0; }
+  if (state == 1) {
+    if ((tick / 8) % 2 == 0) { return 1; }
+    return 2;
+  }
+  return 0;
+}
+
+// 按键是否移动 -> 状态号（0/1）
+int actor_state_for(int moving) {
+  if (moving != 0) { return 1; }
+  return 0;
+}

@@ -1,0 +1,21 @@
+jump.wav / hit.wav / land.wav -- 《虚妄之塔》音效（2026-11-01 三版：真实录音素材）
+
+  为什么换：合成方波（chiptune）和 CC0 卡通素材都被所有者否了（"不像现代游戏"）
+  ⇒ 改用 OpenGameArt 的 CC0 **真实录音**。
+
+  jump.wav  = "jump.flac"（作者 mieki256，CC0）0.068s，真实跳跃声
+    https://opengameart.org/content/jump-and-run-and-stand
+    原始：https://opengameart.org/sites/default/files/jump.flac
+    ffmpeg -i jump.flac -c:a pcm_s16le -ac 1 -ar 44100 jump.wav
+
+  hit.wav   = "sword.1.ogg"（攻击挥砍）＋ "sword_clash.1.ogg"（金属撞击），作者 StarNinjas，CC0
+    https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes
+    各裁前 0.30s 混合，0.297s
+    ffmpeg -i sword.1.ogg -i sword_clash.1.ogg -filter_complex "[0:a]atrim=0:0.30[a];[1:a]atrim=0:0.30[b];[a][b]amix=inputs=2:duration=longest,volume=1.6" -c:a pcm_s16le -ac 1 -ar 44100 hit.wav
+
+  land.wav  = "jumpland.wav"（作者 MentalSanityOff，CC0）0.408s，真实落地声（暂未接入）
+    https://opengameart.org/content/jump-landing-sound
+    ffmpeg -i jumpland.wav -c:a pcm_s16le -ac 1 -ar 44100 land.wav
+
+  许可：以上均为 CC0 1.0 公有领域（可商用、可修改、无需署名；署名是礼貌不是义务）。
+  自证：jump 0.068s / -12.8 dB；hit 0.297s / -11.2 dB；land 0.408s

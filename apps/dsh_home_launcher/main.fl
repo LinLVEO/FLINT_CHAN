@@ -1,0 +1,376 @@
+// dsh_home_launcher -- FLINT / FLGUI �桸��ѡ .dsh ��Ŀ¼��������
+//   ÿ����Ŀ¼�����һ���Լ��ġ��˳����������Թܸ��Ե�ʵ����
+//   Alt+W �л������ö����ٰ�һ��ȡ������
+//
+// ���룺hlc.exe apps\dsh_home_launcher\main.fl -o apps\dsh_home_launcher\main.exe -gui
+//
+// �ȹ��ı߽磨д����ʡ��һ�Σ���
+//   * api ����ֻ�� int / double������ char *��? �ַ���һ�ɰ�����������ַ��
+//   * �Զ��庯���� int �β�**���յ�ַ**��"��ֵַ����װ�� int �β�"��? �����߼�ֻ������
+//   * CreateProcessA �� lpStartupInfo **���ܴ� 0**��ʵ�� 0xC0000005��? ����� cb=104 ��
+//     STARTUPINFO��x64 ���֣�26 �� int �ֶΣ�ָ��ռ���� int����ÿ���ֶζ�Ҫ��ʽ����
+//   * ��������SetWindowLongA(hwnd,-20, APPWINDOW|LAYERED) �ܼ��� APPWINDOW����**�岻�� TOPMOST**
+//     ��ʵ���� 0x000C0000������ 0x000C0008��? ��Ҫ SetWindowPos(HWND_NOTOPMOST)
+//   * ͬ label �İ�ť = ͬһ�� ID��gui_id �� label ������? �������˳�������д�ɲ�ͬ����
+//   * ��ť������**�����**���� x + pad �𣩣����Ǿ��� ? ���õ����ַ����У���ť����Ҫǡ��
+//     = �ֿ� + 2*pad��һ���� 8px ? �� 20����������ƫ��
+api kernel32 int SetEnvironmentVariableA(int, int);
+api kernel32 int CreateProcessA(int, int, int, int, int, int, int, int, int, int);
+api kernel32 ptr OpenProcess(int, int, int);
+api kernel32 int TerminateProcess(int, int);
+api kernel32 int CloseHandle(int);
+api user32 int GetWindowLongA(int, int);
+api user32 int SetWindowLongA(int, int, int);
+api user32 int SetWindowPos(int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int GetSystemMetrics(int);
+api user32 int GetAsyncKeyState(int);
+api user32 int EnumWindows(int, int);
+api user32 int GetWindowThreadProcessId(int, int);
+api user32 int GetClassNameA(int, int, int);
+api user32 int IsWindowVisible(int);
+api user32 int SetForegroundWindow(int);
+api kernel32 ptr CreateToolhelp32Snapshot(int, int);
+api kernel32 int Process32First(int, int);
+api kernel32 int Process32Next(int, int);
+
+// PROCESSENTRY32��x64 ANSI����0 dwSize | 4 cntUsage | 8 th32ProcessID | 12 pad |
+//   16 ULONG_PTR th32DefaultHeapID(���� int) | 24 th32ModuleID | 28 cntThreads |
+//   32 th32ParentProcessID | 36 pcPriClassBase | 40 dwFlags | 44 szExeFile[260]  => 304
+struct PEntry {
+  int dwSize; int cntUsage; int pid; int pad0;
+  int heapLo; int heapHi; int modid; int nthreads;
+  int ppid; int pri; int flags;
+  char exe[260];
+}
+
+include "flgui_win32.fl"
+
+// x64 STARTUPINFOA��0 cb | 8 lpReserved | 16 lpDesktop | 24 lpTitle | 32..60 ���� DWORD
+//   64 wShowWindow+cbReserved2 | 72 lpReserved2 | 80/88/96 ������׼��� | 104 ����
+struct SI { int cb; int p04; int r8; int r12; int d16; int d20; int t24; int t28;
+            int x32; int y36; int xs40; int ys44; int xc48; int yc52; int fill56;
+            int flags60; int wsw64; int r2a; int r2b; int hi80; int hi84;
+            int ho88; int ho92; int he96; int he100; int tail104; }
+
+// x64 PROCESS_INFORMATION��hProcess(8) hThread(8) dwProcessId(4) dwThreadId(4)
+struct PI { int hp; int hph; int ht; int hth; int pid; int tid; }
+
+void si_reset(struct SI *s) {
+  s->cb = 104;
+  s->p04 = 0; s->r8 = 0; s->r12 = 0; s->d16 = 0; s->d20 = 0;
+  s->t24 = 0; s->t28 = 0; s->x32 = 0; s->y36 = 0; s->xs40 = 0; s->ys44 = 0;
+  s->xc48 = 0; s->yc52 = 0; s->fill56 = 0; s->flags60 = 0; s->wsw64 = 0;
+  s->r2a = 0; s->r2b = 0; s->hi80 = 0; s->hi84 = 0; s->ho88 = 0; s->ho92 = 0;
+  s->he96 = 0; s->he100 = 0; s->tail104 = 0;
+}
+
+void pi_reset(struct PI *p) {
+  p->hp = 0; p->hph = 0; p->ht = 0; p->hth = 0; p->pid = 0; p->tid = 0;
+}
+
+// 1 = �ѽ�����0 = �� pid �򲻿����Ѿ��˳�/�������ǵģ�
+// �������Ƚϣ�PROCESSENTRY32.szExeFile �� char[260]������ NUL Ҳ�ܱȣ�
+int name_eq(char *a, char *b) {
+  int i = 0;
+  while (b[i] != 0) {
+    if (a[i] != b[i]) { return 0; }
+    i = i + 1;
+  }
+  return a[i] == 0;
+}
+
+// ��������˸�ʵ����������ps1 �� Get-DesktopInstances ��ͬ���оݣ���
+// �ѱ������� DeepSeek Harness.exe �� pid/ppid �ռ������������̲������������ľ��Ǹ���
+// 1920 ���� 19 ������ֻ���ӽ��̣�gpu/utility/renderer/host���������ǻ�� 1 ��ʵ����� 19 ����
+// PROCESSENTRY32��ANSI/x64��sizeof = 304��dwSize ����д�������� Process32First ֱ��ʧ�ܡ�
+// ===== 2026-10-24������ʵ�� ? �е����Ĵ��ڣ����� spawn һ����Ȼ exit=9 �Ľ��̣�=====
+// ������ʵ�⣩��DSH �������**��ʵ��** ���� `--user-data-dir=<��Ŀ¼>` �ᱻ���ԣ�̽��Ŀ¼ 0 �ļ�����
+//   �ڶ������� **exit=9** �����˳�������������ԭ�������� "instance-19388/19389/19390" ��֧�������룬
+//   ���껹����ʾ"������"���󵼣������ڸĳɣ��и�ʵ����ֱ�Ӱ���������������ǰ̨��
+// �о��� count_dsh_roots ͬԴ��ͬһ�� PROCESSENTRY32 ɨ�� + "�����̲��ڼ����� = ��"����
+int find_root_pid() {
+  int *snap = CreateToolhelp32Snapshot(2, 0);
+  if (snap == 0) { return 0; }
+  int pids[128];
+  int ppids[128];
+  int n = 0;
+  struct PEntry pe;
+  pe.dwSize = 304;
+  int ok = Process32First(snap, &pe);
+  while (ok == 1) {
+    if (name_eq(&pe.exe[0], "DeepSeek Harness.exe") == 1) {
+      if (n < 128) { pids[n] = pe.pid; ppids[n] = pe.ppid; n = n + 1; }
+    }
+    ok = Process32Next(snap, &pe);
+  }
+  CloseHandle(snap);
+  int i = 0;
+  while (i < n) {
+    int ischild = 0;
+    int j = 0;
+    while (j < n) {
+      if (pids[j] == ppids[i]) { ischild = 1; }
+      j = j + 1;
+    }
+    if (ischild == 0) { return pids[i]; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// EnumWindows �Ļص�ֻ������ int ������HWND / LPARAM��? Ŀ�� pid �� lParam�����н����ȫ�֡�
+// �������о� = **�ɼ�** + ���� `Chrome_WidgetWin_1`��Electron ������DSH �ĸ������ڶ����ɼ�����
+int dsh_win = 0;
+int enum_win_cb(int h, int lp) {
+  int pid = 0;
+  if (IsWindowVisible(h) == 1) {
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == lp) {
+      char cls[64];
+      GetClassNameA(h, &cls[0], 64);
+      if (name_eq(&cls[0], "Chrome_WidgetWin_1") == 1) { dsh_win = h; return 0; }
+    }
+  }
+  return 1;
+}
+
+int dsh_main_window(int rp) {
+  dsh_win = 0;
+  if (rp == 0) { return 0; }
+  EnumWindows(&enum_win_cb, rp);
+  return dsh_win;
+}
+
+int count_dsh_roots() {
+  int *snap = CreateToolhelp32Snapshot(2, 0);
+  if (snap == 0) { return -1; }
+  int pids[128];
+  int ppids[128];
+  int n = 0;
+  struct PEntry pe;
+  pe.dwSize = 304;
+  int ok = Process32First(snap, &pe);
+  while (ok == 1) {
+    if (name_eq(&pe.exe[0], "DeepSeek Harness.exe") == 1) {
+      if (n < 128) { pids[n] = pe.pid; ppids[n] = pe.ppid; n = n + 1; }
+    }
+    ok = Process32Next(snap, &pe);
+  }
+  CloseHandle(snap);
+  int roots = 0;
+  int i = 0;
+  while (i < n) {
+    int ischild = 0;
+    int j = 0;
+    while (j < n) {
+      if (pids[j] == ppids[i]) { ischild = 1; }
+      j = j + 1;
+    }
+    if (ischild == 0) { roots = roots + 1; }
+    i = i + 1;
+  }
+  return roots;
+}
+
+int pid_kill(int pid) {
+  int *h = OpenProcess(1, 0, pid);
+  if (h == 0) { return 0; }
+  TerminateProcess(h, 0);
+  CloseHandle(h);
+  return 1;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct Surf sf;
+  struct DragSt dg;
+  struct GuiRect rb;
+  int *hf = 0;
+  int status = 0;   // 0 �ȴ� / 1 F ������ / 2 C ������ / 3 ����ʧ��
+                    // 4 ���˳� F / 5 ���˳� C / 6 û��ʵ������ / 7 ���ö� / 8 ��ȡ���ö�
+  int pid1 = 0;
+  int pid2 = 0;
+  int rp1 = 0; int wh1 = 0; int rp2 = 0; int wh2 = 0;
+  int ok1 = 0;
+  int ok2 = 0;
+  int k1 = 0;
+  int nr1 = 0;
+  int nr2 = 0;
+  int k2 = 0;
+  int top = 0;      // 0 = ��ͨ�㼶��auto����1 = ���ö�
+  int wprev = 0;    // Alt+W �ı��ؼ�⣨��סֻ��һ�Σ�
+
+  dg.on = 0;
+  // 2026-10-24��CPU �޸�������һ֡������/״̬���� ���� ֻ�����ж�"��һ֡Ҫ��Ҫ�ػ�"��
+  //   �ɰ�ÿ֡�������ػ棨ULW 470x250 ȫ������ʵ���ת **~90% ����**��������һ���ž��� CPU��
+  //   DSH ������Ҳ���ű������û��ھ�"�� cmd ���"����
+  int lastmx = -100000;
+  int lastmy = -100000;
+  int laststatus = -1;
+  int laston = -1;
+  int lasttop = -1;
+  gui_init(&c);
+  c.lay_w = 470; c.lay_h = 250;
+  hf = gui_win_font_init(14);
+
+  g.cls = "DSHHOMEGUI";
+  g.w = 470; g.h = 250;
+  g.x = (GetSystemMetrics(0) - g.w) / 2;
+  g.y = (GetSystemMetrics(1) - g.h) / 2;
+  g.alpha = 245;
+  if (!gui_win_make(&g)) { return 90; }
+  if (!gui_win_surf(&sf, &g, 6)) { return 91; }
+  gui_win_dpi_apply(&c);
+
+  // ������ + ��ͨ�㼶��APPWINDOW|LAYERED��ȥ�� TOPMOST �� NOACTIVATE����
+  // SetWindowLong �ӵ��� APPWINDOW��ȴ�岻�� TOPMOST��ʵ������Դ� 0x8��? ���� SetWindowPos ժ����
+  SetWindowLongA(g.hwnd, -20, 0x000C0000);
+  SetWindowPos(g.hwnd, -2, 0, 0, 0, 0, 3);
+
+  struct SI si;
+  struct PI pi;
+  si_reset(&si);
+  pi_reset(&pi);
+
+  while (1) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }
+    gui_win_input(&g, &in);
+
+    if (in.pressed == 1)  { gui_win_drag_begin(&dg, &g, in.my); }
+    if (in.released == 1) { gui_win_drag_end(&dg); }
+    gui_win_drag_frame(&dg);
+
+    // Alt+W �л��ö�����ѯ�����������ش�������סֻ��һ�Σ���
+    // �ö��� HWND_TOPMOST ��֤������������ͨ����֮�ϣ�����������ǰ��
+    int altk = GetAsyncKeyState(0x12);
+    int wkey = GetAsyncKeyState(0x57);
+    int wnow = 0;
+    if ((altk & 0x8000) != 0) { if ((wkey & 0x8000) != 0) { wnow = 1; } }
+    if (wnow == 1) {
+      if (wprev == 0) {
+        if (top == 0) { SetWindowPos(g.hwnd, -1, 0, 0, 0, 0, 3); top = 1; status = 7; }
+        else { SetWindowPos(g.hwnd, -2, 0, 0, 0, 0, 3); top = 0; status = 8; }
+      }
+    }
+    wprev = wnow;
+
+    // ���в��ػ棺ֻ������/״̬/�϶�/�ö��仯�Ż�һ֡������� 30ms�������������ѣ���
+    int dirty = 0;
+    if (in.pressed == 1) { dirty = 1; }
+    if (in.released == 1) { dirty = 1; }
+    if (in.wheel != 0) { dirty = 1; }
+    if (in.key != 0) { dirty = 1; }
+    if (in.mx != lastmx) { dirty = 1; }
+    if (in.my != lastmy) { dirty = 1; }
+    if (status != laststatus) { dirty = 1; }
+    if (dg.on != laston) { dirty = 1; }
+    if (top != lasttop) { dirty = 1; }
+    if (dirty == 0) { gui_win_wait(1); continue; }   // 1 = ��"һ��"���������� ~15.6ms ? ���� ~64Hz �������� 60fps app ͬ���������������ѣ�
+
+    gui_begin(&c, &in);
+
+    // ���Ͻǡ���С��������ť�� 20 = һ����(8) + ���� pad(�� 6) ? �������þ���
+    rb.x = c.lay_w - 26; rb.y = 4; rb.w = 20; rb.h = 20;
+    gui_next_rect(&c, &rb);
+    if (gui_button(&c, "-") == 1) { ShowWindow(g.hwnd, 6); }
+    gui_layout_init(&c, c.pad, c.pad);
+
+    gui_label(&c, "DeepSeek Harness");
+    gui_label(&c, "ѡ�� .dsh ��Ŀ¼����");
+
+    // Ĭ�� profile��%APPDATA%\@deepseek-ai\dsh-desktop������ ����������/���涼�������
+    // ʵ������ Local Storage �� 100 KB�����½� profile ֻ�� 1~2 KB ? �ö��� userData
+    // �͵��ڻ���һ���� profile�����鵱Ȼ�����������ۣ�ͬһʱ��ֻ����һ��ʵ��������
+    if (gui_button(&c, "F:\\DSH-DesktopHome") == 1) {
+      SetEnvironmentVariableA("ELECTRON_RUN_AS_NODE", 0);
+      SetEnvironmentVariableA("ELECTRON_NO_ATTACH_CONSOLE", 0);
+      SetEnvironmentVariableA("DSH_HOME", "F:\\DSH-DesktopHome");
+      si_reset(&si);
+      pi_reset(&pi);
+      // �� cmd ��ͬһ������**��ǰû��ʵ��**����Ĭ�� profile������/���涼���������
+      // �Ѿ���ʵ�����˵� instance-<19387+n>��ps1 �� Get-FreePort �� 19387 �𣬵ڶ������� 19388����
+      // �� cmd ��ͬһ������**��ǰû��ʵ��**����Ĭ�� profile������/���涼���������
+      // ����ʵ�����˵� instance-19388��ps1 �� Get-FreePort �� 19387 �𣬵ڶ������� 19388����
+      // ?? ���ﲻ�� str() ��̬ƴĿ¼�� ���� str([������, ����]) ʵ���ѱ������ظ�����������
+      //    ��str(["X", str(["P","Q"])]) �� "XX" ������ "XPQ"��������Ŀ¼����������������
+            nr1 = count_dsh_roots();
+      if (nr1 > 0) {
+        // ��ʵ�����ܣ���ʵ������������ spawn ֻ�� exit=9 ? ֱ���д��ڡ�
+        // �㰴ťʱ����������ǰ̨��SetForegroundWindow ��Ȩ�ޣ�ǰ̨���̿���ָ����ǰ̨����
+        rp1 = find_root_pid();
+        wh1 = dsh_main_window(rp1);
+        if (wh1 != 0) { ShowWindow(wh1, 9); SetForegroundWindow(wh1); status = 9; }
+        else { status = 10; }
+      } else {
+        ok1 = CreateProcessA(0, "\"F:\\DeepSeekHarness\\DeepSeek Harness.exe\"", 0, 0, 0, 0, 0, 0, &si, &pi);
+        if (ok1 == 1) { pid1 = pi.pid; status = 1; } else { status = 3; }
+      }
+    }
+    gui_same_line(&c);
+    if (gui_button(&c, "�˳� F") == 1) {
+      if (pid1 > 0) {
+        k1 = pid_kill(pid1);
+        if (k1 == 1) { pid1 = 0; status = 4; } else { status = 6; pid1 = 0; }
+      } else { status = 6; }
+    }
+    gui_label(&c, "  Ĭ�����ã��й��������飩");
+
+    if (gui_button(&c, "C:\\Users\\20838\\.dsh") == 1) {
+      SetEnvironmentVariableA("ELECTRON_RUN_AS_NODE", 0);
+      SetEnvironmentVariableA("ELECTRON_NO_ATTACH_CONSOLE", 0);
+      SetEnvironmentVariableA("DSH_HOME", "C:\\Users\\20838\\.dsh");
+      si_reset(&si);
+      pi_reset(&pi);
+            nr2 = count_dsh_roots();
+      if (nr2 > 0) {
+        rp2 = find_root_pid();
+        wh2 = dsh_main_window(rp2);
+        if (wh2 != 0) { ShowWindow(wh2, 9); SetForegroundWindow(wh2); status = 9; }
+        else { status = 10; }
+      } else {
+        ok2 = CreateProcessA(0, "\"F:\\DeepSeekHarness\\DeepSeek Harness.exe\"", 0, 0, 0, 0, 0, 0, &si, &pi);
+        if (ok2 == 1) { pid2 = pi.pid; status = 2; } else { status = 3; }
+      }
+    }
+    gui_same_line(&c);
+    if (gui_button(&c, "�˳� C") == 1) {
+      if (pid2 > 0) {
+        k2 = pid_kill(pid2);
+        if (k2 == 1) { pid2 = 0; status = 5; } else { status = 6; pid2 = 0; }
+      } else { status = 6; }
+    }
+    gui_label(&c, "  �ն���Ŀ¼���������ã������ǿյģ�");
+
+    // �˳������� = �����������Լ�������ʵ����ʵ�� TerminateProcess �����̻��������������
+    // 5 ������ȫ�𣬲���Ҫ taskkill /T����pid Ϊ 0 ��ʾ�Ǹ�ʵ�����Ǳ����ڿ��ģ���������
+    if (gui_button(&c, "�˳�����������ʵ����") == 1) {
+      if (pid1 > 0) { pid_kill(pid1); pid1 = 0; }
+      if (pid2 > 0) { pid_kill(pid2); pid2 = 0; }
+      return 0;
+    }
+
+    gui_label(&c, "Alt+W �л��ö����ٰ�һ��ȡ����");
+
+    if (status == 0) { gui_label(&c, "״̬���ȴ�ѡ��"); }
+    if (status == 1) { gui_label(&c, "״̬����������� home ����"); }
+    if (status == 2) { gui_label(&c, "״̬�������ն���Ŀ¼����"); }
+    if (status == 3) { gui_label(&c, "״̬������ʧ�ܣ���� exe ·����"); }
+    if (status == 4) { gui_label(&c, "״̬�����˳������ home ��ʵ��"); }
+    if (status == 5) { gui_label(&c, "״̬�����˳��ն���Ŀ¼��ʵ��"); }
+    if (status == 6) { gui_label(&c, "״̬���Ǹ�ʵ���Ѿ����ڣ����Ǳ����������ģ�"); }
+    if (status == 7) { gui_label(&c, "״̬�����ö���Alt+W ȡ����"); }
+    if (status == 8) { gui_label(&c, "״̬���ѻص���ͨ�㼶"); }
+
+    if (status == 9) { gui_label(&c, "״̬�����е����������ʵ������"); }
+    if (status == 10) { gui_label(&c, "״̬����ʵ�����ܣ���û�ҵ����Ĵ��ڣ����ܻ���������"); }
+    gui_end(&c);
+    gui_win_render(&sf, &c, hf);
+    gui_win_show(&sf);
+    lastmx = in.mx; lastmy = in.my; laststatus = status; laston = dg.on; lasttop = top;
+    gui_win_frame_wait(&c);        // �ػ�ʱ�޵� 60fps���϶�Ҳ��������������·�������� continue
+  }
+  return 0;
+}

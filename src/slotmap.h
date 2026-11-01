@@ -91,6 +91,8 @@ int  slotmap_has_call(void);
 //      （跳过降级点的路径读到未初始化的内存槽）—— 修法写在 slotmap.c 的位置纪律里。
 //   返回分配到的寄存器个数；随后生成层用 `slotmap_regs_allocated` 取号、在序言 push / 收尾 pop（**次序相反**）。
 int  slotmap_plan_regs(int has_call);
+// v5（2026-10-21，D-2）：1 = 一律不驻留（调试版用；帧槽必须始终是当前真值，调试器才读得到）。
+void slotmap_set_no_regs(int on);
 int  slotmap_regs_allocated(int *out, int cap);
 
 // ===== M5 ①：数组元素寻址与元素就地运算（帧槽基址 ＋ 索引 × 步长）=====

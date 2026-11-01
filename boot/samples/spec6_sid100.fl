@@ -1,0 +1,114 @@
+// spec6_sid100.fl -- trigger: 101 structs, last sid=100 => old ty6 spec 700000008 lands in ty7 band
+struct S0 { int a; int b; }
+struct S1 { int a; int b; }
+struct S2 { int a; int b; }
+struct S3 { int a; int b; }
+struct S4 { int a; int b; }
+struct S5 { int a; int b; }
+struct S6 { int a; int b; }
+struct S7 { int a; int b; }
+struct S8 { int a; int b; }
+struct S9 { int a; int b; }
+struct S10 { int a; int b; }
+struct S11 { int a; int b; }
+struct S12 { int a; int b; }
+struct S13 { int a; int b; }
+struct S14 { int a; int b; }
+struct S15 { int a; int b; }
+struct S16 { int a; int b; }
+struct S17 { int a; int b; }
+struct S18 { int a; int b; }
+struct S19 { int a; int b; }
+struct S20 { int a; int b; }
+struct S21 { int a; int b; }
+struct S22 { int a; int b; }
+struct S23 { int a; int b; }
+struct S24 { int a; int b; }
+struct S25 { int a; int b; }
+struct S26 { int a; int b; }
+struct S27 { int a; int b; }
+struct S28 { int a; int b; }
+struct S29 { int a; int b; }
+struct S30 { int a; int b; }
+struct S31 { int a; int b; }
+struct S32 { int a; int b; }
+struct S33 { int a; int b; }
+struct S34 { int a; int b; }
+struct S35 { int a; int b; }
+struct S36 { int a; int b; }
+struct S37 { int a; int b; }
+struct S38 { int a; int b; }
+struct S39 { int a; int b; }
+struct S40 { int a; int b; }
+struct S41 { int a; int b; }
+struct S42 { int a; int b; }
+struct S43 { int a; int b; }
+struct S44 { int a; int b; }
+struct S45 { int a; int b; }
+struct S46 { int a; int b; }
+struct S47 { int a; int b; }
+struct S48 { int a; int b; }
+struct S49 { int a; int b; }
+struct S50 { int a; int b; }
+struct S51 { int a; int b; }
+struct S52 { int a; int b; }
+struct S53 { int a; int b; }
+struct S54 { int a; int b; }
+struct S55 { int a; int b; }
+struct S56 { int a; int b; }
+struct S57 { int a; int b; }
+struct S58 { int a; int b; }
+struct S59 { int a; int b; }
+struct S60 { int a; int b; }
+struct S61 { int a; int b; }
+struct S62 { int a; int b; }
+struct S63 { int a; int b; }
+struct S64 { int a; int b; }
+struct S65 { int a; int b; }
+struct S66 { int a; int b; }
+struct S67 { int a; int b; }
+struct S68 { int a; int b; }
+struct S69 { int a; int b; }
+struct S70 { int a; int b; }
+struct S71 { int a; int b; }
+struct S72 { int a; int b; }
+struct S73 { int a; int b; }
+struct S74 { int a; int b; }
+struct S75 { int a; int b; }
+struct S76 { int a; int b; }
+struct S77 { int a; int b; }
+struct S78 { int a; int b; }
+struct S79 { int a; int b; }
+struct S80 { int a; int b; }
+struct S81 { int a; int b; }
+struct S82 { int a; int b; }
+struct S83 { int a; int b; }
+struct S84 { int a; int b; }
+struct S85 { int a; int b; }
+struct S86 { int a; int b; }
+struct S87 { int a; int b; }
+struct S88 { int a; int b; }
+struct S89 { int a; int b; }
+struct S90 { int a; int b; }
+struct S91 { int a; int b; }
+struct S92 { int a; int b; }
+struct S93 { int a; int b; }
+struct S94 { int a; int b; }
+struct S95 { int a; int b; }
+struct S96 { int a; int b; }
+struct S97 { int a; int b; }
+struct S98 { int a; int b; }
+struct S99 { int a; int b; }
+struct S100 { int a; int b; }
+int pick(struct S100 *p, int k) { if (k == 0) { return p->a; } return p->b; }
+int main() {
+  struct S100 arr[4];
+  int i = 0;
+  int ok = 0;
+  while (i < 4) { arr[i].a = i * 10 + 1; arr[i].b = i + 100; i = i + 1; }
+  if (arr[0].a == 1 && arr[1].a == 11 && arr[2].a == 21 && arr[3].a == 31 && arr[3].b == 103) { ok = ok + 1; }
+  if (pick(&arr[2], 0) == 21 && pick(&arr[2], 1) == 102) { ok = ok + 1; }
+  print(["ok=", ok, "\n"]);
+  if (ok == 2) { return 42; }
+  return ok;
+}

@@ -1,0 +1,187 @@
+// search_routes.fl — /api/search（字面量 + 迷你正则子集）、/api/libs、/api/editor/command
+// 迷你正则只支持本项目实际用到的三种原子：普通字符、'.'、'[abc]'，以及后缀 '?'（0 或 1 次）。
+// 够用即可：契约里的正则用例是 `u?int_6[48]`（可选 u + 字符类）。
+
+// 原子表（最多 64 个）
+int g_at_t[64];      // 0=字面 1=任意 2=字符类
+int g_at_c[64];      // 字面字符
+int g_at_opt[64];    // 后缀 '?' → 0/1 次
+char g_at_set[512];   // 64 个原子 × 每类最多 8 个字符
+int g_at_sn[64];
+int g_at_n = 0;
+
+int rx_parse(char *p, int pn) {
+  int i = 0;
+  int n = 0;
+  int k = 0;
+  int j = 0;
+  g_at_n = 0;
+  while (i < pn && n < 63) {
+    int c = p[i] & 255;
+    if (c == 91) {                       // '['
+      g_at_t[n] = 2;
+      g_at_sn[n] = 0;
+      i = i + 1;
+      while (i < pn && (p[i] & 255) != 93 && g_at_sn[n] < 7) {
+        g_at_set[n * 8 + g_at_sn[n]] = p[i];
+        g_at_sn[n] = g_at_sn[n] + 1;
+        i = i + 1;
+      }
+      if (i < pn && (p[i] & 255) == 93) { i = i + 1; }
+    } else if (c == 46) {                // '.'
+      g_at_t[n] = 1;
+      i = i + 1;
+    } else if (c == 63) {                // 单独 '?' 当字面量
+      g_at_t[n] = 0;
+      g_at_c[n] = 63;
+      i = i + 1;
+    } else {
+      g_at_t[n] = 0;
+      g_at_c[n] = c;
+      i = i + 1;
+    }
+    g_at_opt[n] = 0;
+    if (i < pn && (p[i] & 255) == 63) { g_at_opt[n] = 1; i = i + 1; }
+    n = n + 1;
+  }
+  g_at_n = n;
+  return n;
+}
+
+int at_match(int a, int c) {
+  int i = 0;
+  if (g_at_t[a] == 1) { return 1; }
+  if (g_at_t[a] == 2) {
+    while (i < g_at_sn[a]) {
+      if ((g_at_set[a * 8 + i] & 255) == c) { return 1; }
+      i = i + 1;
+    }
+    return 0;
+  }
+  return g_at_c[a] == c;
+}
+
+// 在 [0,tn) 里找任意匹配位置；找到 1
+int rx_find(char *t, int tn) {
+  int s = 0;
+  int pos = 0;
+  int a = 0;
+  int ok = 0;
+  if (g_at_n == 0) { return 1; }
+  while (s < tn) {
+    pos = s;
+    ok = 1;
+    a = 0;
+    while (a < g_at_n) {
+      if (g_at_opt[a] != 0) {
+        if (pos < tn && at_match(a, t[pos] & 255) != 0) { pos = pos + 1; }
+      } else {
+        if (pos < tn && at_match(a, t[pos] & 255) != 0) { pos = pos + 1; }
+        else { ok = 0; break; }
+      }
+      a = a + 1;
+    }
+    if (ok != 0) { return 1; }
+    s = s + 1;
+  }
+  return 0;
+}
+
+int lit_find(char *t, int tn, char *needle, int nn) {
+  return find_sub(t, 0, tn, needle) >= 0;
+}
+
+// 逐行扫描一个文件
+int scan_file(char *abs, char *rel, int relLen, char *needle, int nn, int is_rx, int *count) {
+  int fn = 0;
+  int i = 0;
+  int ls = 0;
+  int ln = 0;
+  int hit = 0;
+  int tl = 0;
+
+  fn = std::file_read(abs, g_tmp, 65000);
+  if (fn <= 0) { return 0; }
+  i = 0;
+  ls = 0;
+  ln = 1;
+  while (i <= fn) {
+    if (i == fn || g_tmp[i] == 10) {
+      tl = i - ls;
+      if (tl > 0 && tl < 2000) {
+        if (is_rx != 0) { hit = rx_find(g_tmp + ls, tl); }
+        else { hit = lit_find(g_tmp + ls, tl, needle, nn); }
+        if (hit != 0 && *count < 60) {
+          if (*count > 0) { g_out[g_outn] = 44; g_outn = g_outn + 1; }
+          g_outn = ap(g_out, g_outn, "{\"path\":\"");
+          g_outn = json_esc(g_out, g_outn, rel, relLen);
+          g_outn = ap(g_out, g_outn, "\",\"line\":");
+          g_outn = apnum(g_out, g_outn, ln);
+          g_outn = ap(g_out, g_outn, ",\"text\":\"");
+          g_outn = json_esc(g_out, g_outn, g_tmp + ls, tl);
+          g_outn = ap(g_out, g_outn, "\"}");
+          *count = *count + 1;
+        }
+      }
+      ls = i + 1;
+      ln = ln + 1;
+    }
+    i = i + 1;
+  }
+  return *count;
+}
+
+// 递归扫 .fl
+int search_dir(char *dir, char *relPrefix, int depth, char *needle, int nn, int is_rx, int *count) {
+  char pat[600];
+  char fd[320];
+  char name[300];
+  char rel[600];
+  char sub[600];
+  char *h = 0;
+  int ok = 0;
+  int i = 0;
+  int n = 0;
+  int isd = 0;
+  int rl = 0;
+  int p = 0;
+  int q = 0;
+
+  glob_of(pat, dir);
+  h = FindFirstFileA(pat, fd);
+  if (h == 0) { return 0; }
+  ok = 1;
+  while (ok != 0) {
+    i = 44;
+    n = 0;
+    while (fd[i] != 0 && n < 298) { name[n] = fd[i]; n = n + 1; i = i + 1; }
+    name[n] = 0;
+    if (name[0] != 46) {
+      isd = 0;
+      if ((fs_attr(fd) & 16) != 0) { isd = 1; }
+      p = 0;
+      p = ap(rel, 0, relPrefix);
+      if (p > 0) { rel[p] = 47; p = p + 1; }
+      p = ap(rel, p, name);
+      rel[p] = 0;
+      rl = p;
+      if (isd == 0 && has_ext(name, ".fl") != 0 && *count < 60) {
+        q = ap(sub, 0, dir);
+        sub[q] = 92; q = q + 1;
+        q = ap(sub, q, name);
+        sub[q] = 0;
+        scan_file(sub, rel, rl, needle, nn, is_rx, count);
+      }
+      if (isd == 1 && depth < 4 && *count < 60) {
+        q = ap(sub, 0, dir);
+        sub[q] = 92; q = q + 1;
+        q = ap(sub, q, name);
+        sub[q] = 0;
+        search_dir(sub, rel, depth + 1, needle, nn, is_rx, count);
+      }
+    }
+    ok = FindNextFileA(h, fd);
+  }
+  FindClose(h);
+  return *count;
+}

@@ -1,0 +1,42 @@
+// f081_enemy.fl -- M5 第二刀：敌人 AI 状态机
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  dist 10 -> 攻击(2)
+//   bit1  dist 30 -> 追击(1)
+//   bit2  dist 100 -> 巡逻(0)
+//   bit3  dist 16 -> 追击(1)（边界：<16 才攻击）
+//   bit4  dist 48 -> 巡逻(0)（边界：<48 才追击）
+//   bit5  死亡不可逆：state 3 + dist 5 -> 3
+//   bit6  巡逻方向：tick 0->+1、tick 30->-1（span 30）
+//   bit7  确定性：同一 (state,dist) 序列跑两次结果相同
+include "../../lib/enemy.fl"
+
+int run_seq() {
+  int s = 0;
+  int i = 0;
+  s = enemy_next_state(0, 10);
+  s = s * 10 + enemy_next_state(1, 50);
+  s = s * 10 + enemy_next_state(2, 60);
+  s = s * 10 + enemy_next_state(3, 1);
+  return s;
+}
+
+int main() {
+  int mask = 0;
+
+  if (enemy_next_state(0, 10) == 2) { mask = mask | 1; }
+  if (enemy_next_state(0, 30) == 1) { mask = mask | 2; }
+  if (enemy_next_state(0, 100) == 0) { mask = mask | 4; }
+  if (enemy_next_state(0, 16) == 1) { mask = mask | 8; }
+  if (enemy_next_state(0, 48) == 0) { mask = mask | 16; }
+  if (enemy_next_state(3, 5) == 3) { mask = mask | 32; }
+
+  if (enemy_patrol_dir(0, 30) == 1) {
+    if (enemy_patrol_dir(30, 30) == -1) { mask = mask | 64; }
+  }
+  if (run_seq() == run_seq()) { mask = mask | 128; }
+
+  print(["f081 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

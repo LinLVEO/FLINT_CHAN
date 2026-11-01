@@ -1,18 +1,18 @@
 # hello — 最小闭环（13 行）
 
 ## 这是什么
-仓库里最小的 FLINT 程序：`hello.fl`（13 行）打印两行，`main` 返回 0。它钉着两件"第一次写 FLINT 一定撞上"的事：
-1. `print` 吃的是**数组**，不是 C 的格式串：`print(["text", 2 + 3, "\n"]);`
+仓库里最小的 FLINT_CHAN 程序：`hello.fl`（13 行）打印两行，`main` 返回 0。它钉着两件"第一次写 FLINT_CHAN 一定撞上"的事：
+1. `print` 吃的是**段列表**（形状像数组，不是值），不是 C 的格式串：`print(["text", 2 + 3, "\n"]);`
 2. **产物的退出码 = `main` 的返回值** —— "跑一遍看退出码"就够做断言（本仓所有门都这么做）。
 
 ## 怎么跑
 ```powershell
-# 0) 在仓库根目录建编译器（约 9 秒；flint.exe 不入库）
-cmd /c "gcc -O2 src\*.c -o flint.exe"
+# 0) 在仓库根目录建编译器（约 9 秒；hlc.exe 不入库）
+cmd /c "gcc -O2 src\*.c -o hlc.exe"
 # 1) 一条命令 = 编译 + 跑 + 断言退出码与输出字节
 powershell -NoProfile -ExecutionPolicy Bypass -File examples\hello\build.ps1
 # 2) 手动两步
-.\flint.exe examples\hello\hello.fl
+.\hlc.exe examples\hello\hello.fl
 .\examples\hello\hello.exe
 ```
 

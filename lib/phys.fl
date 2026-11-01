@@ -1,0 +1,45 @@
+// phys.fl -- 定点数（16.16）+ AABB 碰撞（M3 第一版）
+//
+// 用法：include "phys.fl"
+// 口径：定点数用 int 存 16.16（高 16 位整数、低 16 位小数），不用 double 做物理量
+//   （可复现、跨机一致）；1.0 = 65536。
+// 边界： fx_mul 先各自 /256（≈8 位小数）再乘，换防溢出；精度够 2D 平台游戏第一版。
+// 为什么先做这一版：M3 需要"可复现的落点"，double 在不同机器上 FPU 舍入可能不同；
+//   定点数是整数运算，逐位确定。
+
+int fx_one() { return 65536; }
+
+// int -> 16.16
+int fx_from_int(int v) { return v * 65536; }
+
+// 16.16 -> int（截断向零，与 C 的 / 一致）
+int fx_to_int(int v) { return v / 65536; }
+
+int fx_add(int a, int b) { return a + b; }
+int fx_sub(int a, int b) { return a - b; }
+
+// 16.16 乘：先各 /256 再乘（防 a*b 溢出 32 位）
+int fx_mul(int a, int b) {
+  int ai = a / 256;
+  int bi = b / 256;
+  return ai * bi;
+}
+
+// AABB 相交（半开区间 [x, x+w)）；贴边不算相交。返回 1=相交 0=不相交。
+int phys_aabb(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+  if (ax >= bx + bw) { return 0; }
+  if (bx >= ax + aw) { return 0; }
+  if (ay >= by + bh) { return 0; }
+  if (by >= ay + ah) { return 0; }
+  return 1;
+}
+
+// 落地：如果 *py >= floor_y，则贴到 floor_y、竖直速度归零。返回 1=落地，0=还在空中。
+int phys_land(int *py, int *vy, int floor_y) {
+  if (*py >= floor_y) {
+    *py = floor_y;
+    *vy = 0;
+    return 1;
+  }
+  return 0;
+}

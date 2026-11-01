@@ -1,0 +1,50 @@
+// f085_enemy_sprite.fl -- M5 第三刀：第二种精灵表（enemy 12x12）与共存
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  sprite_enemy_w() == 12
+//   bit1  sprite_enemy_h() == 12
+//   bit2  sprite_enemy_frames() == 2
+//   bit3  sprite_enemy_load(buf) == 1
+//   bit4  buf[0] == 0（首像素透明）
+//   bit5  buf[26] == 1（y=2,x=2 是轮廓）
+//   bit6  帧 1 脚部不同：buf[110]==1 且 buf[254]==0（第 9 行 x=2）
+//   bit7  blit 到内存 DIB：(4,4) == pal[1]（敌人 (2,2) 的轮廓色）
+include "../../lib/sprite.fl"
+include "../../games/huiye/sprite_data.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int buf[288];
+  int pal[7];
+  int mask = 0;
+  int n = 0;
+
+  if (sprite_enemy_w() == 12) { mask = mask | 1; }
+  if (sprite_enemy_h() == 12) { mask = mask | 2; }
+  if (sprite_enemy_frames() == 2) { mask = mask | 4; }
+  if (sprite_enemy_load(buf) == 1) { mask = mask | 8; }
+  if (buf[0] == 0) { mask = mask | 16; }
+  if (buf[26] == 1) { mask = mask | 32; }
+  if (buf[110] == 1) {
+    if (buf[254] == 0) { mask = mask | 64; }
+  }
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 16; s.bh = 16; s.cw = 16; s.ch = 16;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 16, 16) == 0) { return 2; }
+  if (sprite_pal_fill(pal) != 7) { return 3; }
+
+  gfx_clear(&b, 0x00ABCDEF);
+  n = sprite_blit(&b, 2, 2, buf, 12, 12, 0, pal, 7);
+  if (n > 0) {
+    if (gfx_get(&b, 4, 4) == pal[1]) { mask = mask | 128; }
+  }
+
+  print(["f085 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

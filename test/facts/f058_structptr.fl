@@ -1,0 +1,53 @@
+// f058_structptr.fl — 2026-10-24(v2.2)：struct 指针下标的双端判据（10 位掩码全亮 = 退出码 42）
+//   p = struct Pt * ⇒ p[i] = **元素地址**（p 的值 + i×步长），与 struct 数组的 a[i] 同一口径。
+//   覆盖：读/写、元素内 char 字段、元素内定长数组字段、&p[i] 与 &a[i] 同址、
+//         p[i] 传给 struct 指针形参、struct 指针变量的声明处初值、用变量下标。
+struct Pt { int x; int y; char c; }
+struct Bag { int v; char buf[8]; }
+
+int get0_x(struct Pt *p) { return p[0].x; }
+int sum01(struct Pt *p) { return p[0].x + p[1].x; }
+
+int main() {
+  struct Pt a[3];
+  struct Pt *p;
+  int r = 0;
+  a[0].x = 1; a[0].y = 2; a[0].c = 'A';
+  a[1].x = 10; a[1].y = 20; a[1].c = 'B';
+  a[2].x = 100; a[2].y = 200; a[2].c = 'C';
+  p = &a[0];
+
+  if (p[0].x == 1) { r = r | 1; }
+  if (p[1].y == 20) { r = r | 2; }
+  if (p[2].x == 100) { r = r | 4; }
+
+  p[1].x = 11;
+  if (p[1].x == 11) { r = r | 8; }
+  if (a[1].x == 11) { r = r | 16; }
+
+  if (p[1].c == 'B') { r = r | 32; }
+  if (p[2].c == 'C') { r = r | 64; }
+
+  int q = get0_x(p);
+  if (q == 1) { r = r | 128; }
+  int s = sum01(p);
+  if (s == 12) { r = r | 256; }
+
+  if ((&p[1].y) == (&a[1].y)) { r = r | 512; }
+
+  int i = 2;
+  if (p[i].x == 100) { r = r | 1024; }
+
+  struct Pt *r2 = &p[1];
+  if (r2->x == 11) { r = r | 2048; }
+
+  struct Bag bg[2];
+  struct Bag *bp = &bg[0];
+  bp[1].buf[3] = 'z';
+  bp[1].v = 7;
+  if (bp[1].buf[3] == 'z') { r = r | 4096; }
+  if (bg[1].v == 7) { r = r | 8192; }
+
+  if (r == 16383) { return 42; }
+  return r % 256;
+}

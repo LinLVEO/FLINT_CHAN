@@ -1,0 +1,77 @@
+// f090_clear_stride.fl -- 修"残影"：gfx_clear / gfx_flash 必须按 stride 逐行清
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 场景：DIB 位图 64x32，逻辑视口 32x32（stride=64 > w=32）。
+// 先把整块 DIB 填 0xFF，再 gfx_clear 红色；逻辑区应变红，stride 外的留白应原样。
+//   bit0  (0,0) == 0x00FF0000
+//   bit1  (31,31) == 0x00FF0000（逻辑区右下角，旧实现清不到）
+//   bit2  (0,1) == 0x00FF0000（按 stride 跳行正确）
+//   bit3  stride 外 (32,0) 仍是 0xFF（没被误清）
+//   bit4  stride 外 (63,31) 仍是 0xFF
+//   bit5  整块 DIB 清完后，逻辑区外字节数 = 8192 - 32*32*4
+//   bit6  gfx_flash 也只处理逻辑区：(31,31) 变灰、stride 外仍 0xFF
+//   bit7  零尺寸缓冲不崩
+include "../../lib/gfx.fl"
+
+int count_outside(struct GfxBuf *b, int bw, int bh) {
+  char *p = b->bits;
+  int y = 0;
+  int x = 0;
+  int i = 0;
+  int n = 0;
+  while (y < bh) {
+    i = y * b->stride * 4;
+    x = 0;
+    while (x < bw) {
+      if (x >= b->w) {
+        if ((p[i] & 255) == 255) { n = n + 1; }
+      }
+      i = i + 4;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return n;
+}
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int mask = 0;
+  char *p = 0;
+  int i = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 32; s.cw = 32; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 32, 32) == 0) { return 2; }
+
+  p = b.bits;
+  i = 0;
+  while (i < 64 * 32 * 4) { p[i] = 255; i = i + 1; }
+
+  gfx_clear(&b, 0x00FF0000);
+  if (gfx_get(&b, 0, 0) == 0x00FF0000) { mask = mask | 1; }
+  if (gfx_get(&b, 31, 31) == 0x00FF0000) { mask = mask | 2; }
+  if (gfx_get(&b, 0, 1) == 0x00FF0000) { mask = mask | 4; }
+  if ((p[(0 * 64 + 32) * 4] & 255) == 255) { mask = mask | 8; }
+  if ((p[(31 * 64 + 63) * 4] & 255) == 255) { mask = mask | 16; }
+  if (count_outside(&b, 64, 32) == (64 - 32) * 32) { mask = mask | 32; }
+
+  gfx_clear(&b, 0x00000000);
+  gfx_flash(&b, 128);
+  if (gfx_get(&b, 31, 31) == 0x00808080) {
+    if ((p[(0 * 64 + 32) * 4] & 255) == 255) { mask = mask | 64; }
+  }
+
+  b.w = 0;
+  b.h = 0;
+  gfx_clear(&b, 0x00FFFFFF);
+  if (gfx_flash(&b, 128) == 1) { mask = mask | 128; }
+
+  print(["f090 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

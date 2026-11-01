@@ -30,7 +30,7 @@
 //   criterion: contains -> sub p0=11 p1=22 p2=33 ad1=4 ad2=8
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f032_int_sub_stride8.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
 //   E:\FLINT-lab\SPEC.md;E:\FLINT-lab\PROGRESS.md
 //

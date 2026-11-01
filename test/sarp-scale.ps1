@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Continue'
 $root = 'E:\FLINT-lab'
 $tmp = Join-Path $root 'tmp\sarp-scale'
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $boot = Join-Path $root 'boot\b1_emit.exe'
 $runs = 10
 $lengths = @(144, 176, 184, 188, 190, 192)

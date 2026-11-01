@@ -1,0 +1,94 @@
+// f057_str_into_core.fl -- v2.3.x str_into(dst[, cap], [...]) core probe (bitmask, all lit => exit 42)
+//   Every bit is one case; a red run prints the mask so it names the case that broke.
+//   BOTH ends must compile this file: real flint (src\parse.c) and boot (boot\lib_parse.fl).
+//   Deliberately NO int_64 / double / uint_* -- boot's type universe is int(4B)/char/pointer/struct.
+//
+// bit0  2-arg array form: str_into(buf, [...]) -> returns buf, content + NUL correct
+// bit1  3-arg pointer form: str_into(p, cap, [...]) with dst = &buf[0] (an arbitrary char* expr)
+// bit2  exact fit: cap == len+1 is enough (no truncation, no failure)
+// bit3  one byte short: cap == len -> returns 0 AND dst[0] == 0 (loud, never truncated)
+// bit4  dst == 0 -> returns 0 (nothing to write, must not crash)
+// bit5  cap < 1 -> returns 0.  NOTE: src\main.c :440-453 checks dst/cap BEFORE touching dst,
+//       so a too-small cap must leave dst[0] ALONE (this bit pins buf[0] = 'X' and asserts it
+//       is still 'X'; assert the write instead and real flint itself goes red).
+// bit6  self reference: str_into(buf, n, [buf]) -- segments read dst, copy target is the internal
+//       static buffer, so the two never overlap
+// bit7  two destinations stay independent
+// bit8  plain str([...]) still works after str_into calls (same begin/put_* leg)
+// bit9  assignment-statement position: t = str_into(buf, [...]);   (the 2nd allowed position)
+// bit10 return position: return str_into(dst, cap, [...]);          (the 3rd allowed position)
+char *mk_ret(char *dst, int n) {
+  // bit10: the return position (helper must be defined before main -- boot has no forward refs).
+  //   Both ends require a POINTER-returning function here (src\parse.c :1091 / lib_parse.fl ret_ptr).
+  return str_into(dst, n, ["r=", 5]);
+}
+
+int main() {
+  int mask = 0;
+
+  // bit0: 2-arg array form, cap inferred from the declaration
+  char b0[16];
+  char *r0 = str_into(b0, ["a=", 7]);
+  if (r0 == &b0[0] && b0[0] == 'a' && b0[1] == '=' && b0[2] == '7' && b0[3] == 0) { mask = mask | 1; }
+
+  // bit1: 3-arg pointer form with a non-identifier dst expression
+  char b1[16];
+  char *r1 = str_into(&b1[0], 16, ["x=", 1, 2]);
+  if (r1 == &b1[0] && b1[0] == 'x' && b1[1] == '=' && b1[2] == '1' && b1[3] == '2' && b1[4] == 0) { mask = mask | 2; }
+
+  // bit2: exact fit (cap includes the trailing NUL)
+  char b2[4];
+  char *r2 = str_into(b2, ["abc"]);
+  if (r2 == &b2[0] && b2[0] == 'a' && b2[1] == 'b' && b2[2] == 'c' && b2[3] == 0) { mask = mask | 4; }
+
+  // bit3: one byte short -> loud failure, dst cleared
+  char b3[3];
+  char *r3 = str_into(b3, ["abc"]);
+  if (r3 == 0 && b3[0] == 0) { mask = mask | 8; }
+
+  // bit4: dst == 0
+  char *nul = 0;
+  char *r4 = str_into(nul, 8, ["zz"]);
+  if (r4 == 0) { mask = mask | 16; }
+
+  // bit5: cap < 1 -> returns 0, dst untouched (src checks dst/cap before writing anything)
+  char b5[8];
+  char *p5 = &b5[0];
+  b5[0] = 'X';
+  char *r5 = str_into(p5, 0, ["q"]);
+  if (r5 == 0 && b5[0] == 'X') { mask = mask | 32; }
+
+  // bit6: self reference -- dst is also the segment source (the work order's str_into(buf, n, [buf]))
+  char b6[16];
+  char *r6 = str_into(b6, 16, ["PQ"]);
+  if (r6 == 0) { return 0 - 1; }
+  char *r6b = str_into(b6, 16, ["X", b6]);
+  if (r6b == &b6[0] && b6[0] == 'X' && b6[1] == 'P' && b6[2] == 'Q' && b6[3] == 0) { mask = mask | 64; }
+
+  // bit7: two destinations do not clobber each other
+  char d1[16];
+  char d2[16];
+  char *t1 = str_into(d1, ["one"]);
+  char *t2 = str_into(d2, ["two"]);
+  if (t1 == &d1[0] && t2 == &d2[0] && d1[0] == 'o' && d1[2] == 'e' && d1[3] == 0
+      && d2[0] == 't' && d2[2] == 'o' && d2[3] == 0) { mask = mask | 128; }
+
+  // bit8: plain str() unchanged after str_into
+  char *s8 = str(["ok", 9]);
+  if (s8 != 0 && s8[0] == 'o' && s8[1] == 'k' && s8[2] == '9' && s8[3] == 0) { mask = mask | 256; }
+
+  // bit9: assignment-statement position
+  char b9[16];
+  char *t9;
+  t9 = str_into(b9, ["s=", 3]);
+  if (t9 == &b9[0] && b9[0] == 's' && b9[1] == '=' && b9[2] == '3' && b9[3] == 0) { mask = mask | 512; }
+
+  // bit10: return position
+  char ba[16];
+  char *ta = mk_ret(&ba[0], 16);
+  if (ta == &ba[0] && ba[0] == 'r' && ba[1] == '=' && ba[2] == '5' && ba[3] == 0) { mask = mask | 1024; }
+
+  if (mask != 2047) { print(["mask=", mask, "\n"]); }
+  if (mask == 2047) { return 42; }
+  return mask;
+}

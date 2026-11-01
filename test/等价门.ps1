@@ -31,7 +31,7 @@ if (-not $PSScriptRoot) { $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCom
 if (-not $PSScriptRoot) { throw '等价门: 拿不到脚本所在目录' }
 $root    = Split-Path $PSScriptRoot -Parent
 $samples = Join-Path $PSScriptRoot 'samples'
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $work    = Join-Path $PSScriptRoot 'tmp\eqgate'
 if (-not $Baseline) { $Baseline = Join-Path $PSScriptRoot '等价门-指纹.txt' }
 

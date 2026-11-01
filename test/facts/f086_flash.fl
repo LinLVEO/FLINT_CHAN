@@ -1,0 +1,64 @@
+// f086_flash.fl -- 打击感闪白：gfx_flash（叠白不抹画面）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  黑底 flash(128) -> 0x00808080
+//   bit1  flash(0) -> 不变（黑）
+//   bit2  flash(255) -> 0x00FFFFFF
+//   bit3  白底 flash(128) -> 仍 0x00FFFFFF（255-v=0）
+//   bit4  纯红 flash(128) -> 0x00FF8080
+//   bit5  flash(-1) 返回 0 且像素不变
+//   bit6  flash(300) 夹到 255 -> 全白
+//   bit7  零尺寸缓冲不崩（b.w=0 时返回 1、不写）
+include "../../lib/gfx.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int mask = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 8; s.bh = 8; s.cw = 8; s.ch = 8;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 8, 8) == 0) { return 2; }
+
+  gfx_clear(&b, 0x00000000);
+  gfx_flash(&b, 128);
+  if (gfx_get(&b, 0, 0) == 0x00808080) { mask = mask | 1; }
+
+  gfx_clear(&b, 0x00000000);
+  gfx_flash(&b, 0);
+  if (gfx_get(&b, 0, 0) == 0x00000000) { mask = mask | 2; }
+
+  gfx_clear(&b, 0x00000000);
+  gfx_flash(&b, 255);
+  if (gfx_get(&b, 0, 0) == 0x00FFFFFF) { mask = mask | 4; }
+
+  gfx_clear(&b, 0x00FFFFFF);
+  gfx_flash(&b, 128);
+  if (gfx_get(&b, 0, 0) == 0x00FFFFFF) { mask = mask | 8; }
+
+  gfx_clear(&b, 0x00FF0000);
+  gfx_flash(&b, 128);
+  if (gfx_get(&b, 0, 0) == 0x00FF8080) { mask = mask | 16; }
+
+  gfx_clear(&b, 0x00123456);
+  if (gfx_flash(&b, -1) == 0) {
+    if (gfx_get(&b, 0, 0) == 0x00123456) { mask = mask | 32; }
+  }
+
+  gfx_clear(&b, 0x00000000);
+  gfx_flash(&b, 300);
+  if (gfx_get(&b, 0, 0) == 0x00FFFFFF) { mask = mask | 64; }
+
+  b.w = 0;
+  b.h = 0;
+  if (gfx_flash(&b, 128) == 1) { mask = mask | 128; }
+  b.w = 8;
+  b.h = 8;
+
+  print(["f086 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

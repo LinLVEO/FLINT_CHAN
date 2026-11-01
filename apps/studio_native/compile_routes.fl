@@ -1,0 +1,73 @@
+// compile_routes.fl — /api/compile：写临时源 → 起 hlc.exe → 抓输出 → 解析诊断 → 推 SSE
+
+// 子进程：cmd /c "hlc.exe <src> -o <exe> > <log> 2>&1"
+// 返回子进程退出码（-1 = 起不来）
+int run_cmd(char *cmdline) {
+  int pi[6];
+  int r = 0;
+  int c = 0;
+  int i = 0;
+  char si[104];
+
+  i = 0;
+  while (i < 6) { pi[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < 104) { si[i] = 0; i = i + 1; }
+  si[0] = 104;
+
+  // CreateProcessA 会**就地改**命令行缓冲 ⇒ 传进来到的必须是可写内存
+  r = CreateProcessA(0, cmdline, 0, 0, 0, 0x08000000, 0, 0, &si[0], pi);
+  if (r == 0) { return 0 - 1; }
+  WaitForSingleObject(pi[0], 20000);
+  GetExitCodeProcess(pi[0], &c);
+  CloseHandle(pi[0]);
+  CloseHandle(pi[1]);
+  return c;
+}
+
+// 从编译器输出里抠「第 N 行第 M 列」：0=没找到
+int parse_diag(char *t, int n) {
+  int k = 0;
+  int i = 0;
+  int v = 0;
+  g_line = 0;
+  g_col = 0;
+  if (n <= 0) { return 0; }
+  k = find_sub(t, 0, n, "第");
+  if (k < 0) { return 0; }
+  i = k + 3;                                   // 跳过 "第"（UTF-8 三字节）
+  while (i < n && (t[i] < 48 || t[i] > 57)) { i = i + 1; }
+  while (i < n && t[i] >= 48 && t[i] <= 57) { g_line = g_line * 10 + (t[i] - 48); i = i + 1; }
+  k = find_sub(t, i, n - i, "行第");
+  if (k < 0) { return g_line > 0; }
+  i = k + 5;
+  while (i < n && (t[i] < 48 || t[i] > 57)) { i = i + 1; }
+  while (i < n && t[i] >= 48 && t[i] <= 57) { g_col = g_col * 10 + (t[i] - 48); i = i + 1; }
+  return g_line > 0;
+}
+
+// 诊断的一句话改法（第一版：按关键字给可执行建议，宁可泛也不能空）
+int diag_fix(char *t, int n, char *d, int cap) {
+  int p = 0;
+  if (find_sub(t, 0, n, "暂不支持") >= 0) {
+    p = ap(d, p, "这个写法当前语言不支持；换等价写法，或把它作为语言能力补进编译器");
+  } else if (find_sub(t, 0, n, "未声明") >= 0) {
+    p = ap(d, p, "检查名字拼写/作用域；FLINT 没有前向声明，函数要先定义后调用");
+  } else if (find_sub(t, 0, n, "期望") >= 0) {
+    p = ap(d, p, "检查该行的括号/分号是否配对，以及这里的语法位置是否允许这种语句");
+  } else {
+    p = ap(d, p, "按报错位置逐字检查该行；常见原因是缺少分号、括号不配对或类型不匹配");
+  }
+  return p;
+}
+
+// 给所有 SSE 订阅者推一帧
+int sse_broadcast(char *txt, int n) {
+  int i = 0;
+  int c = 0;
+  while (i < 8) {
+    if (g_cst[i] == 2) { send(g_cl[i], txt, n, 0); c = c + 1; }
+    i = i + 1;
+  }
+  return c;
+}

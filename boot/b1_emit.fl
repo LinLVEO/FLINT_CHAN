@@ -2064,10 +2064,25 @@ int build_pe(struct W *cw, struct W *ow, struct Emit *em) {
   int ndll = af[0];
   int napi = af[1];
   int nf2 = em->nfuncs;                     // B2i：api 项不再限定在函数表前部 → 按函数下标过滤
-  int gpos[16]; int glen[16]; int gcnt[16]; int gint[16]; int giat[16]; int gname[16]; int gctr[16];
-  int ahint[512]; int aslot[512]; int agrp[512]; int aord[512];
+  // 2026-10-24（容量刀）：这些表**按函数项数/模块数**开，且改到堆上。
+  //   ① `aord/ahint/aslot/agrp` 的下标是**函数表下标 i**（下面 `aord[i]`、`agrp[fi]`），
+  //      函数数 > 导入数时"按导入数开"就是静默越界写 —— 旧写法 `int aord[512]` 正好
+  //      和函数表上限 512 一样大，所以这个错一直被数字巧合盖着。
+  //   ② 函数表提到 cap_funcs()（8192）后，栈上 512 项必炸 ⇒ 全部 VirtualAlloc + 单点。
+  int *gpos = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *glen = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *gcnt = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *gint = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *giat = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *gname = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *gctr = VirtualAlloc(0, cap_groups() * 8, 0x3000, 4);
+  int *ahint = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *aslot = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *agrp = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *aord = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  if (gpos == 0 || ahint == 0 || aslot == 0 || agrp == 0 || aord == 0) { return 0; }
   int g = 0;
-  while (g < 16) {
+  while (g < cap_groups()) {
     gcnt[g] = 0; gint[g] = 0; giat[g] = 0; gname[g] = 0; gpos[g] = 0; glen[g] = 0; gctr[g] = 0;
     g = g + 1;
   }
@@ -2295,7 +2310,11 @@ int build_pe(struct W *cw, struct W *ow, struct Emit *em) {
   //   HIGH_ENTROPY_VA 同置（0x0060/0x0160）才 15 ⇒ "扛不扛得住随机基址"本身才是被测性质，
   //   当时"开了就坏"的证据并不能证明坏在 ASLR 那一行上。
   w16(ow, 0x0160);
-  w32(ow, 0x100000); w32(ow, 0);     // StackReserve
+  w32(ow, 0x1000000); w32(ow, 0);    // StackReserve = 16 MiB（2026-10-24：1 MiB → 16 MiB。
+                                     //   1 MiB 是 Windows 默认，但本语言的大数组/结构体数组都在栈帧里
+                                     //   （`int buf[10000]` = 80KB、`struct P a[600]` = 4.8KB），
+                                     //   栈保留是**虚拟保留**、不占物理内存 ⇒ 宁可给够，别让大程序在
+                                     //   第 1 MiB 处 0xC00000FD（栈溢出）。真 flint 侧同步改：src\pe.c）
   w32(ow, 0x1000); w32(ow, 0);       // StackCommit
   w32(ow, 0x100000); w32(ow, 0);     // HeapReserve
   w32(ow, 0x1000); w32(ow, 0);       // HeapCommit
@@ -2555,6 +2574,7 @@ int src_has_print(char *s, int n) {
 
 // —— v1.5.0：源码里是否用到 str 内建（str ( [ ）——与 src_has_print 同族扫描 ——
 //   词边界 + 跳注释/字符串/字符字面量（口径与 src_has_print 逐条一致，只是把关键字换成 str）
+//   v2.3.x：str_into ( 也算（两条腿共用 lib_str.fl；真 flint 的 uses_str 同样把两者并列）
 int src_has_str(char *s, int n) {
   int i = 0;
   while (i < n) {
@@ -2579,13 +2599,26 @@ int src_has_str(char *s, int n) {
                && s[i+1] == 't' && s[i+2] == 'r'
                && (i == 0 || is_ident_ch(s[i - 1]) == 0)) {
       int j = i + 3;
-      while (j < n && (s[j] == ' ' || s[j] == 9)) { j = j + 1; }
-      if (j < n && s[j] == '(') {
-        int q = j + 1;
-        while (q < n && (s[q] == ' ' || s[q] == 9)) { q = q + 1; }
-        if (q < n && s[q] == '[') { return 1; }
+      // v2.3.x（2026-10-24）：str_into(dst[, cap], [...]) 也走同一条腿 —— 它复用 lib_str.fl 的
+      //   begin / put_* 全套，收尾换成 _flint_str_end_to。判据与真 flint 的 uses_str 同口径
+      //   （src\main.c :530）：标识符 str_into **紧跟 '('** 就注入，不要求括号后是 '['
+      //   （前两个实参是 dst/cap 表达式）。本函数是字符级扫描，注释/字符串已在上面跳过。
+      if (j + 5 <= n && s[j] == '_' && s[j+1] == 'i' && s[j+2] == 'n'
+          && s[j+3] == 't' && s[j+4] == 'o'
+          && (j + 5 >= n || is_ident_ch(s[j + 5]) == 0)) {
+        int q2 = j + 5;
+        while (q2 < n && (s[q2] == ' ' || s[q2] == 9)) { q2 = q2 + 1; }
+        if (q2 < n && s[q2] == '(') { return 1; }
+        i = j + 5;
+      } else {
+        while (j < n && (s[j] == ' ' || s[j] == 9)) { j = j + 1; }
+        if (j < n && s[j] == '(') {
+          int q = j + 1;
+          while (q < n && (s[q] == ' ' || s[q] == 9)) { q = q + 1; }
+          if (q < n && s[q] == '[') { return 1; }
+        }
+        i = i + 3;
       }
-      i = i + 3;
     } else {
       i = i + 1;
     }
@@ -2822,9 +2855,15 @@ int join_exedir(struct IncSt *st, char *out, char *mid, char *name) {
 // 返回写出的字节数；负 = 错误（-1/-2/-3 读文件，-4 include 语法，-5 输出超长，-6 深度超限，
 //   -7 表分配失败，-8 include 循环引用）；深度上限 4（顶层 0）
 int splice_file(char *name, char *out, int outcap, struct IncSt *st) {
-  char *fbuf = VirtualAlloc(0, 262144, 0x3000, 4);   // B2h：堆化（原栈上 8KB，装不下 45KB 的库）
+  // 2026-11-01（v2.2.0 二维数组）：**256KB → 512KB** —— 单个 include 文件的读取上限。
+  //   起因：lib_parse.fl 加了二维数组的解析（约 +4.5KB）后 262,254 字节 > 旧 cap 262,144
+  //   ⇒ read_file 返回 **-3（源超长）**，而调用点打印成 "cannot read 'self1.fl' (err=-3)"
+  //   （文案误导，真因是**单文件**缓冲不够；与 2026-09-21 的 -5 是同一族"容量墙报成读失败"）。
+  //   lib_parse.fl 之后只增不减 ⇒ 给一倍余量；递归深度 ≤4 ⇒ 峰值 4×512KB=2MB，可忽略。
+  //   ⚠️ 这不是发射形状：只影响 boot 自己读源码的缓冲，产物字节不变（自举不动点仍靠 self1/self2）。
+  char *fbuf = VirtualAlloc(0, 524288, 0x3000, 4);   // B2h：堆化（原栈上 8KB，装不下 45KB 的库）
   if (fbuf == 0) return -7;
-  int n = read_file(name, fbuf, 262144);
+  int n = read_file(name, fbuf, 524288);
   if (n < 0) return n;
   int i = 0;
   int o = 0;
@@ -3127,6 +3166,7 @@ int compile_one(char *src, int n, char *name, struct Env *e) {
   ow.p = e->out;
   ow.cur = 0;
   int total = build_pe(&cw, &ow, &em);
+  if (total <= 0) return 7;                  // 2026-10-24：PE 组装失败（导入表/模块表分配失败）⇒ 响亮失败
   int *h = CreateFileA(name, 0x40000000, 0, 0, 2, 0x80, 0);   // GENERIC_WRITE/CREATE_ALWAYS
   if (h == 0) return 4;
   int written = 0;
@@ -3143,16 +3183,16 @@ int compile_one(char *src, int n, char *name, struct Env *e) {
 int main() {
   // B2h：大缓冲/表全部 VirtualAlloc 堆化（栈仅 1MB；char 数组按 8B/槽更不能上栈）
   //   int 表按 8 字节/元素分配（FLINT int 数组下标 scale 8）；容量见行尾注释
-  char *src = VirtualAlloc(0, 524288, 0x3000, 4);        // 源码（含 include 拼接；原 10KB）
+  char *src = VirtualAlloc(0, 1048576, 0x3000, 4);       // 源码（含 include 拼接；2026-10-24：512KB → 1MiB
   //   2026-09-21（卡 T-20260921-215305 第二刀）：**256KB → 512KB** —— 合并源码 = b1_emit.fl(103KB)
   //   ＋ lib_parse.fl(156KB) ＋ lib_token.fl(5.8KB) = **264,582 字节**，第二刀把 boot 源码加长 3.5KB 后
   //   正好撞破旧上限 ⇒ splice_file 报 **-5**（打印成"cannot read …(err=-5)"，文案误导，真因是拼接缓冲溢出）。
   //   真 flint 是动态缓冲、没有这道墙 ⇒ 按「boot 比真 flint 窄的上限 = 断点」的口径对齐（余量约 49%）。
-  char *src2 = VirtualAlloc(0, 524288, 0x3000, 4);       // 注入 lib_print.fl 后（同口径，必须一起抬）
+  char *src2 = VirtualAlloc(0, 1048576, 0x3000, 4);      // 注入 lib_print.fl 后（2026-10-24：同步 1MiB）
   char *libbuf = VirtualAlloc(0, 8192, 0x3000, 4);
-  char *code = VirtualAlloc(0, 524288, 0x3000, 4);       // 机器码字节
-  char *out = VirtualAlloc(0, 1048576, 0x3000, 4);       // PE 映像字节
-  char *spool = VirtualAlloc(0, 262144, 0x3000, 4);      // 字符串池（字节）
+  char *code = VirtualAlloc(0, 2097152, 0x3000, 4);      // 机器码字节（2026-10-24：512KB → 2MiB）
+  char *out = VirtualAlloc(0, 4194304, 0x3000, 4);       // PE 映像字节（2026-10-24：1MiB → 4MiB）
+  char *spool = VirtualAlloc(0, 1048576, 0x3000, 4);     // 字符串池（字节；2026-10-24：256KB → 1MiB）
   int *kinds = VirtualAlloc(0, 2097152, 0x3000, 4);      // token 表 **262144**（2026-09-21：65536 → 262144；
   int *poss = VirtualAlloc(0, 2097152, 0x3000, 4);       //   tokenize 超 cap 是**静默截断**，宁可给够）
   int *lens = VirtualAlloc(0, 2097152, 0x3000, 4);
@@ -3168,19 +3208,19 @@ int main() {
   int *vslots = VirtualAlloc(0, 131072, 0x3000, 4);
   int *vad = VirtualAlloc(0, 131072, 0x3000, 4);         // v1.4.31：装地址的 int 标记（同上 16384）
   int *blk = VirtualAlloc(0, 1048576, 0x3000, 4);        // **131072** 块项（2026-09-21：16384 → 131072）
-  int *fpos = VirtualAlloc(0, 4096, 0x3000, 4);          // 512 函数
-  int *flen = VirtualAlloc(0, 4096, 0x3000, 4);
-  int *fnargs = VirtualAlloc(0, 4096, 0x3000, 4);
-  int *fpty = VirtualAlloc(0, 4096, 0x3000, 4);
-  int *fvc = VirtualAlloc(0, 4096, 0x3000, 4);
-  int *fbody = VirtualAlloc(0, 4096, 0x3000, 4);
+  int *fpos = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);          // cap_funcs() 函数（单点，2026-10-24）
+  int *flen = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *fnargs = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *fpty = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *fvc = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *fbody = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
   // 第四刀（卡 T-20260921-232138）：提升计划表 —— 每函数 1 项（个数）+ 每函数 4 项（槽号 = 池大小）
-  int *preg_n = VirtualAlloc(0, 4096, 0x3000, 4);
-  int *preg_slot = VirtualAlloc(0, 16384, 0x3000, 4);
+  int *preg_n = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
+  int *preg_slot = VirtualAlloc(0, cap_funcs() * 32, 0x3000, 4);   // 每函数 4 项 × 8 字节
   int *pmark = VirtualAlloc(0, 1048576, 0x3000, 4);      // 第四刀：节点引用标记（与 AST 表同尺寸）
-  char *stmp = VirtualAlloc(0, 262144, 0x3000, 4);       // 2026-10-18（str5）：字符串池重排暂存
+  char *stmp = VirtualAlloc(0, 1048576, 0x3000, 4);      // 2026-10-18（str5）：字符串池重排暂存；2026-10-24：256KB → 1MiB
   int *sseen = VirtualAlloc(0, 1048576, 0x3000, 4);      // 2026-10-18（str5）：池项认领标记
-  int *fstart = VirtualAlloc(0, 4096, 0x3000, 4);
+  int *fstart = VirtualAlloc(0, cap_funcs() * 8, 0x3000, 4);
   int *args = VirtualAlloc(0, 524288, 0x3000, 4);         // **65536** 实参（2026-09-21：8192 → 65536）
   int *patch_pos = VirtualAlloc(0, 65536, 0x3000, 4);    // 8192 调用点
   int *patch_fn = VirtualAlloc(0, 65536, 0x3000, 4);
@@ -3290,7 +3330,7 @@ int main() {
   char canon0[320];
   canon_path(inb, canon0);
   inc_add(&ist, canon0);
-  int n = splice_file(inb, src, 524288, &ist);     // B2g：include 拼接（2026-09-21 第二刀：256KB → 512KB，见上方 src 注释）
+  int n = splice_file(inb, src, 1048576, &ist);     // B2g：include 拼接（2026-10-24：512KB → 1MiB，与 src 同口径）
   if (n < 0) {
     print(["cannot read '", inb, "' (err=", n, ")\n"]);
     return 3;
@@ -3324,6 +3364,7 @@ int main() {
       while (i2 < ln2) { src2[o] = libbuf[i2]; o = o + 1; i2 = i2 + 1; }
       src2[o] = 10; o = o + 1;
     }
+    if (o + n + 1 >= 1048576) { print(["source too large for lib injection\n"]); return 4; }
     i = 0;
     while (i < n) { src2[o] = src[i]; o = o + 1; i = i + 1; }
     src2[o] = 0;
@@ -3340,7 +3381,7 @@ int main() {
   if (need_alloc == 1 || need_free == 1) {
     int has_alloc = src_has_ident(prog, pn, "VirtualAlloc");
     int has_free = src_has_ident(prog, pn, "VirtualFree");
-    if (pn + 128 >= 524288) { print(["source too large for builtin api injection\n"]); return 4; }
+    if (pn + 128 >= 1048576) { print(["source too large for builtin api injection\n"]); return 4; }
     if (need_alloc == 1 && has_alloc == 0) {
       pn = app_str(prog, pn, "\napi kernel32 ptr VirtualAlloc(int, int, int, int);\n");
     }

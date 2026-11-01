@@ -1,0 +1,93 @@
+// starr1.fl —— v2.1.0：局部 struct 数组 `struct S a[N];` 的成绩单（8 位掩码全亮 → 退 42）
+// 语言语义（与 FLINT 既有数组/struct 同源，别按 C 的 sizeof 想）：
+//   · 每元素占 **ceil(size/8) 个 8 字节槽** ⇒ 元素步长 = 8*ceil(size/8)
+//     （Pair 8B→8；Three 12B→16；Hold 16B→16；Tiny 8B→8；Buf 16B→16）
+//   · `a[i]` 作表达式 = **元素地址**（同「struct 变量名作表达式 = 首地址」），所以 `&a[i]` 就是这个值
+//   · struct 没有整体值语义：`a[i]` 不能整体赋值，只能 a[i].字段 读写
+// 覆盖：
+//   ① 单元素字段写读（左右邻元素不受影响）
+//   ② 循环填 / 循环读回求和（相邻元素互不覆盖）
+//   ③ 元素步长精确钉死（&t[1].n0 == &t[0].n1 + 12，Three 12B→步长 16）
+//   ④ 含指针字段的元素各自独立（穿透写只改各自目标）
+//   ⑤ &a[i] 作 struct S * 实参（形参写 p->n，调用方可见）
+//   ⑥ 数组名作实参（退化成 struct S * = 首元素地址）
+//   ⑦ char 字段按字节读写（含 >127 的 200 按 0..255 读回）且不踩本元素 int 字段
+//   ⑧ 元素内的定长数组字段 a[i].buf[j] 双下标（相邻元素的 buf/tag 不串）
+struct Pair  { int n; int m; }
+struct Three { int n0; int n1; int n2; }
+struct Hold  { int *p; int v; }
+struct Tiny  { char c; int n; }
+struct Buf   { int tag; int buf[3]; }
+
+void setn(struct Pair *p, int v) { p->n = v; }
+
+int main() {
+  int mask = 0;
+  int i = 0;
+  int sum = 0;
+
+  // ① 单元素写读 + 元素字段作左值（复合赋值 / ++）
+  struct Pair a[4];
+  a[0].n = 0;
+  a[1].n = 0;
+  a[2].n = 0;
+  a[3].n = 0;
+  a[2].n = 7;
+  a[2].n += 1;
+  a[1].n++;
+  if (a[2].n == 8 && a[1].n == 1 && a[3].n == 0) mask = mask | 1;
+
+  // ② 循环填 / 循环读（0+1+4+9+16 = 30）
+  struct Pair b[5];
+  while (i < 5) { b[i].n = i * i; i = i + 1; }
+  i = 0;
+  while (i < 5) { sum = sum + b[i].n; i = i + 1; }
+  if (sum == 30) mask = mask | 2;
+
+  // ③ 步长钉死
+  struct Three t[3];
+  t[0].n0 = 11; t[0].n1 = 12; t[0].n2 = 13;
+  t[1].n0 = 21; t[1].n1 = 22; t[1].n2 = 23;
+  t[2].n0 = 31; t[2].n1 = 32; t[2].n2 = 33;
+  char *q0;
+  char *q1;
+  q0 = (char *)&t[0].n1;
+  q1 = (char *)&t[1].n0;
+  if (t[0].n2 == 13 && t[1].n0 == 21 && t[2].n2 == 33 && q1 == q0 + 12) mask = mask | 4;
+
+  // ④ 指针字段元素
+  int x = 111;
+  int y = 222;
+  struct Hold h[2];
+  h[0].p = &x; h[0].v = 1;
+  h[1].p = &y; h[1].v = 2;
+  *(h[1].p) = 444;
+  if (h[0].v == 1 && h[1].v == 2 && *(h[0].p) == 111 && y == 444) mask = mask | 8;
+
+  // ⑤ + ⑥ 取址形态 / 数组名形态作 struct S * 实参
+  setn(&a[3], 77);
+  setn(a, 55);
+  if (a[3].n == 77 && a[0].n == 55) mask = mask | 16 | 32;
+
+  // ⑦ char 字段
+  struct Tiny c[3];
+  c[0].c = 1;   c[0].n = 1000;
+  c[1].c = 2;   c[1].n = 2000;
+  c[2].c = 200; c[2].n = 3000;
+  if (c[0].c == 1 && c[1].c == 2 && c[2].c == 200
+      && c[0].n == 1000 && c[1].n == 2000 && c[2].n == 3000) mask = mask | 64;
+
+  // ⑧ 元素内定长数组字段
+  struct Buf g[2];
+  g[0].tag = 9;
+  g[1].tag = 10;
+  i = 0;
+  while (i < 3) { g[0].buf[i] = i + 1; g[1].buf[i] = (i + 1) * 10; i = i + 1; }
+  if (g[0].tag == 9 && g[1].tag == 10
+      && g[0].buf[0] == 1 && g[0].buf[2] == 3
+      && g[1].buf[0] == 10 && g[1].buf[2] == 30) mask = mask | 128;
+
+  print(["mask=", mask, "\n"]);
+  if (mask == 255) return 42;
+  return mask;
+}

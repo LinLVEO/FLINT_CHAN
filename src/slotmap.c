@@ -67,6 +67,11 @@ static int g_bb = 1;         // 当前基本块号（M3：从 1 起；边界处 
 static int g_bb_reasons[BB_REASON_N];  // 边界理由计数（本函数）
 static Buf *g_code = NULL;   // 本函数的代码缓冲（M4：边界写回要用它发字节）
 static int g_nreg = 0;       // 本函数分配到的寄存器个数
+// v5（2026-10-21，D-2）：调试版（-debug）**关掉寄存器驻留**。
+//   理由：调试器读变量读的是帧槽；驻留期间帧槽是旧值（首访 load、出口才 store），
+//   ⇒ 不关的话 variables 接口会系统性给错值。关掉只影响被调程序的寄存器使用，
+//   语义（值、退出码、print）不变 —— 判据：debug 门 61 项 + run-tests 1051 项。
+static int g_no_regs = 0;
 static unsigned long g_reloads_now = 0, g_spills_now = 0;  // M4 实测计数（本函数）
 
 // ===== 可用的 callee-saved 寄存器（Win64 ABI：rbx / r12 / r13 / r14 / r15）=====
@@ -194,7 +199,7 @@ static SlotLoc *sl_get(int off) {
   if (g_nsl == g_slcap) {
     int cap = g_slcap ? g_slcap * 2 : 32;
     SlotLoc *p = realloc(g_sl, (size_t)cap * sizeof(SlotLoc));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     g_sl = p; g_slcap = cap;
   }
   SlotLoc *s = &g_sl[g_nsl++];
@@ -309,8 +314,11 @@ void slotmap_note_call(void) {
 //         而不是等到发射到某一条时才由 sl_demote 兜住（那时已经晚了一个控制流分支）。
 //   判据：本轮全量门（回归 1009 / boot 213 / 差分门 / wx / debug / strict / 等价门）跑下来一次都没触发
 //      ⇒ 10 处 sl_demote 在当前语言子集里**不可达**（这是实测事实，不是推理）。
+void slotmap_set_no_regs(int on) { g_no_regs = on ? 1 : 0; }
+
 int slotmap_plan_regs(int has_call) {
   g_nreg = 0;
+  if (g_no_regs) return 0;   // D-2：调试版一律留在内存（见 g_no_regs 的说明）
   (void)has_call;   // M5 ②：条件⑤ 已放开（原先这里 `if (has_call) return 0;`）
   for (int i = 0; i < g_nsl; i++) {
     SlotLoc *s = &g_sl[i];

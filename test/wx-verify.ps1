@@ -24,15 +24,16 @@
 # NOTE: this file is deliberately ASCII-only. A .ps1 without a BOM gets decoded as GBK by PS 5.1 and
 #   reports fake syntax errors -- keeping it ASCII-only makes that failure mode impossible.
 #
-# usage: powershell -NoProfile -ExecutionPolicy Bypass -File test\wx-verify.ps1 [-BaselineExe .\flint_before_wx.exe]
+# usage: powershell -NoProfile -ExecutionPolicy Bypass -File test\wx-verify.ps1 [-BaselineExe .\archive\exe\flint_before_wx.exe]
 
-param([string]$BaselineExe = '.\flint_before_wx.exe')
+# 2026-10-31 repo hygiene: the baseline exes moved from the repo root to archive\exe\.
+param([string]$BaselineExe = '.\archive\exe\flint_before_wx.exe')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $base  = Join-Path $root $BaselineExe
 $probe = Join-Path $root 'libcs\wxprobe\wxprobe.exe'
 # v1.4.25: crashprobe -- observe a product's fault through a debugger instead of waiting on its exit

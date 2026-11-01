@@ -1,0 +1,99 @@
+// grid.fl -- 游戏 M1：tile 地图（一维 int 数组，m[ty*w+tx]）+ camera + 视口裁剪
+//
+// 用法：include "grid.fl"（与本文件同目录；也可 include "../../lib/grid.fl"）
+// 依赖：gfx.fl 的 struct GfxBuf / gfx_rect
+//
+// 设计三条（M1）：
+//   ① 二维数组手工一维化：tiles[ty*w + tx]（本编译器 int* 索引步长 = 8 字节槽，
+//      与局部 int 数组的元素步长一致；不新增语法）；
+//   ② camera 偏移 + **只遍历可见 tile**（不是画全部再靠裁剪）：可见范围由视口尺寸和
+//      tile 尺寸现算，两端夹到 [0,w]/[0,h]，屏外时循环体为 0 次；
+//   ③ 部分越界的 tile 交给 gfx_rect 自带的矩形裁剪（返回实际写入像素数）。
+include "gfx.fl"
+
+// 地图视图（局部变量，跟着调用栈走）
+struct Grid { int *tiles; int w; int h; int tw; int th; }   // tw/th = 单 tile 像素宽高
+
+// 绑定地图：buf = 一维 int 数组（长度 w*h），tw/th = 单 tile 像素尺寸。1=成功，0=参数非法。
+int grid_init(struct Grid *g, int *buf, int w, int h, int tw, int th) {
+  if (buf == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  if (tw <= 0) { return 0; }
+  if (th <= 0) { return 0; }
+  g->tiles = buf;
+  g->w = w;
+  g->h = h;
+  g->tw = tw;
+  g->th = th;
+  return 1;
+}
+
+// 读 tile 号（二维索引 m[ty*w+tx]）；越界返回 -1。
+int grid_at(struct Grid *g, int tx, int ty) {
+  if (tx < 0) { return -1; }
+  if (ty < 0) { return -1; }
+  if (tx >= g->w) { return -1; }
+  if (ty >= g->h) { return -1; }
+  return g->tiles[ty * g->w + tx];
+}
+
+// 向下取整除法（b > 0）。本编译器 `/` 截断向零，负数时要再减 1。
+int grid_floor_div(int a, int b) {
+  int q = a / b;
+  if (a < 0) {
+    if (q * b != a) { q = q - 1; }
+  }
+  return q;
+}
+
+// 向上取整除法（b > 0）。
+int grid_ceil_div(int a, int b) {
+  int q = a / b;
+  if (a > 0) {
+    if (q * b != a) { q = q + 1; }
+  }
+  return q;
+}
+
+// 画一帧：只遍历与视口相交的 tile，颜色 = 0x00100000 + tile号*0x00010101。
+// 返回**实际写入**的像素数（部分越界的 tile 由 gfx_rect 裁剪后计数）。
+int grid_draw(struct GfxBuf *b, struct Grid *g, int cam_x, int cam_y) {
+  int tx0 = 0;
+  int tx1 = 0;
+  int ty0 = 0;
+  int ty1 = 0;
+  int tx = 0;
+  int ty = 0;
+  int px = 0;
+  int py = 0;
+  int t = 0;
+  int n = 0;
+  tx0 = grid_floor_div(cam_x, g->tw);
+  ty0 = grid_floor_div(cam_y, g->th);
+  tx1 = grid_ceil_div(cam_x + b->w, g->tw);
+  ty1 = grid_ceil_div(cam_y + b->h, g->th);
+  if (tx0 < 0) { tx0 = 0; }
+  if (ty0 < 0) { ty0 = 0; }
+  if (tx0 > g->w) { tx0 = g->w; }
+  if (ty0 > g->h) { ty0 = g->h; }
+  if (tx1 > g->w) { tx1 = g->w; }
+  if (ty1 > g->h) { ty1 = g->h; }
+  if (tx1 < 0) { tx1 = 0; }
+  if (ty1 < 0) { ty1 = 0; }
+  ty = ty0;
+  while (ty < ty1) {
+    tx = tx0;
+    while (tx < tx1) {
+      t = grid_at(g, tx, ty);
+      if (t > 0) {
+        px = tx * g->tw - cam_x;
+        py = ty * g->th - cam_y;
+        n = n + gfx_rect(b, px, py, px + g->tw, py + g->th, 0x00100000 + t * 0x00010101);
+      }
+      tx = tx + 1;
+    }
+    ty = ty + 1;
+  }
+  return n;
+}

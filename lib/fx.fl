@@ -1,0 +1,951 @@
+// fx.fl -- 打击特效（M4 第三刀）：粒子 + 月牙挥砍
+//
+// 粒子：定长 struct 数组（调用方给 32 个槽），life<=0 = 空槽；不 new、不动态分配。
+// 月牙：固定点单位圆表（避免 sin/cos 依赖），沿弧画 2×2 方块；t = 画到第几个点。
+// 坐标：像素（不是 16.16）——特效是纯视觉，不参与物理，不需要定点。
+include "gfx.fl"
+
+struct Particle { int x; int y; int vx; int vy; int life; }
+
+// 像素造型二连斩的静态数据（26x26 位掩码，来自参考图）
+int fx_wmask[26];
+int fx_cmask[26];
+int fx_wgx[120];
+int fx_wgy[120];
+int fx_cgx[120];
+int fx_cgy[120];
+int fx_wn = 0;
+int fx_cn = 0;
+int fx_mask_ready = 0;
+int fx_seed = 12345;
+
+// 找空槽发射一个粒子；返回槽号，满返回 -1。
+int fx_emit(struct Particle *ps, int n, int x, int y, int vx, int vy, int life) {
+  int i = 0;
+  if (ps == 0) { return -1; }
+  while (i < n) {
+    if (ps[i].life <= 0) {
+      ps[i].x = x;
+      ps[i].y = y;
+      ps[i].vx = vx;
+      ps[i].vy = vy;
+      ps[i].life = life;
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// 每帧更新：位置 += 速度，vy 轻微重力，life 递减。
+int fx_update(struct Particle *ps, int n) {
+  int i = 0;
+  if (ps == 0) { return 0; }
+  while (i < n) {
+    if (ps[i].life > 0) {
+      ps[i].x = ps[i].x + ps[i].vx;
+      ps[i].y = ps[i].y + ps[i].vy;
+      ps[i].vy = ps[i].vy + 1;
+      ps[i].life = ps[i].life - 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 向上飘的粒子更新（2026-11-01 所有者口径"粒子飘向空中后再消散"）：
+// 与 fx_update 的区别 = 没有向下重力；速度每帧向 0 收敛（vx -= vx/8、vy -= vy/8），
+// 所以粒子先朝发射方向飘、越飘越慢，life 耗尽即消散。
+int fx_update_rise(struct Particle *ps, int n) {
+  int i = 0;
+  if (ps == 0) { return 0; }
+  while (i < n) {
+    if (ps[i].life > 0) {
+      ps[i].x = ps[i].x + ps[i].vx;
+      ps[i].y = ps[i].y + ps[i].vy;
+      ps[i].vx = ps[i].vx * 7 / 8;
+      ps[i].vy = ps[i].vy * 7 / 8;
+      ps[i].life = ps[i].life - 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 画所有活粒子（1px）。cam_x 是相机偏移。
+int fx_draw(struct GfxBuf *b, struct Particle *ps, int n, int cam_x, int color) {
+  int i = 0;
+  int cnt = 0;
+  if (ps == 0) { return 0; }
+  while (i < n) {
+    if (ps[i].life > 0) {
+      cnt = cnt + gfx_px(b, ps[i].x - cam_x, ps[i].y, color);
+    }
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// 画粒子并按剩余 life 渐暗（≥18 帧白、≥9 帧青、其余暗蓝），模拟"飘上去后消散"。
+int fx_draw_fade(struct GfxBuf *b, struct Particle *ps, int n, int cam_x) {
+  int i = 0;
+  int cnt = 0;
+  int col = 0;
+  if (ps == 0) { return 0; }
+  while (i < n) {
+    if (ps[i].life > 0) {
+      col = 0x001B2340;
+      if (ps[i].life >= 9) { col = 0x007FD8E8; }
+      if (ps[i].life >= 18) { col = 0x00FFFFFF; }
+      cnt = cnt + gfx_px(b, ps[i].x - cam_x, ps[i].y, col);
+    }
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// 月牙：沿右半圆（上→右→下）画 t 个 2×2 方块。返回画了几个。
+// cx,cy = 挥砍中心（角色中心）；r = 半径像素；t = 0..9。
+int slash_draw(struct GfxBuf *b, int cx, int cy, int r, int t, int color) {
+  int ax[9];
+  int ay[9];
+  int i = 0;
+  int cnt = 0;
+  int px = 0;
+  int py = 0;
+  if (t <= 0) { return 0; }
+  if (t > 9) { t = 9; }
+  ax[0] = 0; ax[1] = 38; ax[2] = 71; ax[3] = 92; ax[4] = 100;
+  ax[5] = 92; ax[6] = 71; ax[7] = 38; ax[8] = 0;
+  ay[0] = -100; ay[1] = -92; ay[2] = -71; ay[3] = -38; ay[4] = 0;
+  ay[5] = 38; ay[6] = 71; ay[7] = 92; ay[8] = 100;
+  while (i < t) {
+    px = cx + ax[i] * r / 100;
+    py = cy + ay[i] * r / 100;
+    cnt = cnt + gfx_rect(b, px, py, px + 2, py + 2, color);
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// 二次贝塞尔弧线：P0=(x0,y0) 起点、P1=(x1,y1) 控制点、P2=(x2,y2) 终点。
+// n = 采样点数（16 够顺）；t = 画到第几个点；w = 每点 w×w 像素（低厚度 = 2~3）。
+// 这是"刀光留痕"的主形状：比固定 9 点弧更顺、可任意弯。
+int slash_arc(struct GfxBuf *b, int x0, int y0, int x1, int y1, int x2, int y2, int n, int t, int w, int color) {
+  int i = 0;
+  int u = 0;
+  int px = 0;
+  int py = 0;
+  int cnt = 0;
+  if (t <= 0) { return 0; }
+  if (n <= 0) { return 0; }
+  if (t > n) { t = n; }
+  if (w <= 0) { w = 1; }
+  while (i < t) {
+    u = i * 256 / n;
+    px = ((256 - u) * (256 - u) * x0 + 2 * (256 - u) * u * x1 + u * u * x2) / 65536;
+    py = ((256 - u) * (256 - u) * y0 + 2 * (256 - u) * u * y1 + u * u * y2) / 65536;
+    cnt = cnt + gfx_rect(b, px, py, px + w, py + w, color);
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// 沿同一条贝塞尔弧发射 cnt 个粒子（刀光散成粒子）。速度按 u 从 -4 到 +4 横向散开。
+int fx_emit_arc(struct Particle *ps, int n, int x0, int y0, int x1, int y1, int x2, int y2, int cnt) {
+  int i = 0;
+  int u = 0;
+  int px = 0;
+  int py = 0;
+  if (cnt <= 0) { return 0; }
+  while (i < cnt) {
+    u = i * 256 / cnt;
+    px = ((256 - u) * (256 - u) * x0 + 2 * (256 - u) * u * x1 + u * u * x2) / 65536;
+    py = ((256 - u) * (256 - u) * y0 + 2 * (256 - u) * u * y1 + u * u * y2) / 65536;
+    fx_emit(ps, n, px, py, (u - 128) / 32, -1, 14);
+    i = i + 1;
+  }
+  return i;
+}
+
+// 整数平方根（牛顿迭代）。math_lib 没有 sqrt，SDF 弧要用它算"像素到圆心的距离"。
+int fx_isqrt(int n) {
+  int x = 0;
+  int y = 0;
+  if (n <= 0) { return 0; }
+  x = n;
+  y = (x + 1) / 2;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) / 2;
+  }
+  return x;
+}
+
+// SDF 半圆弧刀光：圆心 (cx,cy)、半径 r、环宽 w、只画右半（dx>=0）、y 限制 [y0,y1]。
+// 比贝塞尔采样点强的地方：**逐像素判距离** ⇒ 连续、粗细均匀、不会断线。
+// 返回画了多少像素。
+int slash_sdf(struct GfxBuf *b, int cx, int cy, int r, int w, int y0, int y1, int color) {
+  int x = 0;
+  int y = 0;
+  int dy = 0;
+  int xx1 = 0;
+  int yy0 = 0;
+  int yy1 = 0;
+  int d = 0;
+  int n = 0;
+  if (b == 0) { return 0; }
+  if (r <= 0) { return 0; }
+  if (w < 1) { w = 1; }
+  xx1 = cx + r + w;
+  yy0 = cy - r - w;
+  yy1 = cy + r + w;
+  if (y0 > yy0) { yy0 = y0; }
+  if (y1 < yy1) { yy1 = y1; }
+  y = yy0;
+  while (y <= yy1) {
+    dy = y - cy;
+    x = cx;
+    while (x <= xx1) {
+      d = fx_isqrt((x - cx) * (x - cx) + dy * dy);
+      if (d - r < w) {
+        if (r - d < w) {
+          n = n + gfx_px(b, x, y, color);
+        }
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return n;
+}
+
+// 沿贝塞尔画"椭圆笔触"：每个采样点是沿切线拉长的椭圆（a=沿切半长、b=垂直半宽），
+// 而不是圆点——圆点看起来是"水滴"，切线椭圆才是刀光。b 随 t 收放（两端粗）。
+// 返回画了多少像素。
+int slash_ellipse(struct GfxBuf *b, int x0, int y0, int x1, int y1, int x2, int y2, int bmax, int color) {
+  int i = 0;
+  int u = 0;
+  int px = 0;
+  int py = 0;
+  int tx = 0;
+  int ty = 0;
+  int tl = 0;
+  int a = 0;
+  int bb = 0;
+  int dx = 0;
+  int dy = 0;
+  int uu = 0;
+  int vv = 0;
+  int cnt = 0;
+  if (b == 0) { return 0; }
+  if (bmax < 1) { bmax = 1; }
+  while (i < 40) {
+    u = i * 256 / 39;
+    px = ((256 - u) * (256 - u) * x0 + 2 * (256 - u) * u * x1 + u * u * x2) / 65536;
+    py = ((256 - u) * (256 - u) * y0 + 2 * (256 - u) * u * y1 + u * u * y2) / 65536;
+    tx = 2 * (256 - u) * (x1 - x0) + 2 * u * (x2 - x1);
+    ty = 2 * (256 - u) * (y1 - y0) + 2 * u * (y2 - y1);
+    tl = fx_isqrt(tx * tx + ty * ty);
+    if (tl < 1) { tl = 1; }
+    a = 2;
+    bb = 2 + (bmax * (u - 128) * (u - 128)) / 16384;
+    dy = 0 - bmax - 2;
+    while (dy <= bmax + 2) {
+      dx = 0 - bmax - 2;
+      while (dx <= bmax + 2) {
+        uu = (dx * tx + dy * ty) / tl;
+        vv = (dx * ty - dy * tx) / tl;
+        if ((uu * uu) * bb * bb + (vv * vv) * a * a <= a * a * bb * bb) {
+          cnt = cnt + gfx_px(b, px + dx, py + dy, color);
+        }
+        dx = dx + 1;
+      }
+      dy = dy + 1;
+    }
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// 收尖月牙（参考 opengameart slash-effect-collection）：沿二次贝塞尔采样 32 点，
+// 每点画一个半径按 t 抛物线收尖的圆斑（中间厚、两端细到消失）——比等宽圆环更像"刀光"。
+// rmax = 中间最大半径。返回画了多少像素。
+int slash_taper(struct GfxBuf *b, int x0, int y0, int x1, int y1, int x2, int y2, int rmax, int color) {
+  int i = 0;
+  int u = 0;
+  int px = 0;
+  int py = 0;
+  int r = 0;
+  int dx = 0;
+  int dy = 0;
+  int cnt = 0;
+  int t = 0;
+  if (b == 0) { return 0; }
+  if (rmax < 1) { rmax = 1; }
+  while (i < 32) {
+    u = i * 256 / 31;
+    px = ((256 - u) * (256 - u) * x0 + 2 * (256 - u) * u * x1 + u * u * x2) / 65536;
+    py = ((256 - u) * (256 - u) * y0 + 2 * (256 - u) * u * y1 + u * u * y2) / 65536;
+    t = u - 128;
+    // 两端粗、中间空（2026-10-31 用户：X 的四角放大，中间露出角色）
+    r = 2 + (rmax * t * t) / 16384;
+    if (r > 0) {
+      dy = 0 - r;
+      while (dy <= r) {
+        dx = 0 - r;
+        while (dx <= r) {
+          if (dx * dx + dy * dy <= r * r) {
+            cnt = cnt + gfx_px(b, px + dx, py + dy, color);
+          }
+          dx = dx + 1;
+        }
+        dy = dy + 1;
+      }
+    }
+    i = i + 1;
+  }
+  return cnt;
+}
+
+// SDF 半圆弧：左半（dx<=0），给"朝左挥刀"用。参数同 slash_sdf。
+int slash_sdf_l(struct GfxBuf *b, int cx, int cy, int r, int w, int y0, int y1, int color) {  int x = 0;
+  int y = 0;
+  int dy = 0;
+  int xx0 = 0;
+  int yy0 = 0;
+  int yy1 = 0;
+  int d = 0;
+  int n = 0;
+  if (b == 0) { return 0; }
+  if (r <= 0) { return 0; }
+  if (w < 1) { w = 1; }
+  xx0 = cx - r - w;
+  yy0 = cy - r - w;
+  yy1 = cy + r + w;
+  if (y0 > yy0) { yy0 = y0; }
+  if (y1 < yy1) { yy1 = y1; }
+  y = yy0;
+  while (y <= yy1) {
+    dy = y - cy;
+    x = cx;
+    while (x >= xx0) {
+      d = fx_isqrt((x - cx) * (x - cx) + dy * dy);
+      if (d - r < w) {
+        if (r - d < w) {
+          n = n + gfx_px(b, x, y, color);
+        }
+      }
+      x = x - 1;
+    }
+    y = y + 1;
+  }
+  return n;
+}
+
+// ---- 二连斩（双段 X 斩）：白刀 -> 淡出粒子 -> 青刀 -> 淡出粒子 ----
+// 时间线（60fps，t = 0..60；由调用方每帧 +1）：
+//   0..8    白刀挥出（贝塞尔终点从起点方向展开）
+//   8..20   白刀停留
+//   20..32  白刀淡出（颜色向背景插值），22/26/30 发射粒子
+//   26..34  青刀挥出（与白淡出重叠，形成连斩）
+//   34..44  青刀停留
+//   44..56  青刀淡出，46/50/54 发射粒子
+// face: 1=朝右, 0=朝左。cx,cy = X 中心。返回本帧画了多少像素。
+int fx_mixc(int bg, int fg, int a) {
+  int r = 0; int g = 0; int bb = 0;
+  int br = 0; int bgc = 0; int bb2 = 0;
+  if (a < 0) { a = 0; }
+  if (a > 255) { a = 255; }
+  br = (bg >> 16) & 255; bgc = (bg >> 8) & 255; bb2 = bg & 255;
+  r = br + ((((fg >> 16) & 255) - br) * a) / 255;
+  g = bgc + ((((fg >> 8) & 255) - bgc) * a) / 255;
+  bb = bb2 + (((fg & 255) - bb2) * a) / 255;
+  return (r << 16) | (g << 8) | bb;
+}
+
+int fx_dslash_draw(struct GfxBuf *b, int cx, int cy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int bg = 0x000B0E1A;
+  int col = 0;
+  int n = 0;
+  int x0 = 0; int y0 = 0; int x1 = 0; int y1 = 0; int x2 = 0; int y2 = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+
+  // ---- 白刀（0..32）----
+  if (t < 32) {
+    p = 100;
+    if (t < 8) { p = t * 100 / 8; }
+    a = 255;
+    if (t >= 20) { a = 255 - (t - 20) * 255 / 12; }
+    col = fx_mixc(bg, 0x00F0F0F0, a);
+    // 上段：右上 -> 左中
+    x0 = cx + f * 18; y0 = cy - 38;
+    x1 = cx + f * 6;  y1 = cy - 16;
+    x2 = cx - f * 14; y2 = cy + 2;
+    n = n + slash_ellipse(b, x0, y0, x0 + (x1 - x0) * p / 100, y0 + (y1 - y0) * p / 100,
+                          x0 + (x2 - x0) * p / 100, y0 + (y2 - y0) * p / 100, 5, col);
+    // 下段：左中 -> 右下
+    x0 = cx - f * 14; y0 = cy + 2;
+    x1 = cx - f * 2;  y1 = cy + 18;
+    x2 = cx + f * 16; y2 = cy + 38;
+    n = n + slash_ellipse(b, x0, y0, x0 + (x1 - x0) * p / 100, y0 + (y1 - y0) * p / 100,
+                          x0 + (x2 - x0) * p / 100, y0 + (y2 - y0) * p / 100, 5, col);
+    if (t == 22 || t == 26 || t == 30) {
+      fx_emit(ps, pn, cx - f * 10, cy - 4, f * 3, -2, 14);
+      fx_emit(ps, pn, cx - f * 4, cy + 6, f * 2, -1, 14);
+      fx_emit(ps, pn, cx + f * 2, cy + 16, f * 3, -3, 12);
+      fx_emit(ps, pn, cx - f * 14, cy + 2, f * 2, -1, 12);
+    }
+  }
+
+  // ---- 青刀（26..56）----
+  if (t >= 26 && t < 56) {
+    p = 100;
+    if (t < 34) { p = (t - 26) * 100 / 8; }
+    a = 255;
+    if (t >= 44) { a = 255 - (t - 44) * 255 / 12; }
+    col = fx_mixc(bg, 0x007FD8E8, a);
+    // 上段：左上 -> 中
+    x0 = cx - f * 24; y0 = cy - 34;
+    x1 = cx - f * 12; y1 = cy - 10;
+    x2 = cx + f * 6;  y2 = cy + 4;
+    n = n + slash_ellipse(b, x0, y0, x0 + (x1 - x0) * p / 100, y0 + (y1 - y0) * p / 100,
+                          x0 + (x2 - x0) * p / 100, y0 + (y2 - y0) * p / 100, 5, col);
+    // 下段：中 -> 右
+    x0 = cx + f * 6;  y0 = cy + 4;
+    x1 = cx + f * 18; y1 = cy + 8;
+    x2 = cx + f * 36; y2 = cy + 14;
+    n = n + slash_ellipse(b, x0, y0, x0 + (x1 - x0) * p / 100, y0 + (y1 - y0) * p / 100,
+                          x0 + (x2 - x0) * p / 100, y0 + (y2 - y0) * p / 100, 5, col);
+    if (t == 46 || t == 50 || t == 54) {
+      fx_emit(ps, pn, cx + f * 6, cy + 4, f * 3, -2, 14);
+      fx_emit(ps, pn, cx + f * 20, cy + 10, f * 3, -1, 12);
+      fx_emit(ps, pn, cx - f * 16, cy - 22, f * 2, -3, 14);
+      fx_emit(ps, pn, cx + f * 30, cy + 14, f * 2, -2, 12);
+    }
+  }
+  return n;
+}
+
+// ---- 像素造型二连斩（按用户参考图 26x26 位掩码）----
+// 与 fx_dslash_draw 的区别：形状由掩码逐格决定，不是贝塞尔椭圆笔触推出来的。
+// 粒子按「格 → 粒子」发射（淡出阶段每帧 3 个格），不是随机撒点。
+int fx_rand() {
+  fx_seed = fx_seed * 1103515245 + 12345;
+  return (fx_seed >> 16) & 0x7fff;
+}
+
+int fx_dslash_init() {
+  int gx = 0;
+  int gy = 0;
+  if (fx_mask_ready == 1) { return 1; }
+  fx_wmask[0] = 0x0; fx_cmask[0] = 0x0;
+  fx_wmask[1] = 0xC000; fx_cmask[1] = 0x0;
+  fx_wmask[2] = 0x6000; fx_cmask[2] = 0x0;
+  fx_wmask[3] = 0x7000; fx_cmask[3] = 0x10;
+  fx_wmask[4] = 0x1800; fx_cmask[4] = 0x30;
+  fx_wmask[5] = 0x0; fx_cmask[5] = 0x0;
+  fx_wmask[6] = 0x1800; fx_cmask[6] = 0x60;
+  fx_wmask[7] = 0xA00; fx_cmask[7] = 0x60;
+  fx_wmask[8] = 0xA00; fx_cmask[8] = 0xC0;
+  fx_wmask[9] = 0xA00; fx_cmask[9] = 0x1C0;
+  fx_wmask[10] = 0x800; fx_cmask[10] = 0x380;
+  fx_wmask[11] = 0x0; fx_cmask[11] = 0x1B00;
+  fx_wmask[12] = 0x0; fx_cmask[12] = 0x7A00;
+  fx_wmask[13] = 0xA00; fx_cmask[13] = 0x1F000;
+  fx_wmask[14] = 0x1800; fx_cmask[14] = 0x7E000;
+  fx_wmask[15] = 0x3800; fx_cmask[15] = 0x3F0000;
+  fx_wmask[16] = 0x7000; fx_cmask[16] = 0x0;
+  fx_wmask[17] = 0x6000; fx_cmask[17] = 0x0;
+  fx_wmask[18] = 0xE000; fx_cmask[18] = 0x0;
+  fx_wmask[19] = 0x1C000; fx_cmask[19] = 0x0;
+  fx_wmask[20] = 0x18000; fx_cmask[20] = 0x0;
+  fx_wmask[21] = 0x0; fx_cmask[21] = 0x0;
+  fx_wmask[22] = 0x70000; fx_cmask[22] = 0x0;
+  fx_wmask[23] = 0x0; fx_cmask[23] = 0x0;
+  fx_wmask[24] = 0x0; fx_cmask[24] = 0x0;
+  fx_wmask[25] = 0x0; fx_cmask[25] = 0x0;
+  fx_mask_ready = 1;
+  fx_wn = 0;
+  fx_cn = 0;
+  gy = 0;
+  while (gy < 26) {
+    gx = 0;
+    while (gx < 26) {
+      if (((fx_wmask[gy] >> gx) & 1) != 0) { fx_wgx[fx_wn] = gx; fx_wgy[fx_wn] = gy; fx_wn = fx_wn + 1; }
+      if (((fx_cmask[gy] >> gx) & 1) != 0) { fx_cgx[fx_cn] = gx; fx_cgy[fx_cn] = gy; fx_cn = fx_cn + 1; }
+      gx = gx + 1;
+    }
+    gy = gy + 1;
+  }
+  return 1;
+}
+
+int fx_dslash2_draw(struct GfxBuf *b, int cx, int cy, int face, int t, int cell, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int bg = 0x000B0E1A;
+  int col = 0;
+  int n = 0;
+  int gx = 0;
+  int gy = 0;
+  int dist = 0;
+  int maxd = 24;
+  int x0 = 0;
+  int y0 = 0;
+  int k = 0;
+  int idx = 0;
+  if (b == 0) { return 0; }
+  if (fx_mask_ready == 0) { fx_dslash_init(); }
+  if (face == 0) { f = -1; }
+  if (cell < 1) { cell = 3; }
+
+  // ---- 白刀（0..32）----
+  if (t < 32) {
+    p = 100;
+    if (t < 8) { p = t * 100 / 8; }
+    a = 255;
+    if (t >= 20) { a = 255 - (t - 20) * 255 / 12; }
+    col = fx_mixc(bg, 0x00F0F0F0, a);
+    gy = 0;
+    while (gy < 26) {
+      gx = 0;
+      while (gx < 26) {
+        if (((fx_wmask[gy] >> gx) & 1) != 0) {
+          dist = fx_isqrt((gx - 14) * (gx - 14) + (gy - 1) * (gy - 1));
+          if (dist <= p * maxd / 100) {
+            x0 = cx + f * (gx - 13) * cell;
+            y0 = cy + (gy - 13) * cell;
+            gfx_rect(b, x0, y0, x0 + cell, y0 + cell, fx_mixc(bg, col, 140));
+            n = n + gfx_rect(b, x0 + 1, y0 + 1, x0 + cell - 1, y0 + cell - 1, col);
+          }
+        }
+        gx = gx + 1;
+      }
+      gy = gy + 1;
+    }
+    if (t == 20) {
+      // 只从 4 个刀尖发射（参考 Godot slash shader 的 edge-highlight 思路），每尖 2 个
+      fx_emit(ps, pn, cx + f * (14 - 13) * cell, cy + (1 - 13) * cell, 0, -3, 10);
+      fx_emit(ps, pn, cx + f * (14 - 13) * cell + 1, cy + (1 - 13) * cell, f * 1, -2, 8);
+      fx_emit(ps, pn, cx + f * (9 - 13) * cell, cy + (14 - 13) * cell, f * 2, -1, 10);
+      fx_emit(ps, pn, cx + f * (9 - 13) * cell + 1, cy + (14 - 13) * cell, f * 1, -2, 8);
+      fx_emit(ps, pn, cx + f * (16 - 13) * cell, cy + (22 - 13) * cell, f * 2, -1, 10);
+      fx_emit(ps, pn, cx + f * (16 - 13) * cell + 1, cy + (22 - 13) * cell, f * 1, -2, 8);
+      fx_emit(ps, pn, cx + f * (10 - 13) * cell, cy + (8 - 13) * cell, f * 3, -2, 10);
+      fx_emit(ps, pn, cx + f * (10 - 13) * cell + 1, cy + (8 - 13) * cell, f * 2, -3, 8);
+    }
+  }
+
+  // ---- 青刀（26..56）----
+  if (t >= 26 && t < 56) {
+    p = 100;
+    if (t < 34) { p = (t - 26) * 100 / 8; }
+    a = 255;
+    if (t >= 44) { a = 255 - (t - 44) * 255 / 12; }
+    col = fx_mixc(bg, 0x007FD8E8, a);
+    gy = 0;
+    while (gy < 26) {
+      gx = 0;
+      while (gx < 26) {
+        if (((fx_cmask[gy] >> gx) & 1) != 0) {
+          dist = fx_isqrt((gx - 4) * (gx - 4) + (gy - 3) * (gy - 3));
+          if (dist <= p * maxd / 100) {
+            x0 = cx + f * (gx - 13) * cell;
+            y0 = cy + (gy - 13) * cell;
+            gfx_rect(b, x0, y0, x0 + cell, y0 + cell, fx_mixc(bg, col, 140));
+            n = n + gfx_rect(b, x0 + 1, y0 + 1, x0 + cell - 1, y0 + cell - 1, col);
+          }
+        }
+        gx = gx + 1;
+      }
+      gy = gy + 1;
+    }
+    if (t == 44) {
+      fx_emit(ps, pn, cx + f * (4 - 13) * cell, cy + (3 - 13) * cell, f * 1, -3, 10);
+      fx_emit(ps, pn, cx + f * (4 - 13) * cell + 1, cy + (3 - 13) * cell, f * 2, -2, 8);
+      fx_emit(ps, pn, cx + f * (12 - 13) * cell, cy + (12 - 13) * cell, f * 2, -2, 10);
+      fx_emit(ps, pn, cx + f * (12 - 13) * cell + 1, cy + (12 - 13) * cell, f * 1, -1, 8);
+      fx_emit(ps, pn, cx + f * (23 - 13) * cell, cy + (15 - 13) * cell, f * 3, -1, 10);
+      fx_emit(ps, pn, cx + f * (23 - 13) * cell + 1, cy + (15 - 13) * cell, f * 2, -2, 8);
+      fx_emit(ps, pn, cx + f * (18 - 13) * cell, cy + (13 - 13) * cell, f * 2, -3, 10);
+      fx_emit(ps, pn, cx + f * (18 - 13) * cell + 1, cy + (13 - 13) * cell, f * 1, -2, 8);
+    }
+  }
+  return n;
+}
+
+// ---- 月牙刀光（crescent）：大圆 ∩ 小圆外，两端自然收尖 ----
+// 参考 Godot slash shader 的「弧带 + 边缘高光」：月牙是环带，再画一层暗边 + 亮核。
+int fx_crescent(struct GfxBuf *b, int cx, int cy, int R, int r, int ox, int oy, int base, int alpha) {
+  int x = 0;
+  int y = 0;
+  int d1 = 0;
+  int d2 = 0;
+  int n = 0;
+  int t = 0;
+  int t2 = 0;
+  int a = 0;
+  int col = 0;
+  int bg = 0x000B0E1A;
+  int thick = 5;
+  if (b == 0) { return 0; }
+  if (R <= 0) { return 0; }
+  if (r < 0) { r = 0; }
+  if (alpha <= 0) { return 0; }
+  y = cy - R;
+  while (y <= cy + R) {
+    x = cx - R;
+    while (x <= cx + R) {
+      d1 = fx_isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+      if (d1 <= R) {
+        d2 = fx_isqrt((x - cx - ox) * (x - cx - ox) + (y - cy - oy) * (y - cy - oy));
+        if (d2 > r) {
+          // 厚度方向渐变：内缘亮、外缘淡
+          t = (d1 - (R - thick)) * 255 / thick;
+          if (t < 0) { t = 0; }
+          if (t > 255) { t = 255; }
+          // 沿弧长渐变：顶端淡、底端亮
+          t2 = (y - (cy - R)) * 255 / (2 * R);
+          a = alpha * (255 - t * 3 / 5) / 255;
+          a = a * (60 + t2 * 195 / 255) / 255;
+          col = fx_mixc(bg, base, a);
+          n = n + gfx_px(b, x, y, col);
+        }
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return n;
+}
+
+int fx_dslash3_draw(struct GfxBuf *b, int cx, int cy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int R = 0;
+  int r = 0;
+  int ox = 0;
+  int oy = 0;
+  int col = 0;
+  int edge = 0;
+  int bg = 0x000B0E1A;
+  int n = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+
+  // 白月牙：0..30（R 从 20 长到 44 = 挥出）
+  if (t < 30) {
+    p = 100;
+    if (t < 6) { p = t * 100 / 6; }
+    a = 255;
+    if (t >= 16) { a = 255 - (t - 16) * 255 / 12; }
+    R = 14 + 12 * p / 100;
+    r = R - 3;
+    ox = f * 9;
+    oy = -6;
+    n = n + fx_crescent(b, cx, cy, R, r, ox, oy, 0x00F0F0F0, a);
+    if (t == 16) {
+      fx_emit(ps, pn, cx, cy - R, f * 1, -3, 10);
+      fx_emit(ps, pn, cx, cy - R + 2, f * 2, -2, 8);
+      fx_emit(ps, pn, cx, cy + R, f * 2, -1, 10);
+      fx_emit(ps, pn, cx, cy + R - 2, f * 1, -2, 8);
+    }
+  }
+
+  // 青月牙：24..54（半径更大，形成二段）
+  if (t >= 24 && t < 54) {
+    p = 100;
+    if (t < 30) { p = (t - 24) * 100 / 6; }
+    a = 255;
+    if (t >= 40) { a = 255 - (t - 40) * 255 / 12; }
+    R = 16 + 14 * p / 100;
+    r = R - 3;
+    ox = f * 11;
+    oy = -5;
+    n = n + fx_crescent(b, cx, cy, R, r, ox, oy, 0x007FD8E8, a);
+    if (t == 40) {
+      fx_emit(ps, pn, cx, cy - R, f * 1, -3, 10);
+      fx_emit(ps, pn, cx, cy - R + 2, f * 2, -2, 8);
+      fx_emit(ps, pn, cx, cy + R, f * 2, -1, 10);
+      fx_emit(ps, pn, cx, cy + R - 2, f * 1, -2, 8);
+    }
+  }
+  return n;
+}
+
+// ---- X 形细弧二连斩：两条 1~2px 细弧（圆 SDF），象限裁剪，交叉成 X ----
+// 白：圆心 (cx-14, cy-6) 右下象限；青：圆心 (cx-14, cy+6) 右上象限。
+// 渐变：沿「远离圆心」方向变亮（起手淡、末端亮）。
+int fx_arc1(struct GfxBuf *b, int cx, int cy, int R, int qx, int qy, int base, int alpha) {
+  int x = 0;
+  int y = 0;
+  int d = 0;
+  int t = 0;
+  int a = 0;
+  int col = 0;
+  int bg = 0x000B0E1A;
+  if (b == 0) { return 0; }
+  if (R <= 0) { return 0; }
+  if (alpha <= 0) { return 0; }
+  y = cy - R;
+  while (y <= cy + R) {
+    x = cx - R;
+    while (x <= cx + R) {
+      if ((x - cx) * qx >= 0 && (y - cy) * qy >= 0) {
+        d = fx_isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+        if (d >= R - 1 && d <= R + 1) {
+          t = (x - cx) * qx * 255 / R;
+          a = alpha * (40 + t * 215 / 255) / 255;
+          col = fx_mixc(bg, base, a);
+          gfx_px(b, x, y, col);
+        }
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+int fx_dslash4_draw(struct GfxBuf *b, int cx, int cy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int R = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+
+  // 白弧：右下象限（0..36）
+  if (t < 36) {
+    p = 100;
+    if (t < 6) { p = t * 100 / 6; }
+    a = 255;
+    if (t >= 22) { a = 255 - (t - 22) * 255 / 14; }
+    R = 20 + 32 * p / 100;
+    fx_arc1(b, cx - f * 14, cy - 6, R, f, 1, 0x00F0F0F0, a);
+    if (t == 22) {
+      fx_emit(ps, pn, cx - f * 14 + f * R, cy - 6, f * 2, -2, 10);
+      fx_emit(ps, pn, cx - f * 14 + f * R, cy - 4, f * 1, -3, 8);
+      fx_emit(ps, pn, cx - f * 14, cy - 6 + R, 0, -2, 10);
+      fx_emit(ps, pn, cx - f * 14 + 2, cy - 6 + R, f * 1, -1, 8);
+    }
+  }
+
+  // 青弧：右上象限（12..48，与白弧重叠出 X）
+  if (t >= 12 && t < 48) {
+    p = 100;
+    if (t < 18) { p = (t - 12) * 100 / 6; }
+    a = 255;
+    if (t >= 34) { a = 255 - (t - 34) * 255 / 14; }
+    R = 24 + 34 * p / 100;
+    fx_arc1(b, cx - f * 14, cy + 6, R, f, -1, 0x007FD8E8, a);
+    if (t == 34) {
+      fx_emit(ps, pn, cx - f * 14 + f * R, cy + 6, f * 2, -2, 10);
+      fx_emit(ps, pn, cx - f * 14 + f * R, cy + 4, f * 1, -3, 8);
+      fx_emit(ps, pn, cx - f * 14, cy + 6 - R, 0, -2, 10);
+      fx_emit(ps, pn, cx - f * 14 + 2, cy + 6 - R, f * 1, -1, 8);
+    }
+  }
+  return 0;
+}
+
+// ---- X 形交叉月牙：白弧在左上、青弧在右下（对角交叉），细弧 + 渐变 ----
+// 白：小圆偏右下 -> 月牙凸面朝左上；青：小圆偏左上 -> 月牙凸面朝右下。
+int fx_dslash5_draw(struct GfxBuf *b, int cx, int cy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int R = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+
+  // 白月牙：左上（0..36）
+  if (t < 36) {
+    p = 100;
+    if (t < 6) { p = t * 100 / 6; }
+    a = 255;
+    if (t >= 22) { a = 255 - (t - 22) * 255 / 14; }
+    R = 20 + 28 * p / 100;
+    fx_crescent(b, cx, cy, R, R - 2, f * 14, 14, 0x00F0F0F0, a);
+    if (t == 22) {
+      fx_emit(ps, pn, cx - f * R / 2, cy - R / 2, f * 1, -2, 10);
+      fx_emit(ps, pn, cx - f * R / 2 + 2, cy - R / 2, f * 2, -3, 8);
+      fx_emit(ps, pn, cx - f * R / 2, cy - R / 2 + 2, f * 1, -1, 8);
+    }
+  }
+
+  // 青月牙：右下（12..48，与白重叠出 X）
+  if (t >= 12 && t < 48) {
+    p = 100;
+    if (t < 18) { p = (t - 12) * 100 / 6; }
+    a = 255;
+    if (t >= 34) { a = 255 - (t - 34) * 255 / 14; }
+    R = 24 + 28 * p / 100;
+    fx_crescent(b, cx, cy, R, R - 2, 0 - f * 14, -14, 0x007FD8E8, a);
+    if (t == 34) {
+      fx_emit(ps, pn, cx + f * R / 2, cy + R / 2, f * 2, -2, 10);
+      fx_emit(ps, pn, cx + f * R / 2 - 2, cy + R / 2, f * 1, -3, 8);
+      fx_emit(ps, pn, cx + f * R / 2, cy + R / 2 - 2, f * 2, -1, 8);
+    }
+  }
+  return 0;
+}
+
+// ---- 半圆弧（弧顶朝目标）：圆心 C、半径 R、弧顶方向 (tx,ty)，1px 细弧 + 弧顶亮两端淡 ----
+int fx_arc_half(struct GfxBuf *b, int cx, int cy, int R, int tx, int ty, int base, int alpha) {
+  int x = 0;
+  int y = 0;
+  int d = 0;
+  int dot = 0;
+  int dd = 0;
+  int t = 0;
+  int a = 0;
+  int col = 0;
+  int bg = 0x000B0E1A;
+  if (b == 0) { return 0; }
+  if (R <= 0) { return 0; }
+  if (alpha <= 0) { return 0; }
+  dd = fx_isqrt(tx * tx + ty * ty);
+  if (dd < 1) { dd = 1; }
+  y = cy - R;
+  while (y <= cy + R) {
+    x = cx - R;
+    while (x <= cx + R) {
+      d = fx_isqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+      if (d >= R - 1 && d <= R + 1) {
+        dot = (x - cx) * tx + (y - cy) * ty;
+        if (dot >= 0) {
+          t = dot * 255 / (R * dd);
+          if (t > 255) { t = 255; }
+          a = alpha * (40 + t * 215 / 255) / 255;
+          col = fx_mixc(bg, base, a);
+          gfx_px(b, x, y, col);
+        }
+      }
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// ---- X 交叉双弧：两道半圆弧的弧顶都对准目标 T，圆心分居 T 两侧 -> 交叉成 X ----
+// ux,uy = 角色->目标 方向（单位×100）；cx,cy = T（目标方向的点）。
+int fx_dslash6_draw(struct GfxBuf *b, int cx, int cy, int ux, int uy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int R1 = 40;
+  int R2 = 44;
+  int nx = 0;
+  int ny = 0;
+  int c1x = 0;
+  int c1y = 0;
+  int c2x = 0;
+  int c2y = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+  if (ux == 0 && uy == 0) { ux = f * 100; }
+  nx = 0 - uy;
+  ny = ux;
+  c1x = cx + nx * R1 / 100;
+  c1y = cy + ny * R1 / 100;
+  c2x = cx - nx * R2 / 100;
+  c2y = cy - ny * R2 / 100;
+
+  // 白弧（0..36）
+  if (t < 36) {
+    p = 100;
+    if (t < 6) { p = t * 100 / 6; }
+    a = 255;
+    if (t >= 22) { a = 255 - (t - 22) * 255 / 14; }
+    fx_arc_half(b, c1x, c1y, 20 + (R1 - 20) * p / 100, cx - c1x, cy - c1y, 0x00F0F0F0, a);
+    if (t == 22) {
+      fx_emit(ps, pn, cx, cy - 6, 0, -2, 10);
+      fx_emit(ps, pn, cx + 2, cy - 8, f * 1, -3, 8);
+    }
+  }
+
+  // 青弧（12..48，与白弧重叠出 X）
+  if (t >= 12 && t < 48) {
+    p = 100;
+    if (t < 18) { p = (t - 12) * 100 / 6; }
+    a = 255;
+    if (t >= 34) { a = 255 - (t - 34) * 255 / 14; }
+    fx_arc_half(b, c2x, c2y, 24 + (R2 - 24) * p / 100, cx - c2x, cy - c2y, 0x007FD8E8, a);
+    if (t == 34) {
+      fx_emit(ps, pn, cx, cy + 6, 0, -2, 10);
+      fx_emit(ps, pn, cx - 2, cy + 8, f * 1, -3, 8);
+    }
+  }
+  return 0;
+}
+
+// ---- 3D 刀光投影：两道月牙的凸面都朝敌人（背面朝角色），一上一下 -> 侧视 X ----
+// ux,uy = 角色->敌人 方向（单位×100）；cx,cy = 刀光中心（角色 + u*40）。
+int fx_dslash7_draw(struct GfxBuf *b, int cx, int cy, int ux, int uy, int face, int t, struct Particle *ps, int pn) {
+  int f = 1;
+  int p = 0;
+  int a = 255;
+  int R1 = 40;
+  int R2 = 44;
+  int ox = 0;
+  int oy = 0;
+  int ox2 = 0;
+  int oy2 = 0;
+  int nx = 0;
+  int ny = 0;
+  int c1x = 0;
+  int c1y = 0;
+  int c2x = 0;
+  int c2y = 0;
+  if (b == 0) { return 0; }
+  if (face == 0) { f = -1; }
+  if (ux == 0 && uy == 0) { ux = f * 100; }
+  nx = 0 - uy;
+  ny = ux;
+  c1x = cx + nx * 14 / 100;
+  c1y = cy + ny * 14 / 100;
+  c2x = cx - nx * 14 / 100;
+  c2y = cy - ny * 14 / 100;
+  // 白弧凸面朝右下、青弧凸面朝右上（都朝敌人，但方向不同 -> X 交叉）
+  ox = 0 - ux * 18 / 100 - nx * 10 / 100;
+  oy = 0 - uy * 18 / 100 - ny * 10 / 100;
+  ox2 = 0 - ux * 18 / 100 + nx * 10 / 100;
+  oy2 = 0 - uy * 18 / 100 + ny * 10 / 100;
+
+  // 白（0..36）
+  if (t < 36) {
+    p = 100;
+    if (t < 6) { p = t * 100 / 6; }
+    a = 255;
+    if (t >= 22) { a = 255 - (t - 22) * 255 / 14; }
+    fx_crescent(b, c1x, c1y, 16 + (R1 - 16) * p / 100, 16 + (R1 - 16) * p / 100 - 2, ox, oy, 0x00F0F0F0, a);
+    if (t == 22) {
+      fx_emit(ps, pn, c1x, c1y - 10, 0, -2, 10);
+      fx_emit(ps, pn, c1x + 2, c1y - 12, f * 1, -3, 8);
+    }
+  }
+
+  // 青（12..48，与白重叠出 X）
+  if (t >= 12 && t < 48) {
+    p = 100;
+    if (t < 18) { p = (t - 12) * 100 / 6; }
+    a = 255;
+    if (t >= 34) { a = 255 - (t - 34) * 255 / 14; }
+    fx_crescent(b, c2x, c2y, 20 + (R2 - 20) * p / 100, 20 + (R2 - 20) * p / 100 - 2, ox2, oy2, 0x007FD8E8, a);
+    if (t == 34) {
+      fx_emit(ps, pn, c2x, c2y + 10, 0, -2, 10);
+      fx_emit(ps, pn, c2x - 2, c2y + 12, f * 1, -3, 8);
+    }
+  }
+  return 0;
+}
+

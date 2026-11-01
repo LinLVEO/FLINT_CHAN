@@ -29,7 +29,7 @@
 //        entry anywhere in this file: the self-check counts the three write names in this source
 //        and requires 0. A key that cannot be opened degrades to "unavailable" and the app exits 0.
 //
-// Build: E:\FLINT-lab\flint.exe E:\FLINT-lab\apps\winpanel\main.fl -gui -o <same dir>\winpanel.exe
+// Build: E:\FLINT-lab\hlc.exe E:\FLINT-lab\apps\winpanel\main.fl -gui -o <same dir>\winpanel.exe
 // Switches (same channels as v1..v3; all optional, all inside the app dir):
 //   panel.dump  exists -> headless: no window, write the text report, exit 0
 //   panel.src   first line = snapshot path override (how the "missing data" case is tested)

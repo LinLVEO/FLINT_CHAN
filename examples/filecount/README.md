@@ -10,7 +10,7 @@ filecount.exe <in.txt>
   -> 退出码 = 行数 & 255（读不了 254；写不了 253；没给参数 255）
 ```
 
-文件 I/O 在 FLINT 里就是一次 `include "io_lib.fl"`（`std::file_read` / `std::file_write`）：
+文件 I/O 在 FLINT_CHAN 里就是一次 `include "io_lib.fl"`（`std::file_read` / `std::file_write`）：
 整个文件一次读完（没有流式句柄），读回来的**不带结尾 0**（只给字节数，所以二进制安全）。
 
 ## 怎么跑
@@ -18,7 +18,7 @@ filecount.exe <in.txt>
 # 一条命令 = 编译 + 把样本拷进 tmp\ + 跑 + 断退出码 + 断 stdout 字节 + 断副本与原文逐字节相同
 powershell -NoProfile -ExecutionPolicy Bypass -File examples\filecount\build.ps1
 # 手动跑（相对路径按"当前工作目录"解析，不按 exe 所在目录）
-.\flint.exe examples\filecount\main.fl -o examples\filecount\filecount.exe
+.\hlc.exe examples\filecount\main.fl -o examples\filecount\filecount.exe
 .\examples\filecount\filecount.exe examples\filecount\sample.txt
 ```
 

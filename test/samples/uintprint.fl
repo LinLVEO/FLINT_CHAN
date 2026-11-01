@@ -1,0 +1,18 @@
+// uintprint.fl -- v1.9.0 打印口径：print 与 str 两条腿都必须打**无符号十进制**（真十进制、
+// 无前导 0、不带符号）。期望 stdout 由 test\facts\uint-exp.js 的 "print/str: exact decimal
+// strings" 一节现算，run-tests.js 里整串逐字节比对。
+// 关键值：(uint_32)-1 = 4294967295，(uint_64)-1 = 18446744073709551615，(uint_8)300 = 44。
+// ASCII only, no BOM.
+int main() {
+  uint_32 a = 0;
+  a = a - 1;
+  uint_64 b = 0;
+  b = b - 1;
+  uint_8 c = 300;
+
+  print(["A", a, "B", b, "C", c, "D\n"]);
+
+  char *s = str(["[", a, "|", b, "|", c, "]"]);
+  print([s, "\n"]);
+  return 0;
+}

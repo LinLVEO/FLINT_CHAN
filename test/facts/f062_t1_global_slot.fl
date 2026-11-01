@@ -1,0 +1,18 @@
+// f062_t1_global_slot -- T1 槽号分域：全局下标与局部帧槽偏移撞号时**不得**误报
+// 旧病（卡 T-20260928-195316）：全局 offset = globals 下标，局部 offset = 帧偏移，
+// 两者共用同一段正整数空间 ⇒ 全局下标 8 撞上「装过地址的局部槽 8」时，
+// `a8 = a8;` 被误判成「地址值不能装进全局 int」，编译期硬错（M4n 撞到）。
+// 判据：本样本编译通过且退出 42；真实的「地址装进全局 int」仍必须被拒（见边界探针）。
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+
+int a0; int a1; int a2; int a3; int a4; int a5; int a6; int a7; int a8;
+
+int main() {
+  int h;
+  int k;
+  h = VirtualAlloc(0, 64, 12288, 4);   // 标记局部槽（偏移 0）
+  k = VirtualAlloc(0, 64, 12288, 4);   // 标记局部槽（偏移 8）—— 与全局 a8 的下标 8 撞号
+  a8 = a8;                             // 旧实现：这里误报硬错
+  if (a8 != 0) { return 1; }
+  return 42;
+}

@@ -1,5 +1,5 @@
 // run-tests.js — FLINT 测试驱动（v0.7.1 野路子：编译→运行→退出码闭环）
-// 用法：node test\run-tests.js   （需先编译 flint.exe）
+// 用法：node test\run-tests.js   （需先编译 hlc.exe）
 // 覆盖：tokenizer 词法 + 表达式编译成自产 exe + 退出码验证 + 语法错误定位
 
 "use strict";
@@ -8,7 +8,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const FLINT = path.join(__dirname, "..", "flint.exe");
+const FLINT = path.join(__dirname, "..", "hlc.exe");
 const SAMPLES = path.join(__dirname, "samples");
 const TMP = path.join(__dirname, "tmp");
 
@@ -22,7 +22,16 @@ function check(name, cond, extra = "") {
 
 function run(args) {
   try {
-    return { ok: true, out: execFileSync(FLINT, args, { encoding: "utf8", timeout: 15000 }) };
+    return { ok: true, out: execFileSync(FLINT, args, { encoding: "utf8", timeout: 15000, windowsHide: true }) };
+  } catch (e) {
+    return { ok: false, code: e.status, stderr: (e.stderr || "").toString(), stdout: (e.stdout || "").toString() };
+  }
+}
+
+// v1.10.5：在指定工作目录跑（给 build/run 子命令的 build\ 目录用，免得污染仓库根）
+function runIn(cwd, args) {
+  try {
+    return { ok: true, out: execFileSync(FLINT, args, { cwd, encoding: "utf8", timeout: 15000, windowsHide: true }) };
   } catch (e) {
     return { ok: false, code: e.status, stderr: (e.stderr || "").toString(), stdout: (e.stdout || "").toString() };
   }
@@ -36,7 +45,7 @@ const RUN_TIMEOUT = 15000;
 const TIMEOUT_SENTINEL = "<超时/被杀>";
 const _runExeTimed = function (exe, timeoutMs, captureOut) {
   try {
-    const out = execFileSync(exe, [], captureOut ? { encoding: "utf8", timeout: timeoutMs } : { timeout: timeoutMs });
+    const out = execFileSync(exe, [], captureOut ? { encoding: "utf8", timeout: timeoutMs, windowsHide: true } : { timeout: timeoutMs, windowsHide: true });
     return { code: 0, out: captureOut ? out : undefined };
   } catch (e) {
     const out = captureOut ? (e.stdout || "").toString() : undefined;
@@ -57,6 +66,22 @@ function runExe(exe) {
 function runExeOut(exe) {
   const r = _runExeTimed(exe, RUN_TIMEOUT, true);
   return { code: r.code, out: r.out };
+}
+
+// 带命令行参数的可执行文件（jsonq 这类真工具需要 argv；FLINT 从 GetCommandLineA 自己抠）。
+// 超时/被杀与干净退出仍用同一套哨兵口径，别让"被超时杀掉"混成退出码 0。
+function runExeArgsOut(exe, args) {
+  try {
+    const out = execFileSync(exe, args, { encoding: "utf8", timeout: RUN_TIMEOUT, windowsHide: true });
+    return { code: 0, out: out };
+  } catch (e) {
+    const out = (e.stdout || "").toString();
+    if (e.status === null || e.status === undefined || e.signal)
+      return { code: TIMEOUT_SENTINEL, out: out };
+    let code = e.status;
+    if (code > 0x7fffffff) code -= 0x100000000;
+    return { code: code, out: out };
+  }
 }
 
 // —— 1. tokenizer 冒烟（v0.1 保留）——
@@ -407,6 +432,25 @@ compileCases.push(
   ["cast1.fl", 42],
 );
 
+// —— v1.9.0：三种无符号整数 uint_8 / uint_32 / uint_64 ——
+// 只跑真 flint：boot 的类型宇宙没有 uint_*（既有类型缺口，同 double / int_64）⇒ 差分门里
+// uint* 样本落 BOOT_FAIL，不是分歧。数值行的独立裁判 = test\facts\f048..f052（uint-exp.js 现算）。
+//   uint1.fl     位掩码 8 位全亮 → 退出码 42（回绕/无符号除模/逻辑右移/无符号比较/混合提升）
+//   uintprint.fl print 与 str 两条打印腿的**无符号十进制**整串比对（期望串由裁判现算）
+compileCases.push(
+  ["uint1.fl", 42],
+  ["uintprint.fl", 0,
+   "A4294967295B18446744073709551615C44D\n[4294967295|18446744073709551615|44]\n"],
+);
+
+// —— v2.0.0：try 错误传播糖 ——
+//   try1.fl = 三层函数，错误码从最内层一路 return 到 main（stdout 与退出码双判据）。
+//   数值层的独立裁判 = test\facts\f053_errprop.fl（8 位掩码全亮 → 退 42）。
+//   boot 侧暂不支持 try（见 PROGRESS 的双端缺口登记）⇒ 本样本不进差分门。
+compileCases.push(
+  ["try1.fl", 42, "ok=0 bad=-7\n"],
+);
+
 fs.mkdirSync(TMP, { recursive: true });
 for (const [sample, expect, expectOut] of compileCases) {
   const src = path.join(SAMPLES, sample);
@@ -430,6 +474,607 @@ for (const [sample, expect, expectOut] of compileCases) {
   check(`run ${label} 退出码`, got === expect, `实际 ${got}`);
   if (expectOut !== undefined) {
     check(`out ${label} stdout`, res.out === expectOut, `实际 ${JSON.stringify(res.out)}`);
+  }
+}
+
+// —— jsonq：第 0 号真工具（apps\jsonq\jsonq.fl，工单-JSON查询器-jsonq.md §3）——
+//   判据 = 退出码 + stdout 双判；期望值由 node 读同一份 JSON **现算**（不手写期望串）。
+//   退出码口径：0 = 取到；1 = 路径不存在且无 stdout；2 = 语法错误 + "行:列 原因"。
+{
+  const SRC = path.join(__dirname, "..", "apps", "jsonq", "jsonq.fl");
+  const exe = path.join(TMP, "jsonq.exe");
+  const build = run(["-o", exe, SRC]);
+  check("jsonq: 编译", build.ok && fs.existsSync(exe),
+    build.ok ? "" : (build.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const SAMPLE = path.join(SAMPLES, "json1.json");
+    const doc = JSON.parse(fs.readFileSync(SAMPLE, "utf8"));
+    // jsonq prints ASCII control bytes as \xNN (one value stays on one line); mirror that.
+    const show = (s) => String(s).replace(/[\x00-\x1f\x7f]/g,
+      (c) => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+    const cases = [
+      [".cpu.temp", 0, show(doc.cpu.temp)],
+      [".cpu.load", 0, show(doc.cpu.load)],
+      [".items[0].name", 0, show(doc.items[0].name)],
+      [".items[1].name", 0, show(doc.items[1].name)],
+      [".items[1].n", 0, show(doc.items[1].n)],
+      [".esc", 0, show(doc.esc)],
+      [".flag", 0, show(doc.flag)],
+      [".nil", 0, show(doc.nil)],
+      [".no.such", 1, ""],
+      [".items[9]", 1, ""],
+      [".cpu.temp.deeper", 1, ""],
+    ];
+    for (const [p, wantCode, wantOut] of cases) {
+      const r = runExeArgsOut(exe, [SAMPLE, p]);
+      check(`jsonq ${p} 退出码`, r.code === wantCode, `实际 ${r.code}`);
+      const want = wantOut === "" ? "" : wantOut + "\n";
+      check(`jsonq ${p} stdout`, r.out === want, `实际 ${JSON.stringify(r.out)}`);
+    }
+    const bad = runExeArgsOut(exe, [path.join(SAMPLES, "jsonbad.json"), ".a"]);
+    check("jsonq 坏 JSON 退出码", bad.code === 2, `实际 ${bad.code}`);
+    check("jsonq 坏 JSON 报位置", /^\d+:\d+ /.test(bad.out), `实际 ${JSON.stringify(bad.out)}`);
+    const noarg = runExeArgsOut(exe, []);
+    check("jsonq 缺参数 退出码", noarg.code === 2, `实际 ${noarg.code}`);
+  }
+}
+
+// —— v2.3.0：str_into(dst, cap, [...]) —— 调用方给缓冲的字符串拼接 ——
+//   判据 = test\facts\f055_str_into.fl（8 位掩码全亮 → 退 42）。
+//   为什么要它：str() 的产物指向唯一一块静态缓冲，begin 会先清零 ⇒ `b = str(["X", a])`
+//   里 a 指向的内容当场没了（SPEC 的别名语义）。str_into 把拼接结果拷进调用方缓冲，从根上没有别名。
+//   boot 侧是已知缺口（lib_parse.fl 报 -250），本探针只在真 flint 侧跑。
+{
+  const src = path.join(__dirname, "facts", "f055_str_into.fl");
+  const exe = path.join(TMP, "f055_str_into.exe");
+  const r = run(["-o", exe, src]);
+  check("str_into 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("str_into 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M0（2026-10-30）：像素层 lib\gfx.fl ——
+//   判据 = test\facts\f070_gfx_dib.fl（8 位掩码全亮 → 退 42）。
+//   钉三件事：① stride = DIB 位图宽 bw（不是逻辑宽 w）；② DIB 字节序 B,G,R,A；
+//   ③ 越界写被丢 / 矩形裁剪。游戏帧缓冲全靠这条直写通道（零新增 api：借 Surf.bits）。
+{
+  const src = path.join(__dirname, "facts", "f070_gfx_dib.fl");
+  const exe = path.join(TMP, "f070_gfx_dib.exe");
+  const r = run(["-o", exe, src]);
+  check("gfx 像素层探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("gfx 像素层探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M1（2026-10-31）：滚屏 lib\grid.fl ——
+//   判据 = test\facts\f071_grid_scroll.fl（8 位掩码全亮 → 退 42）。
+//   钉四件事：① 二维索引 m[y*w+x]；② camera 平移 + 只遍历可见 tile；
+//   ③ 部分越界 tile 的裁剪计数；④ 两端 camera 全屏外 = 0 绘制（不越界不崩）。
+{
+  const src = path.join(__dirname, "facts", "f071_grid_scroll.fl");
+  const exe = path.join(TMP, "f071_grid_scroll.exe");
+  const r = run(["-o", exe, src]);
+  check("grid 滚屏探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("grid 滚屏探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M1 文件管线（2026-10-31）：ASCII 地图读取 lib\mapload.fl ——
+//   判据 = test\facts\f072_grid_load.fl（8 位掩码全亮 → 退 42）。
+//   钉：基本读入 / '.'→0 / '\r\n' / 多余行丢弃 / 短行不崩 / 空文件 / 文件不存在 / 真实 32x17 地图。
+{
+  const src = path.join(__dirname, "facts", "f072_grid_load.fl");
+  const exe = path.join(TMP, "f072_grid_load.exe");
+  const r = run(["-o", exe, src]);
+  check("grid 地图文件探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("grid 地图文件探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M2（2026-10-31）：精灵绘制 lib\sprite.fl（调色板索引 -> GfxBuf）——
+//   判据 = test\facts\f073_sprite.fl（8 位掩码全亮 → 退 42）。
+//   钉：透明跳过 / 帧切换 / 越界不崩 / ncol 截断。
+{
+  const src = path.join(__dirname, "facts", "f073_sprite.fl");
+  const exe = path.join(TMP, "f073_sprite.exe");
+  const r = run(["-o", exe, src]);
+  check("sprite 精灵探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("sprite 精灵探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M2 状态机（2026-10-31）：lib\actor.fl（站/走帧号）——
+//   判据 = test\facts\f074_actor.fl（8 位掩码全亮 → 退 42）。
+//   钉：站恒帧 0 / 走按 8 tick 在帧 1、2 间交替 / 跨轮不漂 / 攻占位回 0 / moving 非 0 即走。
+{
+  const src = path.join(__dirname, "facts", "f074_actor.fl");
+  const exe = path.join(TMP, "f074_actor.exe");
+  const r = run(["-o", exe, src]);
+  check("actor 状态机探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("actor 状态机探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M3（2026-10-31）：定点数 16.16 + AABB + 落地 lib\phys.fl ——
+//   判据 = test\facts\f075_phys.fl（8 位掩码全亮 → 退 42）。
+//   钉：int/16.16 往返（含负数）/ fx_mul 口径 / AABB 相交与贴边 / 落地归零 / 同序列确定性。
+{
+  const src = path.join(__dirname, "facts", "f075_phys.fl");
+  const exe = path.join(TMP, "f075_phys.exe");
+  const r = run(["-o", exe, src]);
+  check("phys 物理探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("phys 物理探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M3 第二刀（2026-10-31）：刚体 + tile 碰撞 lib\body.fl ——
+//   判据 = test\facts\f076_body.fl（8 位掩码全亮 → 退 42）。
+//   钉：空地/实心 AABB、重力下落、落地 onground + vy 归零、落地稳定、撞墙停住、同序列落点确定。
+{
+  const src = path.join(__dirname, "facts", "f076_body.fl");
+  const exe = path.join(TMP, "f076_body.exe");
+  const r = run(["-o", exe, src]);
+  check("body 刚体探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("body 刚体探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M3 第三刀（2026-10-31）：像素级贴边 + 跳跃 ——
+//   判据 = test\facts\f077_body_edge.fl（8 位掩码全亮 → 退 42）。
+//   钉：贴左/右墙的精确 x、贴地精确 y、起跳上升、落地回原 y、空中 onground=0、vx=0 不动、同序列确定。
+{
+  const src = path.join(__dirname, "facts", "f077_body_edge.fl");
+  const exe = path.join(TMP, "f077_body_edge.exe");
+  const r = run(["-o", exe, src]);
+  check("body 贴边跳跃探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("body 贴边跳跃探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4（2026-10-31）：打击感状态机 lib\hitfx.fl ——
+//   判据 = test\facts\f078_hitfx.fl（8 位掩码全亮 → 退 42）。
+//   钉：freeze/flash 递减并停在 0、震屏偏移在 [-shake,shake]、同 seed 序列确定、start 重置、shake=0 恒 0。
+{
+  const src = path.join(__dirname, "facts", "f078_hitfx.fl");
+  const exe = path.join(TMP, "f078_hitfx.exe");
+  const r = run(["-o", exe, src]);
+  check("hitfx 打击感探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("hitfx 打击感探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第二刀（2026-10-31）：攻击盒 + 三段连击 + 输入缓冲 lib\attack.fl ——
+//   判据 = test\facts\f079_attack.fl（8 位掩码全亮 → 退 42）。
+//   钉：左右攻击盒命中/不命中、一段 step/timer、三段、窗口过期归零、超三段不再加、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f079_attack.fl");
+  const exe = path.join(TMP, "f079_attack.exe");
+  const r = run(["-o", exe, src]);
+  check("attack 攻击连击探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("attack 攻击连击探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M5（2026-10-31）：定长对象池 lib\pool.fl ——
+//   判据 = test\facts\f080_pool.fl（8 位掩码全亮 → 退 42）。
+//   钉：init 栈满、LIFO 分配、用尽 -1、回收复用、1000 轮无泄漏、字段写读、越界 free 拒绝。
+{
+  const src = path.join(__dirname, "facts", "f080_pool.fl");
+  const exe = path.join(TMP, "f080_pool.exe");
+  const r = run(["-o", exe, src]);
+  check("pool 对象池探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("pool 对象池探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M5 第二刀（2026-10-31）：敌人 AI 状态机 lib\enemy.fl ——
+//   判据 = test\facts\f081_enemy.fl（8 位掩码全亮 → 退 42）。
+//   钉：三档距离（巡逻/追击/攻击）、边界 16/48、死亡不可逆、巡逻折返、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f081_enemy.fl");
+  const exe = path.join(TMP, "f081_enemy.exe");
+  const r = run(["-o", exe, src]);
+  check("enemy AI 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("enemy AI 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M7（2026-10-31）：存档二进制序列化 lib\save.fl ——
+//   判据 = test\facts\f082_save.fl（8 位掩码全亮 → 退 42）。
+//   钉：pack 字节数、unpack 往返、魔数/版本/长度拒绝、cap 不够、负数小端、文件往返。
+{
+  const src = path.join(__dirname, "facts", "f082_save.fl");
+  const exe = path.join(TMP, "f082_save.exe");
+  const r = run(["-o", exe, src]);
+  check("save 存档探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("save 存档探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M3 第四刀（2026-10-31）：单向平台（tile 9）——
+//   判据 = test\facts\f083_oneway.fl（8 位掩码全亮 → 退 42）。
+//   钉：从上落下停在平台顶、从下上跳穿过、body_hit_solid 不算 9、横向真墙仍挡、落地稳定、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f083_oneway.fl");
+  const exe = path.join(TMP, "f083_oneway.exe");
+  const r = run(["-o", exe, src]);
+  check("oneway 单向平台探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("oneway 单向平台探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M6（2026-10-31）：音频 lib\audio.fl（PlaySoundA 异步）——
+//   判据 = test\facts\f084_audio.fl（8 位掩码全亮 → 退 42）。
+//   钉：stop 非 0、不存在文件异步提交不崩、真 WAV 播放 1、调用 <100ms、NULL 返回 0、
+//       连播不崩、stop 后再播、两次 stop 确定。
+{
+  const src = path.join(__dirname, "facts", "f084_audio.fl");
+  const exe = path.join(TMP, "f084_audio.exe");
+  const r = run(["-o", exe, src]);
+  check("audio 音频探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("audio 音频探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M5 第三刀（2026-10-31）：第二种精灵表（敌人 12x12）与共存 ——
+//   判据 = test\facts\f085_enemy_sprite.fl（8 位掩码全亮 → 退 42）。
+//   钉：尺寸/帧数、load 数据抽查、帧 1 脚部不同、blit 像素色。
+{
+  const src = path.join(__dirname, "facts", "f085_enemy_sprite.fl");
+  const exe = path.join(TMP, "f085_enemy_sprite.exe");
+  const r = run(["-o", exe, src]);
+  check("enemy_sprite 敌人图探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("enemy_sprite 敌人图探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第三刀（2026-10-31）：闪白叠白不抹画面 gfx_flash ——
+//   判据 = test\facts\f086_flash.fl（8 位掩码全亮 → 退 42）。
+//   钉：黑底 50% 叠白、alpha=0/255/越界、白底不变、纯红叠白、负 alpha 拒绝、零尺寸不崩。
+{
+  const src = path.join(__dirname, "facts", "f086_flash.fl");
+  const exe = path.join(TMP, "f086_flash.exe");
+  const r = run(["-o", exe, src]);
+  check("flash 闪白探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("flash 闪白探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M6 第二刀（2026-10-31）：BGM 循环 audio_play_loop ——
+//   判据 = test\facts\f087_bgm.fl（8 位掩码全亮 → 退 42）。
+//   钉：循环播放 1、调用 <100ms、stop、NULL 拒绝、不存在文件不崩、连播、停后普通播、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f087_bgm.fl");
+  const exe = path.join(TMP, "f087_bgm.exe");
+  const r = run(["-o", exe, src]);
+  check("bgm 循环探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("bgm 循环探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M5 第四刀（2026-10-31）：敌人池 + AI 更新循环（无渲染汇合）——
+//   判据 = test\facts\f088_enemy_pool.fl（8 位掩码全亮 → 退 42）。
+//   钉：8 个池满、第 9 个 -1、1000 帧 AI、无泄漏、回收复用、top 计数、回收不擦字段、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f088_enemy_pool.fl");
+  const exe = path.join(TMP, "f088_enemy_pool.exe");
+  const r = run(["-o", exe, src]);
+  check("enemy_pool 敌人池探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("enemy_pool 敌人池探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M2 第四刀（2026-10-31）：精灵整数放大 sprite_blit_scale ——
+//   判据 = test\facts\f089_sprite_scale.fl（8 位掩码全亮 → 退 42）。
+//   钉：scale=1 等价、scale=2 像素数、放大块颜色、透明不放大、scale=0 拒绝、kaguya 素材。
+{
+  const src = path.join(__dirname, "facts", "f089_sprite_scale.fl");
+  const exe = path.join(TMP, "f089_sprite_scale.exe");
+  const r = run(["-o", exe, src]);
+  check("sprite_scale 放大探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("sprite_scale 放大探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 残影修复（2026-10-31）：gfx_clear / gfx_flash 必须按 stride 逐行 ——
+//   判据 = test\facts\f090_clear_stride.fl（8 位掩码全亮 → 退 42）。
+//   钉：stride>w 时逻辑区全清、DIB 留白不被误清、flash 同样按 stride、零尺寸不崩。
+{
+  const src = path.join(__dirname, "facts", "f090_clear_stride.fl");
+  const exe = path.join(TMP, "f090_clear_stride.exe");
+  const r = run(["-o", exe, src]);
+  check("clear_stride 残影探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("clear_stride 残影探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第三刀（2026-10-31）：粒子 + 月牙 lib\fx.fl ——
+//   判据 = test\facts\f091_fx.fl（8 位掩码全亮 → 退 42）。
+//   钉：空池发射、槽位顺序、粒子坐标、update 位移/寿命、到期复用、满池 -1、月牙像素数。
+{
+  const src = path.join(__dirname, "facts", "f091_fx.fl");
+  const exe = path.join(TMP, "f091_fx.exe");
+  const r = run(["-o", exe, src]);
+  check("fx 特效探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("fx 特效探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 平走走出平台必须掉下去（2026-10-31，修"悬空"）——
+//   判据 = test\facts\f092_walk_off.fl（8 位掩码全亮 → 退 42）。
+//   钉：落地、走到平台边缘外、继续下落（不是卡在边缘）、onground 归 0、边缘仍算站着、序列确定。
+{
+  const src = path.join(__dirname, "facts", "f092_walk_off.fl");
+  const exe = path.join(TMP, "f092_walk_off.exe");
+  const r = run(["-o", exe, src]);
+  check("walk_off 走落探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("walk_off 走落探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第四刀（2026-10-31）：贝塞尔刀光弧 + 沿弧粒子 ——
+//   判据 = test\facts\f093_slash_arc.fl（8 位掩码全亮 → 退 42）。
+//   钉：弧像素数（16 点 × w²）、半程、t=0、w=1、发射 14 个、粒子存活、起点墨、确定性。
+{
+  const src = path.join(__dirname, "facts", "f093_slash_arc.fl");
+  const exe = path.join(TMP, "f093_slash_arc.exe");
+  const r = run(["-o", exe, src]);
+  check("slash_arc 刀光探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("slash_arc 刀光探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第五刀（2026-10-31）：SDF 半圆弧刀光（逐像素判距离，不断线）——
+//   判据 = test\facts\f094_slash_sdf.fl（8 位掩码全亮 → 退 42）。
+//   钉：整数 sqrt 五档、右半圆有墨、左半不画、y 限制、确定性。
+{
+  const src = path.join(__dirname, "facts", "f094_slash_sdf.fl");
+  const exe = path.join(TMP, "f094_slash_sdf.exe");
+  const r = run(["-o", exe, src]);
+  check("slash_sdf 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("slash_sdf 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第六刀（2026-11-01）：3D 弧面刀光细线 + 粒子向上飘 ——
+//   判据 = test\facts\f095_s3_arc.fl（8 位掩码全亮 → 退 42）。
+//   钉：97 个采样点回吐、细线宽度 1..4px、s3_emit_arc 发射数、vy 向上、fx_update_rise 上飘且收敛。
+{
+  const src = path.join(__dirname, "facts", "f095_s3_arc.fl");
+  const exe = path.join(TMP, "f095_s3_arc.exe");
+  const r = run(["-o", exe, src]);
+  check("s3_arc 3D 刀光探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("s3_arc 3D 刀光探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M4 第七刀（2026-11-01）：刀光特效池（多实例、0.1s 连发、非纯加速）——
+//   判据 = test\facts\f096_slashfx.fl（8 位掩码全亮 → 退 42）。
+//   钉：寿命 12 帧、空槽启动、池满顶掉 0 号、tick 全减一、st=1 只白弧、st=2 白+青、face=0 镜像。
+{
+  const src = path.join(__dirname, "facts", "f096_slashfx.fl");
+  const exe = path.join(TMP, "f096_slashfx.exe");
+  const r = run(["-o", exe, src]);
+  check("slashfx 特效池探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("slashfx 特效池探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 游戏 M6 第一刀（2026-11-01）：受击反应（硬直 + 击退）——
+//   判据 = test\facts\f097_hitstun.fl（8 位掩码全亮 → 退 42）。
+//   钉：face 方向、初始硬直 10、tick 递减、击退 ×3/4 衰减、10 帧后解除、速度趋 0。
+{
+  const src = path.join(__dirname, "facts", "f097_hitstun.fl");
+  const exe = path.join(TMP, "f097_hitstun.exe");
+  const r = run(["-o", exe, src]);
+  check("受击反应探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("受击反应探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 语言 v2.1.0 第一刀（2026-11-01）：enum 具名整数常量 ——
+//   判据 = test\facts\f098_enum.fl（8 位掩码全亮 → 退 42）。
+//   钉：首项 0、自增、显式赋值、多 enum 并存、常量参与算式、局部变量遮蔽常量、循环上界。
+//   ⚠️ boot 端暂不支持 enum（boot 源码不用、samples 不用 ⇒ 自举与差分门不受影响）。
+{
+  const src = path.join(__dirname, "facts", "f098_enum.fl");
+  const exe = path.join(TMP, "f098_enum.exe");
+  const r = run(["-o", exe, src]);
+  check("enum 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("enum 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— 语言 v2.2.0（2026-11-01）：二维数组 `int m[32][17]`（最小形态）——
+//   判据 = test\facts\f099_2darr.fl（8 位掩码全亮 → 退 42）。
+//   钉：基本写读 / 行列不混 / row-major 布局（&m[0][0] 一维别名做独立裁判）/ 表达式下标 /
+//       首末边界 / 与一维数组并存 / 行边界不串 / 全量填充校验和 + 哨兵不被写坏。
+//   boot 端同步支持（规格 ty=7，见 boot\lib_parse.fl）。
+{
+  const src = path.join(__dirname, "facts", "f099_2darr.fl");
+  const exe = path.join(TMP, "f099_2darr.exe");
+  const r = run(["-o", exe, src]);
+  check("二维数组探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("二维数组探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— v2.2.0：二维数组的禁区（五条全是编译期硬错，绝不静默）——
+//   为什么必须是硬错：char/double 的整块布局没定；三维/变量列数会让帧槽算错；只写一维下标
+//   若静默按一维展开会读到别的行；全局二维的 .data 行列布局与初始化都没定。
+{
+  const cases = [
+    ["d2_bad_char.fl", "int main() { char c[4][5]; return 0; }\n",
+      /二维数组暂只支持 int/, "char 二维 → 编译期硬错（只开 int）"],
+    ["d2_bad_3d.fl", "int main() { int t[2][3][4]; return 0; }\n",
+      /三维数组暂不支持/, "三维 → 编译期硬错"],
+    ["d2_bad_colvar.fl", "int main() { int n = 5; int m[4][n]; return 0; }\n",
+      /列数须为数字常量/, "变量列数 → 编译期硬错（帧槽必须在编译期算死）"],
+    ["d2_bad_onesub.fl", "int main() { int m[4][5]; m[2] = 9; return 0; }\n",
+      /需要两个下标/, "只写一维下标 → 编译期硬错（不静默读错行）"],
+    ["d2_bad_global.fl", "int g[4][5];\nint main() { return 0; }\n",
+      /全局二维数组暂不支持/, "全局二维 → 编译期硬错（只开局部）"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const rr = run([path.join(TMP, name)]);
+    check(`二维数组负例：${label}`, !rr.ok && re.test(rr.stderr || ""),
+      (rr.stderr || "").split("\n").slice(1, 3).join(" ").slice(0, 160));
+  }
+  // -strict 的常量**列**下标越界（行下标沿用既有数组口）——加了检查就得有反证用例
+  const d2o = path.join(TMP, "d2_strict_oob.fl");
+  fs.writeFileSync(d2o, "int main() { int m[4][5]; m[1][20] = 1; return m[1][0]; }\n");
+  const rd1 = run(["-strict", "-o", path.join(TMP, "d2_strict_oob.exe"), d2o]);
+  check("二维数组负例：-strict 常量列下标越界被拦（E-STRICT-BOUNDS）",
+    !rd1.ok && /E-STRICT-BOUNDS/.test(rd1.stderr || ""), (rd1.stderr || "").trim().slice(0, 160));
+  const rd0 = run(["-o", path.join(TMP, "d2_strict_ok.exe"), d2o]);
+  check("二维数组负例：不带 -strict 时同一文件照常编译（「默认静默」的定义）", rd0.ok,
+    (rd0.stderr || "").trim().slice(0, 160));
+}
+
+// —— 语言 v2.4.0（2026-11-01）：struct 嵌套 struct **值字段**（内层必须已定义） ——
+//   判据 = test\facts\f100_nested_struct.fl（8 位掩码全亮 → 退 42）。
+//   钉：基本写读 / 两级字段互不串 / **C 布局字节（int* 别名独立裁判 ⇒ v@0、b.x@4、b.y@8）** /
+//       连续两次读写 / 与普通字段共存 / &a.b 传 struct B* 形参 / 两个外层实例独立 / p->b.x 两级指针。
+//   boot 端同步支持（字段类型码 5 = struct 值字段，见 boot\lib_parse.fl 的 fld_ty / st_align_of）。
+{
+  const src = path.join(__dirname, "facts", "f100_nested_struct.fl");
+  const exe = path.join(TMP, "f100_nested_struct.exe");
+  const r = run(["-o", exe, src]);
+  check("嵌套 struct 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("嵌套 struct 探针：8 位掩码全亮", res.code === 42, "实际 " + res.code);
+  }
+}
+
+// —— v2.4.0：struct 嵌套的禁区（三条全是编译期硬错；boot 侧同结论，专码 -135 / -242 / -200）——
+//   为什么必须硬错：自嵌套值字段尺寸无穷（指针形态 `struct A *next;` 仍合法）；嵌套数组字段的
+//   布局/下标语义未定；前向/互相嵌套会撕开「内层必须已定义」这条唯一性判据。
+{
+  const cases = [
+    ["ns_bad_undef.fl", "struct A { struct B b; }\nint main() { struct A a; a.b.x = 1; return 0; }\n",
+      /未定义的结构体类型 'B'/, "内层未定义 → 编译期硬错"],
+    ["ns_bad_self.fl", "struct A { int v; struct A a; }\nint main() { return 0; }\n",
+      /不能把自身作为值字段/, "自嵌套值字段 → 编译期硬错（指针形态仍合法）"],
+    ["ns_bad_arr.fl", "struct B { int x; }\nstruct A { struct B b[4]; }\nint main() { return 0; }\n",
+      /值字段暂不支持数组形态/, "嵌套数组字段 → 编译期硬错"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const rr = run([path.join(TMP, name)]);
+    check(`嵌套 struct 负例：${label}`, !rr.ok && re.test(rr.stderr || ""),
+      (rr.stderr || "").split("\n").slice(1, 3).join(" ").slice(0, 160));
+  }
+}
+
+// —— 语言 v2.5.0（2026-11-01）：局部 int 数组整体初始化 `int a[N] = {v0, ...};` ——
+//   判据 = test\facts\f101_array_init.fl（8 位掩码全亮 → 退 42）。
+//   钉：基本形态 / 不足补 0 / 负值 / enum 常量作元素 / 表达式元素 / 与逐元素赋值同结果（独立裁判）/
+//       二维 row-major 填充 / 长度 1。
+//   ⚠️ boot 端暂未支持（boot 源码不用、samples 不用 ⇒ 自举与差分门不受影响）。
+{
+  const src = path.join(__dirname, "facts", "f101_array_init.fl");
+  const exe = path.join(TMP, "f101_array_init.exe");
+  const r = run(["-o", exe, src]);
+  check("数组整体初始化探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("数组整体初始化探针：8 位掩码全亮", res.code === 42, "实际 " + res.code);
+  }
+}
+
+// —— v1.9.0：无符号类型的**禁区**（全是编译期硬错：不允许静默截断 / 静默跨浮点）——
+// 与 int_64 的既有口径逐条同形（拓宽隐式、收窄必须显式、跨浮点只走显式转型）。
+{
+  const cases = [
+    ["nu_narrow.fl", "int main() { uint_64 u = 0 - 1; int i = u; return i; }\n",
+      /不能把 uint_64 赋给 int/, "uint_64 → int 隐式收窄 → 编译期硬错"],
+    ["nu_dblasgn.fl", "int main() { double d = 1.5; uint_32 u = d; return u; }\n",
+      /不能把 double 赋给 uint_32/, "double → uint_32 隐式转换 → 编译期硬错（只走显式转型）"],
+    ["nu_dblarg.fl", "int f(uint_32 x) { return x; }\nint main() { double d = 1.5; return f(d); }\n",
+      /double 实参不支持/, "double 实参传给 uint_32 形参 → 编译期硬错"],
+    ["nu_dblmix.fl", "int main() { uint_32 u = 1; double d = 2.0; return (u + d); }\n",
+      /不能隐式转 double|不支持 double/, "uint_32 与 double 混算 → 编译期硬错"],
+    ["nu_ref.fl", "int main() { uint_64 u = 1; uint_64 &r = u; return 0; }\n",
+      /引用暂不支持/, "uint_64 引用 → 编译期硬错（引用读是 32 位解引用）"],
+    ["nu_new.fl", "int main() { uint_64 *p = new uint_64; return 0; }\n",
+      /new uint_64.*暂不支持|堆上要 64 位/, "new uint_64 → 编译期硬错（堆负载按类型分派未做）"],
+    ["nu_switch.fl", "int main() { uint_64 u = 1; switch (u) { case 1: return 1; } return 0; }\n",
+      /switch 的条件暂不支持 64 位/, "switch 条件是 uint_64 → 编译期硬错（跳转表 32 位）"],
+    ["nu_pow.fl", "int main() { uint_64 u = 2; uint_64 v = u ^^ 3; return v; }\n",
+      /\^\^ 暂不支持 64 位/, "uint_64 的 ^^ → 编译期硬错（快速幂是 32 位累加器）"],
+    ["nu_apiarg.fl",
+      "api user32 int MessageBoxA(int, int, int, int);\nint main() { uint_64 u = 1; return MessageBoxA(0, 0, 0, u); }\n",
+      /64 位整数（int_64\/uint_64）实参不能直接传给 api/, "uint_64 实参传给 api → 编译期硬错"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const rr = run([path.join(TMP, name)]);
+    check(`无符号负例：${label}`, !rr.ok && re.test(rr.stderr || ""),
+      (rr.stderr || "").split("\n").slice(1, 3).join(" ").slice(0, 160));
   }
 }
 
@@ -629,10 +1274,10 @@ for (const [sample, expect, expectOut] of compileCases) {
   r = run([path.join(TMP, "syn22.fl")]);
   check("语法错误: int 变量下标被拒", !r.ok && /下标对象须为数组或指针/.test(r.stderr), r.stderr);
 
-  // 数组整体初始化
+  // 数组整体初始化：标量初值仍被拒（v2.5.0 起 `= {…}` 合法，`= 1` 不合法）
   fs.writeFileSync(path.join(TMP, "syn23.fl"), "int main() { int a[3] = 1; return 0; }\n");
   r = run([path.join(TMP, "syn23.fl")]);
-  check("语法错误: 数组初始化被拒", !r.ok && /数组暂不支持整体初始化/.test(r.stderr), r.stderr);
+  check("语法错误: 数组标量初值被拒", !r.ok && /整体初始化必须写成/.test(r.stderr), r.stderr);
 
   // 数组名赋值
   fs.writeFileSync(path.join(TMP, "syn24.fl"), "int main() { int a[3]; a = 1; return 0; }\n");
@@ -877,9 +1522,12 @@ for (const [sample, expect, expectOut] of compileCases) {
   r = run([path.join(TMP, "syn68.fl")]);
   check("语法错误: 非指针字段下标被拒", !r.ok && /下标对象须为数组或指针/.test(r.stderr), r.stderr);
 
+  // v2.1.0：struct 数组落地后，**标量** struct 的下标仍须拒 —— 文案改为点名的版本
+  //   （旧文案是通用的「下标对象须为数组或指针」，会让人以为"struct 天生不能下标"，
+  //    与新增的 a[i] 形态矛盾；这里按新口径重写断言，绝不放松）
   fs.writeFileSync(path.join(TMP, "syn69.fl"), "struct S { int n; int *p; }\nint main() {\n  struct S s;\n  return s[0];\n}\n");
   r = run([path.join(TMP, "syn69.fl")]);
-  check("语法错误: 结构体值下标被拒", !r.ok && /下标对象须为数组或指针/.test(r.stderr), r.stderr);
+  check("语法错误: 结构体值下标被拒", !r.ok && /不是数组，不能下标/.test(r.stderr), r.stderr);
 
   fs.writeFileSync(path.join(TMP, "syn70.fl"), "int main() {\n  return 1[0];\n}\n");
   r = run([path.join(TMP, "syn70.fl")]);
@@ -1400,10 +2048,12 @@ for (const [sample, expect, expectOut] of compileCases) {
       /长度必须为正/, "全局数组长度为 0 → 编译期报错"],
     ["ng_arr_many.fl", "int a[2] = {1, 2, 3};\nint main() { return a[0]; }\n",
       /初值元素比声明长度多/, "全局数组初值元素多于声明长度 → 编译期报错（不静默丢弃）"],
-    ["ng_ptr_type.fl", "int *gp;\nint main() { return 0; }\n",
-      /暂不支持指针类型的全局变量/, "指针类型全局变量 → 编译期明确报错（第一版边界，非静默）"],
+    // v1.10.0（IDE 服务端）：指针全局已开放 ⇒ 旧的「必须报错」负例失效，
+    //   换成同族里**仍然成立**的一条真边界：指针全局不能写成数组（那语义是「4 个指针」）。
+    ["ng_ptr_arr.fl", "int *gp[4];\nint main() { return 0; }\n",
+      /指针全局不支持数组形式/, "指针全局写成数组形式 → 编译期明确报错"],
     ["ng_struct_type.fl", "struct S { int x; }\nstruct S gs;\nint main() { return 0; }\n",
-      /暂不支持 struct 全局变量/, "struct 全局变量 → 编译期明确报错（第一版边界，非静默）"],
+      /暂不支持 struct 按值全局变量/, "struct 按值全局变量 → 编译期明确报错（第一版边界，非静默）"],
     ["ng_dbl_intinit.fl", "double gd = 1;\nint main() { return 0; }\n",
       /初值必须是浮点字面量/, "int 字面量当 double 全局初值 → 编译期报错（位型会读成 5e-324）"],
     ["ng_len_kw.fl", "int a[n];\nint main() { return 0; }\n",
@@ -1413,6 +2063,41 @@ for (const [sample, expect, expectOut] of compileCases) {
     fs.writeFileSync(path.join(TMP, name), src);
     const r = run([path.join(TMP, name)]);
     check(`负例：${label}`, !r.ok && re.test(r.stderr || ""), (r.stderr || "").split("\n")[1] || "");
+  }
+}
+
+// —— v1.10.0：全局指针（int* / char*）—— 从「必须报错」转成「必须能跑」——
+//   语义按决策 40：裸指针 ± 整数是**字节**步进，只有下标才按元素宽缩放。
+{
+  const src = [
+    "int buf[4];",
+    "int *gp;",
+    "char *gs;",
+    "int main() {",
+    "  gp = buf;",
+    "  gp[1] = 7;",
+    "  if (buf[1] != 7) { return 1; }",
+    "  gp = buf + 8;",
+    "  *gp = 9;",
+    "  if (buf[2] != 9) { return 2; }",
+    '  gs = "OK";',
+    "  if (gs[0] != 79) { return 3; }",
+    "  if (gs[1] != 75) { return 4; }",
+    "  gp = buf;",
+    "  if (gp != &buf[0]) { return 5; }",
+    "  return 42;",
+    "}",
+    "",
+  ].join("\n");
+  const f = path.join(TMP, "pg_global_ptr.fl");
+  fs.writeFileSync(f, src);
+  const r = run([f]);
+  if (!r.ok) {
+    check("正例：全局指针可赋值/下标读写", false, (r.stderr || "").split("\n")[1] || "");
+  } else {
+    const exe = f.replace(/\.fl$/, ".exe");
+    const code = runExe(exe);
+    check("正例：全局指针可赋值/下标读写（决策 40 字节步进）", code === 42, "exit=" + code);
   }
 }
 
@@ -1702,6 +2387,13 @@ for (const [sample, expect, expectOut] of compileCases) {
     "struct S { int n; char c; }\nint main() { struct S s; s.n = 300; s.c = 65; return (s.n + s.c) & 255; }\n", (300 + 65) & 255);
   matrixCase("struct 数组字段",
     "struct S { int buf[3]; }\nint main() { struct S s; s.buf[1] = 5; return s.buf[1]; }\n", 5);
+  // v2.1.0：局部 struct 数组（元素步长 = 8*ceil(size/8)；Pair 8B→8，Three 12B→16）
+  matrixCase("struct 数组写读",
+    "struct S { int n; int m; }\nint main() { struct S a[3]; a[1].n = 7; a[2].m = 5; return a[1].n + a[2].m; }\n", 12);
+  matrixCase("struct 数组循环填读（12B 元素 = 16B 步长）",
+    "struct S { int x; int y; int z; }\nint main() { struct S a[4]; int s = 0;"
+    + " for (int i = 0; i < 4; i = i + 1) { a[i].z = i * 2; }"
+    + " for (int i = 0; i < 4; i = i + 1) { s = s + a[i].z; } return s; }\n", 12);
   matrixCase("struct 指针形参 p->n",
     "struct S { int n; }\nint get(struct S *p) { return p->n; }\nint main() { struct S s; s.n = 33; return get(&s); }\n", 33);
   matrixCase("char 数组逐字节",
@@ -1750,6 +2442,104 @@ for (const [sample, expect, expectOut] of compileCases) {
     "int main() { return to_int(-2.5); }\n", -2);
 
   console.log(`矩阵与 -strict 家族合计 ${mc} 个编译样本`);
+}
+
+// —— v2.0.0：try 错误传播糖的禁区（五条全是编译期硬错，绝不静默）——
+{
+  const cases = [
+    ["try_bad_lhs.fl", "int main() { int e = 0; int a[2]; try a[0] = e; return 0; }\n",
+      /左值只能是单个变量/, "左值是数组元素 → 编译期硬错（展开会把它求值两次）"],
+    ["try_bad_void.fl", "void f() { int e = 0; try e = 1; }\nint main() { return 0; }\n",
+      /void 函数里不能用 try/, "void 函数 → 编译期硬错（没有返回值可带错误码）"],
+    ["try_bad_ret.fl", "int *f() { int e = 0; try e = 1; return 0; }\nint main() { return 0; }\n",
+      /只能用在返回 int 的函数/, "返回指针的函数 → 编译期硬错（错误码约定是 int）"],
+    ["try_bad_undecl.fl", "int main() { try zz = 1; return 0; }\n",
+      /未声明/, "目标变量未声明 → 编译期硬错"],
+    ["try_bad_64.fl", "int main() { int_64 e = 0; try e = 1; return 0; }\n",
+      /32 位整数/, "64 位目标变量 → 编译期硬错（return 给 int 函数会静默截断）"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const rr = run([path.join(TMP, name)]);
+    check(`try 负例：${label}`, !rr.ok && re.test(rr.stderr || ""),
+      (rr.stderr || "").split("\n").slice(1, 3).join(" ").slice(0, 160));
+  }
+}
+
+// —— v2.1.0：局部 struct 数组 `struct S a[N];` ——
+//   starr1.fl = 8 位掩码全亮 → 退 42（字段写读 / 循环填读 / 元素步长精确钉死 / 指针字段元素 /
+//   &a[i] 与数组名作 struct S * 实参 / char 字段 / 元素内定长数组字段双下标）。
+//   数值层的独立裁判 = test\facts\f054_structarr.fl（同一套判据的探针形态，另加 -strict 越界负例）。
+//   boot 侧不支持（要动变量规格编码 + 新发射档）⇒ 差分门记 BOOT_FAIL，见 PROGRESS 的缺口登记。
+compileCases.push(
+  ["starr1.fl", 42],
+);
+
+// —— v2.1.0：struct 数组的禁区（六条全是编译期硬错，绝不静默）——
+//   为什么必须是硬错：长度 0 / 变量长度会让帧槽算错（静默越界）；整体初始化/整体赋值会让
+//   "struct 值语义"凭空出现（FLINT 没有）；`s[0]`（标量 struct 下标）若静默按 int 读会读错宽度。
+{
+  const cases = [
+    ["starr_bad_len0.fl", "struct S { int n; }\nint main() { struct S a[0]; return 0; }\n",
+      /struct 数组长度须为正数/, "长度 0 → 编译期硬错"],
+    ["starr_bad_lenvar.fl", "struct S { int n; }\nint main() { int n = 3; struct S a[n]; return 0; }\n",
+      /struct 数组长度须为数字常量/, "非常量长度 → 编译期硬错（帧槽必须在编译期算死）"],
+    ["starr_bad_scalar.fl", "struct S { int n; }\nint main() { struct S s; s[0].n = 1; return 0; }\n",
+      /不是数组，不能下标/, "标量 struct 下标 → 编译期硬错（文案点名「不是数组」）"],
+    ["starr_bad_init.fl", "struct S { int n; }\nint main() { struct S a[2] = 1; return 0; }\n",
+      /struct 数组暂不支持整体初始化/, "struct 数组整体初始化 → 编译期硬错"],
+    ["starr_bad_assign.fl", "struct S { int n; }\nint main() { struct S a[2]; struct S b; a[0] = b; return 0; }\n",
+      /赋值左边必须是变量或/, "元素整体赋值 → 编译期硬错（struct 没有整体值语义）"],
+    ["starr_bad_method.fl", "struct S { int n; }\nint S_go(struct S *p) { return p->n; }\n"
+      + "int main() { struct S a[2]; a[0].n = 1; return a[0].go(); }\n",
+      /方法调用点糖暂不支持/, "元素上的方法调用点糖 → 编译期硬错（手写 S_go(&a[0]) 等价）"],
+  ];
+  for (const [name, src, re, label] of cases) {
+    fs.writeFileSync(path.join(TMP, name), src);
+    const rr = run([path.join(TMP, name)]);
+    check(`struct 数组负例：${label}`, !rr.ok && re.test(rr.stderr || ""),
+      (rr.stderr || "").split("\n").slice(1, 3).join(" ").slice(0, 160));
+  }
+  // -strict 的常量下标越界（与 int 数组同一条判据；默认档静默 = 与既有数组口径一致）
+  const sbo = path.join(TMP, "starr_oob.fl");
+  const sbs = path.join(TMP, "starr_oob.s.exe");
+  fs.writeFileSync(sbo, "struct S { int n; }\nint main() { struct S a[2]; a[2].n = 1; return a[0].n; }\n");
+  const rs1 = run(["-strict", "-o", sbs, sbo]);
+  check("struct 数组负例：-strict 常量下标越界被拦（E-STRICT-BOUNDS）",
+    !rs1.ok && /E-STRICT-BOUNDS/.test(rs1.stderr || ""), (rs1.stderr || "").trim().slice(0, 160));
+  const rs0 = run(["-o", path.join(TMP, "starr_oob.exe"), sbo]);
+  check("struct 数组负例：不带 -strict 时同一文件照常编译（「默认静默」的定义）", rs0.ok,
+    (rs0.stderr || "").trim().slice(0, 160));
+}
+
+// —— v1.10.2：hlc -run（编译成功后运行产物、返回程序自己的退出码）——
+//   判据三条：① 程序退出码原样冒泡；② 编译失败时不运行、退 1；③ 不加 -run 时行为与从前一致（退 0）。
+{
+  const rf = path.join(TMP, "runflag.fl");
+  fs.writeFileSync(rf, "int main() { return 7; }\n");
+  const r = run(["-run", "-o", path.join(TMP, "runflag.exe"), rf]);
+  check("hlc -run：退出码 = 程序退出码", !r.ok && r.code === 7,
+    (r.stderr || "").trim().slice(0, 160));
+  const bad = path.join(TMP, "runflag_bad.fl");
+  fs.writeFileSync(bad, "int main() { return 0 }\n");
+  const rb = run(["-run", "-o", path.join(TMP, "runflag_bad.exe"), bad]);
+  check("hlc -run：编译失败不运行（退 1）", !rb.ok && rb.code === 1 && /编译错误/.test(rb.stderr || ""),
+    (rb.stderr || "").trim().slice(0, 160));
+  const rd = run(["-o", path.join(TMP, "runflag2.exe"), rf]);
+  check("hlc 默认档不运行（退 0）", rd.ok, (rd.stderr || "").trim().slice(0, 160));
+}
+
+// —— v1.10.5：hlc build / run 子命令（build\ 产物目录；run = build 后立即运行）——
+{
+  const l = path.join(TMP, "subcmd.fl");
+  fs.writeFileSync(l, "int main() { return 5; }\n");
+  const r1 = runIn(TMP, ["build", "subcmd.fl"]);
+  check("hlc build：产物进 build\\ 目录",
+    r1.ok && fs.existsSync(path.join(TMP, "build", "subcmd.exe")),
+    (r1.stderr || "").trim().slice(0, 160));
+  const r2 = runIn(TMP, ["run", "subcmd.fl"]);
+  check("hlc run：返回程序退出码", !r2.ok && r2.code === 5,
+    (r2.stderr || "").trim().slice(0, 160));
 }
 
 // 清理产物（保留样本源码）

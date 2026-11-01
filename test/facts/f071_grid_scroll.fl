@@ -1,0 +1,95 @@
+// f071_grid_scroll.fl -- 游戏 M1：tile 地图 -> int 数组 + camera + 视口裁剪
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 场景：地图 8x2 tile（每 tile 16x16 px，共 128x32），视口 64x32（4x2 tile）。
+// tile 号 1..16 写成颜色 0x00100000 + t*0x00010101（t 不同 -> 颜色不同）。
+// 每位一格，红的位一眼可见：
+//   bit0  grid_at 的二维索引 m[y*w+x]：16 格逐格核对
+//   bit1  camera(0,0) 视口 64x32：可见 4x2=8 tile -> 写入 8x256 = 2048 像素
+//   bit2  camera(0,0) 像素抽查：(0,0)=tile1 色、(63,31)=tile12 色
+//   bit3  camera(64,0)：可见 tx 4..7 -> 2048 像素；(0,0)=tile5 色
+//   bit4  camera(-16,0)：tile0 只左移 16，可见 tx 0..2 -> 3x2x256 = 1536 像素
+//   bit5  camera(96,0)：可见 tx 6..7 -> 2x2x256 = 1024 像素
+//   bit6  视口缩到 48x32：可见 3x2=6 tile -> 1536 像素，且 (47,31)=tile11 色
+//   bit7  camera(-1000,0) 与 (1000,0)：视口完全在地图外 -> 写入 0 像素（两端不越界、不崩）
+include "../../lib/gfx.fl"
+include "../../lib/grid.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  struct Grid g;
+  int map[16];
+  int mask = 0;
+  int i = 0;
+  int n = 0;
+  int BG = 0x00ABCDEF;
+
+  // 内存 DIB（不需要窗口，和 f070 同路）
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 128; s.bh = 32; s.cw = 128; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 64, 32) == 0) { return 2; }
+
+  // 地图：行 0 = 1..8，行 1 = 9..16
+  i = 0;
+  while (i < 16) { map[i] = i + 1; i = i + 1; }
+  if (grid_init(&g, map, 8, 2, 16, 16) == 0) { return 3; }
+
+  // bit0：二维索引逐格核对
+  i = 0;
+  n = 1;
+  while (i < 16) {
+    if (grid_at(&g, i % 8, i / 8) != i + 1) { n = 0; }
+    i = i + 1;
+  }
+  if (n == 1) { mask = mask | 1; }
+
+  // bit1 + bit2：camera(0,0)
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, 0, 0);
+  if (n == 2048) { mask = mask | 2; }
+  if (gfx_get(&b, 0, 0) == 0x00110101) {
+    if (gfx_get(&b, 63, 31) == 0x001C0C0C) { mask = mask | 4; }
+  }
+
+  // bit3：camera(64,0)
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, 64, 0);
+  if (n == 2048) {
+    if (gfx_get(&b, 0, 0) == 0x00150505) { mask = mask | 8; }
+  }
+
+  // bit4：camera(-16,0)
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, -16, 0);
+  if (n == 1536) { mask = mask | 16; }
+
+  // bit5：camera(96,0)
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, 96, 0);
+  if (n == 1024) { mask = mask | 32; }
+
+  // bit6：视口缩到 48x32
+  if (gfx_attach(&b, &s, 48, 32) == 0) { return 4; }
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, 0, 0);
+  if (n == 1536) {
+    if (gfx_get(&b, 47, 31) == 0x001B0B0B) { mask = mask | 64; }
+  }
+  if (gfx_attach(&b, &s, 64, 32) == 0) { return 5; }
+
+  // bit7：两端完全在屏外
+  gfx_clear(&b, BG);
+  n = grid_draw(&b, &g, -1000, 0);
+  if (n == 0) {
+    n = grid_draw(&b, &g, 1000, 0);
+    if (n == 0) { mask = mask | 128; }
+  }
+
+  print(["f071 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

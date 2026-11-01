@@ -1,0 +1,37 @@
+// f059_structfield.fl — 2026-10-24(v2.3)：struct 指针**字段**（`struct S *next;`）双端判据
+//   9 位掩码全亮 = 退出码 42。覆盖：自引用字段、两跳链、字段指针下标、传给 struct* 形参、
+//   局部指针从字段初始化、经局部指针写、取字段内元素的地址、链上写入。
+struct Node { int v; struct Node *next; }
+
+int val_of(struct Node *p) { return p->v; }
+
+int main() {
+  struct Node a[4];
+  int r = 0;
+  a[0].v = 1; a[1].v = 2; a[2].v = 3; a[3].v = 4;
+  a[0].next = &a[1];
+  a[1].next = &a[2];
+  a[2].next = &a[3];
+
+  if (a[0].next->v == 2) { r = r | 1; }
+  if (a[0].next->next->v == 3) { r = r | 2; }
+  if (a[1].next[0].v == 3) { r = r | 4; }
+  if (val_of(a[0].next) == 2) { r = r | 8; }
+
+  struct Node *q = a[0].next;
+  if (q->next->v == 3) { r = r | 16; }
+  q->v = 20;
+  if (a[1].v == 20) { r = r | 32; }
+
+  if ((&a[0].next->v) == (&a[1].v)) { r = r | 64; }
+
+  a[2].next = &a[0];
+  if (a[1].next->next->v == 1) { r = r | 128; }
+
+  struct Node *w = &a[2];
+  w->next->v = 7;
+  if (a[0].v == 7) { r = r | 256; }
+
+  if (r == 511) { return 42; }
+  return r % 256;
+}

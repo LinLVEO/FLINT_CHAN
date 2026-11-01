@@ -1,0 +1,21 @@
+// f061_apiparam_ptr -- api 形参支持 ptr（64 位句柄）：FindFirst/Next 句柄高 32 位非零时也能量完
+// 只跑 flint 侧（boot 没有 api 形参类型这套表）。期望 exit 42。
+api kernel32 ptr FindFirstFileA(int, int);
+api kernel32 int FindNextFileA(ptr, int);
+api kernel32 int FindClose(ptr);
+
+int main() {
+  char fd[320];
+  char *h = 0;
+  int n = 0;
+  int i = 0;
+  i = 0;
+  while (i < 320) { fd[i] = 0; i = i + 1; }
+  h = FindFirstFileA("*.md", fd);
+  if (h == 0) { return 1; }
+  n = 0;
+  while (FindNextFileA(h, fd) != 0) { n = n + 1; if (n > 200) { break; } }
+  FindClose(h);
+  if (n < 1) { return 2; }
+  return 42;
+}

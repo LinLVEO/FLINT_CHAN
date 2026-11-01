@@ -81,7 +81,7 @@ function factValue(key) {
   let val = null;
   try {
     const out = execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', METER, '-Key', key],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     val = String(out).split(/\r?\n/)[0].trim();
     if (val === '') val = null;
   } catch { val = null; }
@@ -113,9 +113,14 @@ const SNAP_PATTERNS = [
   /^工单-/, /^待拍板-/, /^开工简报/, /^调研/, /^帧节拍-/, /^任务-/, /^人类试写-/,
   /^副本说明\.md$/, /^概念池\.md$/, /^学习笔记\.md$/, /^新路候选/, /^IRIS-/, /^IR重构-/,
   /^SPEC修订提案-/, /^需求勘定-/, /^FLGUI-计划\.md$/,
+  // 2026-10-28 补分类（这三份是过程产物，不对外；带快照 banner 即可）
+  /^IDE-功能清单\.md$/, /^工业级标准\.md$/, /^流程优化提案\.md$/, /^编译器体检报告\.md$/,
 ];
 const GENERATED = ['docs/数字台账.md'];
-const ARCHIVE = ['PROGRESS.md', 'PROGRESS-归档.md'];
+// 2026-10-31 仓库卫生：PROGRESS.md 瘦身到 800 行以内，早期交接块整段搬进
+// PROGRESS-归档-2026-10.md。与 PROGRESS-归档.md 同类（append-only 历史 ＋ 活交接块）
+// ⇒ 免快照横幅；但标记照样核（见下面 marker pass，archive 只跳过横幅/元信息，不跳过 DRIFT）。
+const ARCHIVE = ['PROGRESS.md', 'PROGRESS-归档.md', 'PROGRESS-归档-2026-10.md'];
 
 function classify(rel) {
   if (GENERATED.includes(rel)) return 'generated';
@@ -130,6 +135,11 @@ const docs = [];
 for (const f of fs.readdirSync(ROOT)) if (f.endsWith('.md')) docs.push(f);
 const docsDir = path.join(ROOT, 'docs');
 if (fs.existsSync(docsDir)) for (const f of fs.readdirSync(docsDir)) if (f.endsWith('.md')) docs.push('docs/' + f);
+// 2026-10-31 仓库卫生：根目录 51 份过程笔记搬进 notes\（git mv 保历史）。扫描范围跟着扩 ——
+// 搬走 ≠ 免检：否则那批「必须有快照横幅、标记不许漂」的判据会静默失去覆盖。分类仍按 basename
+// 走 SNAP_PATTERNS，所以行为与搬之前逐条相同（搬之前它们是绿的，搬之后必须还是绿的）。
+const notesDir = path.join(ROOT, 'notes');
+if (fs.existsSync(notesDir)) for (const f of fs.readdirSync(notesDir)) if (f.endsWith('.md')) docs.push('notes/' + f);
 if (fs.existsSync(path.join(ROOT, 'lib', 'FLGUI.md'))) docs.push('lib/FLGUI.md');
 const docList = [...new Set(docs)].sort();
 
@@ -307,7 +317,7 @@ if (fs.existsSync(indexPath)) {
   // 方向-对外一席之地（2026-10-13 用户口径变更）.md was untracked while being listed in the index.
   for (const rel of OUTWARD) {
     try {
-      execFileSync('git', ['-C', ROOT, 'ls-files', '--error-unmatch', rel], { stdio: ['ignore', 'ignore', 'ignore'] });
+      execFileSync('git', ['-C', ROOT, 'ls-files', '--error-unmatch', rel], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
     } catch {
       linkIssues.push(rel + '  outward doc is NOT tracked by git -- a clone will not have it, so the index link dangles for the reader (run: git add)');
     }
@@ -490,7 +500,7 @@ const ledgerIssues = [];
     ledgerIssues.push('tools/错误台账.mjs 不存在（错误台账无法对账）');
   } else {
     try {
-      execFileSync(process.execPath, [tool, '--check'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+      execFileSync(process.execPath, [tool, '--check'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe', windowsHide: true });
     } catch (e) {
       const txt = String((e && e.stdout) || '').trim().split('\n').slice(0, 6).join(' ｜ ');
       ledgerIssues.push('错误台账漂移（重录：node tools\\错误台账.mjs --update 后复查）: ' + (txt || (e && e.message)));
@@ -498,7 +508,40 @@ const ledgerIssues = [];
   }
 }
 
-const bad = drift.length + unclosed.length + snapMissing.length + metaMissing.length + unclassified.length + linkIssues.length + ps1Issues.length + numMix.length + routeIncomplete.length + routePathsMissing.length + ledgerIssues.length;
+// ---- 未绑定的「重编 / 可复现」断言（2026-10-24）----
+// WHY: 2026-10-24 之前，同一句"重编产物逐字节相同"被散文抄在 5 处；编译器一改，5 处一起错，
+//   而 docgate 只核「带标记的数字」⇒ 一句没标记的断言可以永远漂下去（实测：hello 真可复现，
+//   winpanel 同尺寸不同字节，ui_gallery 连尺寸都变了）。
+// 规则（只扫对外文档，一行一条）：
+//   ① 出现 16+ 位十六进制（或 8+ 位带省略号）且**不在事实标记里**、同行也没有日期 ⇒ 红（手抄哈希）。
+//   ② 同一行同时出现「重编/重建/重新编译」与「逐字节相同/逐字节一致/可复现」，且不在标记里、无日期、
+//      也不是否定句（不是/不再/不保证/未/非/无法）⇒ 红（要你把它绑到 `rebuild-*` 键上）。
+const unbound = [];
+{
+  const RX_HASHISH = /(?<![0-9A-Za-z_])(?=[0-9A-Fa-f]*[A-Fa-f])[0-9A-Fa-f]{8,}(?:…|\.\.\.)?/g;
+  const RX_NEG = /(不是|不再|不保证|未能|没有|非|无法)[^。，；]{0,8}(逐字节|可复现)/;
+  for (const rel of OUTWARD) {
+    const p = path.join(ROOT, rel);
+    if (!fs.existsSync(p)) continue;
+    const lines = readDoc(p).split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      if (ln.includes('<!--fact:')) continue;
+      if (/20\d\d-\d\d-\d\d/.test(ln)) continue;
+      const hits = [];
+      for (const m of ln.matchAll(RX_HASHISH)) {
+        const t = m[0], core = t.replace(/…|\.\.\.$/, '');
+        if (core.length >= 16 || /…|\.\.\.$/.test(t)) hits.push(t);
+      }
+      if (hits.length) unbound.push(rel + ':' + (i + 1) + '  hand-copied hash ' + hits.join(',') + ' -- bind it to a fact key (or date the line)');
+      if (/(重编|重建|重新编译)/.test(ln) && /(逐字节相同|逐字节一致|可复现)/.test(ln) && !RX_NEG.test(ln)) {
+        unbound.push(rel + ':' + (i + 1) + '  rebuild/reproducibility claim is not bound -- cite a `rebuild-*` / `selfhost-fixedpoint` marker (or date it)');
+      }
+    }
+  }
+}
+
+const bad = drift.length + unclosed.length + snapMissing.length + metaMissing.length + unclassified.length + linkIssues.length + ps1Issues.length + numMix.length + routeIncomplete.length + routePathsMissing.length + ledgerIssues.length + unbound.length;
 for (const s of drift) console.log('DRIFT   ' + s);
 for (const s of ps1Issues) console.log('PS1-BOM ' + s);
 for (const s of unclosed) console.log('MARKER  ' + s);
@@ -510,6 +553,7 @@ for (const s of numMix) console.log('NUM-MIX      ' + s);
 for (const s of routeIncomplete) console.log('ROUTE-MAP    ' + s);
 for (const s of routePathsMissing) console.log('ROUTE-PATH   ' + s);
 for (const s of ledgerIssues) console.log('LEDGER  ' + s);
+for (const s of unbound) console.log('UNBOUND ' + s);
 if (FIX) {
   // Report the repaired and the un-repairable separately: "1 value fixed" and "2 issues remain"
   // are different facts, and lumping them together is what made the old exit code unreadable.
@@ -525,6 +569,7 @@ if (FIX) {
   if (routeIncomplete.length) remaining.push(routeIncomplete.length + ' route-map-incomplete');
   if (routePathsMissing.length) remaining.push(routePathsMissing.length + ' route-path-missing');
   if (ledgerIssues.length) remaining.push(ledgerIssues.length + ' error-ledger');
+  if (unbound.length) remaining.push(unbound.length + ' unbound-claim');
   console.log('FIXED   ' + fixedCount + ' marker value(s) rewritten from the meter' +
     (recheckedAfterFix ? '; re-checked after fix: ' + (remaining.length === 0 ? 'GREEN' : 'still RED -- ' + remaining.join(', ')) : ''));
   if (recheckedAfterFix && fixedCount > 0) console.log('FIXED   REPAIRED: ' + fixedCount + ' marker value(s) (those DRIFT lines are absent from the list above)');
@@ -534,7 +579,7 @@ console.log('DOCGATE files=' + scanned + ' markers=' + markerCount + ' drift=' +
   ' snapshot-missing=' + snapMissing.length + ' meta-missing=' + metaMissing.length +
   ' unclassified=' + unclassified.length + ' link-issues=' + linkIssues.length + ' ps1-bom=' + ps1Issues.length +
   ' num-mix=' + numMix.length + ' routes-incomplete=' + routeIncomplete.length + ' route-paths-missing=' + routePathsMissing.length +
-  ' error-ledger=' + ledgerIssues.length);
+  ' error-ledger=' + ledgerIssues.length + ' unbound-claim=' + unbound.length);
 if (bad === 0) {
   console.log('DOCGATE GREEN');
   console.log('DOCGATE documents ' + scanned + ' / issues ' + bad);

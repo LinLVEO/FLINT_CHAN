@@ -1,0 +1,178 @@
+// flgui_ai.fl — FLGUI 的「AI 可观测性」官方工具（给 Agent 读，不是给人看的）
+//
+// 为什么要有它：Agent 看不见屏幕。只靠"编译过/退出码"判断 UI，等于闭眼开车 ——
+//   本项目实测：按键只留一帧、DT 每帧减 1、WM_CHAR 不落地，三个 bug 全都是"日志里看不出来"的。
+//   所以把「能定位问题的证据」做成库：**事件流 / 状态快照 / 帧缓冲 ASCII / 抓帧 BMP**。
+//
+// 产出（都落在**工作目录**，文件名固定，便于工具与 Agent 直接读）：
+//   ai.ev     事件流，追加。每行：`EV <kind> <a> <b>`（kind 由调用方定义，建议 1=键 2=鼠标 3=生命周期）
+//   ai.state  状态快照，追加。每行：`ST <7 个整数>`（调用方按自己的语义填）
+//   ai.fb     帧缓冲 ASCII，追加。`FB` / h 行 `.`+`#` / `END`（人眼与 diff 都能看）
+//   ai.bmp    抓帧（BGRA 32 位、自底向上）。`tools\flgui-ai.ps1 -Png` 把它转 PNG 给多模态看
+//
+// ⚠️ 2026-10-25 实测边界（**别踩第二次**）：
+//   ① `gui_win_show` = `surf_alpha` ＋ `surf_flush` ⇒ 表面由渲染管线拥有；**show 之后** DIB 会被
+//      alpha 掩码/预乘改写，抓帧必须放在 show 之前。
+//   ② 但**直接往 `s->dc` 上 GDI 画**（`gwb_rect_fill`）在本管线里抓不到内容（实测 BMP 的 RGB 全 0）——
+//      说明可见像素不是"GDI 画进 DIB"这条路产出的。用 raw 像素做 UI 的应用，要么走命令管线
+//      （`gui_win_render`），要么自己 `UpdateLayeredWindow`（alpha 不预乘、A 写 255）。
+//      ⇒ 当前 `ai_bmp` 只对"走命令管线/自己写 bits"的 app 有效；本仓 chip8_win 属于反例。
+//
+// 接入（3 行）：
+//   include "flgui_ai.fl"
+//   ... 每帧：ai_state(v0, v1, v2, v3, v4, v5, v6);
+//   按键处：ai_ev(1, key, 0);   抓帧处：ai_bmp(&sf, sf.cw, sf.ch);
+//
+// 纪律：这些文件是**调试证据**，不进交付物；`tools\flgui-ai.ps1 -Clean` 一键清。
+include "io_lib.fl"
+
+// 十进制转字符（不依赖 sprintf；返回写入字节数）
+int ai_num(char *b, int v) {
+  char t[16];
+  int n = 0;
+  int neg = 0;
+  if (v < 0) { neg = 1; v = 0 - v; }
+  if (v == 0) { t[0] = 0x30; n = 1; }
+  while (v > 0) { t[n] = 0x30 + v % 10; v = v / 10; n = n + 1; }
+  int o = 0;
+  if (neg != 0) { b[0] = 0x2D; o = 1; }
+  int i = 0;
+  while (i < n) { b[o + i] = t[n - 1 - i]; i = i + 1; }
+  return o + n;
+}
+
+int ai_put(char *b, int o, char *s) {
+  int i = 0;
+  while (s[i] != 0) { b[o + i] = s[i]; i = i + 1; }
+  return i;
+}
+
+int ai_u16(char *b, int o, int v) {
+  b[o] = v & 0xFF;
+  b[o + 1] = (v >> 8) & 0xFF;
+  return o + 2;
+}
+
+int ai_u32(char *b, int o, int v) {
+  b[o] = v & 0xFF;
+  b[o + 1] = (v >> 8) & 0xFF;
+  b[o + 2] = (v >> 16) & 0xFF;
+  b[o + 3] = (v >> 24) & 0xFF;
+  return o + 4;
+}
+
+// 事件流（追加）
+int ai_ev(int kind, int a, int b) {
+  char buf[96];
+  int o = ai_put(buf, 0, "EV ");
+  o = o + ai_num(buf + o, kind);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, a);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, b);
+  o = o + ai_put(buf, o, "\n");
+  struct FileSt f;
+  if (std::open(&f, "ai.ev", 2) == 0) { return 0; }
+  std::write(&f, buf, o);
+  std::close(&f);
+  return 1;
+}
+
+// 状态快照（追加）：固定 7 个数，调用方自己定义语义
+int ai_state(int v0, int v1, int v2, int v3, int v4, int v5, int v6) {
+  char buf[128];
+  int o = ai_put(buf, 0, "ST ");
+  o = o + ai_num(buf + o, v0);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v1);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v2);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v3);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v4);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v5);
+  o = o + ai_put(buf, o, " ");
+  o = o + ai_num(buf + o, v6);
+  o = o + ai_put(buf, o, "\n");
+  struct FileSt f;
+  if (std::open(&f, "ai.state", 2) == 0) { return 0; }
+  std::write(&f, buf, o);
+  std::close(&f);
+  return 1;
+}
+
+// 帧缓冲 ASCII：`FB` + h 行 `#`/`.` + `END`
+int ai_fb(int *fb, int w, int h) {
+  char buf[256];
+  struct FileSt f;
+  if (std::open(&f, "ai.fb", 2) == 0) { return 0; }
+  int o = ai_put(buf, 0, "FB\n");
+  std::write(&f, buf, o);
+  int y = 0;
+  while (y < h) {
+    int x = 0;
+    while (x < w && x < 200) {
+      buf[x] = 0x2E;
+      if (fb[y * w + x] != 0) { buf[x] = 0x23; }
+      x = x + 1;
+    }
+    buf[x] = 0x0A;
+    std::write(&f, buf, x + 1);
+    y = y + 1;
+  }
+  o = o + ai_put(buf, o, "END\n");
+  std::write(&f, buf, o);
+  std::close(&f);
+  return 1;
+}
+
+// 抓帧：写 32 位 BGRA BMP（自底向上）。用 s->bits 直读 DIB 像素。
+int ai_bmp(struct Surf *s, int w, int h) {
+  int stride = s->bw * 4;                 // ⚠️ DIB 的**行距按 bw**（表面比窗口大：ULW 余量），不是 w*4
+  int rowbytes = w * 4;
+  int imgsz = rowbytes * h;
+  int filesz = 54 + imgsz;
+  char hd[64];
+  int o = 0;
+  hd[o] = 0x42; hd[o + 1] = 0x4D; o = o + 2;          // "BM"
+  o = ai_u32(hd, o, filesz);
+  o = ai_u32(hd, o, 0);
+  o = ai_u32(hd, o, 54);
+  o = ai_u32(hd, o, 40);
+  o = ai_u32(hd, o, w);
+  o = ai_u32(hd, o, h);
+  o = ai_u16(hd, o, 1);
+  o = ai_u16(hd, o, 32);
+  o = ai_u32(hd, o, 0);
+  o = ai_u32(hd, o, imgsz);
+  o = ai_u32(hd, o, 2835);
+  o = ai_u32(hd, o, 2835);
+  o = ai_u32(hd, o, 0);
+  o = ai_u32(hd, o, 0);
+  struct FileSt f;
+  if (std::open(&f, "ai.bmp", 1) == 0) { return 0; }
+  std::write(&f, hd, o);
+  if (rowbytes > 4096) { std::close(&f); return 0; }   // 超宽窗口不抓（别把栈撑爆）
+  char *px = s->bits;
+  char rb[4096];
+  int y = h - 1;
+  while (y >= 0) {
+    char *src = px + y * stride;
+    // GDI 不写 alpha（分层窗口的 DIB 里 A 常是 0）⇒ 抓帧时强制 A=255，
+    //   否则转成 PNG 后整张是"全透明"，多模态看到的就是一片黑（实测踩过）。
+    int i = 0;
+    while (i < rowbytes) {
+      rb[i] = src[i];
+      rb[i + 1] = src[i + 1];
+      rb[i + 2] = src[i + 2];
+      rb[i + 3] = 0xFF;
+      i = i + 4;
+    }
+    std::write(&f, rb, rowbytes);
+    y = y - 1;
+  }
+  std::close(&f);
+  return 1;
+}

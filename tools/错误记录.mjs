@@ -96,9 +96,9 @@ if (rest.length === 0) { console.error('缺目标：build 需要 .fl 源文件�
 let exe, args, srcFile = null, display;
 if (mode === 'build') {
   srcFile = path.resolve(ROOT, rest[0]);
-  exe = path.join(ROOT, 'flint.exe');
+  exe = path.join(ROOT, 'hlc.exe');
   args = [srcFile, ...rest.slice(1)];
-  display = `flint.exe ${rest.join(' ')}`;
+  display = `hlc.exe ${rest.join(' ')}`;
 } else {
   const cand = path.resolve(ROOT, rest[0]);
   exe = fs.existsSync(cand) ? cand : rest[0];   // 允许直接写 PATH 里的程序名（如 cmd）

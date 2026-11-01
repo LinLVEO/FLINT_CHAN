@@ -1,0 +1,63 @@
+// f060_globalptr -- 全局指针变量（int*/char*）的运行语义：写读/下标缩放/跨函数/字节步进（决策 40）
+// 只跑 flint 侧：boot 没有全局变量概念（见 src\flint.h 的 32 参数注释）。期望 exit 42。
+// gptr_sem.fl — 全局指针的运行语义自证（按 FLINT 决策 40：裸 ± 是字节步进，下标才缩放）
+// 全通过 → exit 42；任一条失败 → 非 42
+
+int buf[8];
+int *gp;
+char *gs;
+int msg[4];
+
+int poke() {
+  gp[2] = 1234;          // 跨函数：通过全局指针写
+  return 0;
+}
+
+int peek() {
+  return gp[2];          // 跨函数：通过全局指针读
+}
+
+int main() {
+  int i = 0;
+  while (i < 8) { buf[i] = 0; i = i + 1; }
+
+  // 1) 全局指针 = 数组名，下标写读闭环
+  gp = buf;
+  gp[0] = 7;
+  if (buf[0] != 7) { return 1; }
+
+  // 2) 下标缩放：gp[3] 与 &buf[3] 同址
+  gp = buf;
+  gp[3] = 33;
+  if (buf[3] != 33) { return 2; }
+  if (&buf[3] != buf + 12) { return 3; }   // 决策 40：int 元素 4 字节 ⇒ 第 3 个 = 字节 12
+
+  // 3) 裸指针字节步进（语言既定语义）
+  gp = buf + 12;
+  *gp = 44;
+  if (buf[3] != 44) { return 4; }
+
+  // 4) 跨函数通过全局指针读写
+  gp = buf;
+  poke();
+  if (peek() != 1234) { return 5; }
+
+  // 5) char* 全局指向字符串字面量
+  gs = "FLINT";
+  if (gs[0] != 'F') { return 6; }
+  if (gs[4] != 'T') { return 7; }
+
+  // 6) 全局指针换目标不影响原数组
+  gp = buf + 20;          // 第 5 个元素起点
+  *gp = 55;
+  if (buf[5] != 55) { return 8; }
+  if (buf[0] != 7) { return 9; }
+
+  // 7) 全局指针指向另一块全局内存
+  gp = msg;
+  gp[1] = 99;
+  if (msg[1] != 99) { return 10; }
+  if (buf[1] != 0) { return 11; }
+
+  return 42;
+}

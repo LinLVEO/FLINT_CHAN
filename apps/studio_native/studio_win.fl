@@ -1,0 +1,5223 @@
+﻿// studio_win.fl — FLINT Studio 原生窗口（第一版：显示 + 布局 + 状态栏）
+// 目标形态：顶栏（文件/状态）｜左侧文件列表｜中间编辑区（行号 + 文本 + 光标）｜底部输出
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int MultiByteToWideChar(int, int, int, int, int, int);
+api gdi32 int TextOutW(int, int, int, ptr, int);
+api user32 int GetAsyncKeyState(int);
+api user32 int IsIconic(int);            // 最小化判定（窗口控制：最小化 / 关闭）
+// ⚠️ 这一行 `WindowFromPoint` 已删：declared 不用也会占**一个导入位**（实测：声明了就进导入表，
+//   见 tmp\imp-t\a.fl 的取证）。本 app 的窗口归属判定改用 `gui_win_click`（WM_LBUTTONDOWN 记账），
+//   不再需要它 —— 删掉是给下面的垫片函数腾导入预算（96 上限，加 API 前必须数账）。
+api user32 int SetWindowPos(ptr, int, int, int, int, int, int);   // 窗口层级 auto：摘掉 TOPMOST
+api kernel32 int FreeConsole();          // 扔掉自带的控制台窗（flint 的产物是 CONSOLE 子系统 ⇒ 不扔会多一个黑窗盖在编辑器上）
+api gdi32 int GetTextExtentPoint32W(int, ptr, int, ptr);   // 量"前缀像素宽"：光标定位按渲染宽度算，不按字节数猜
+// 多字体系统：app 自己造字体（**不动 lib\ui_lib.fl 的 ui_font_make**）。
+//   14 参、最后一个是字面名指针；charset **必须 1（DEFAULT_CHARSET）**，给 0 中文会变方框。
+api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, ptr);
+api user32 int GetSystemMetrics(int);                        // 0 = 屏宽 / 1 = 屏高（真全屏铺满）
+api user32 int SystemParametersInfoA(int, int, ptr, int);    // SPI_GETWORKAREA=0x30 ⇒ 窗口全屏避开任务栏
+api gdi32 int GetTextFaceA(ptr, int, ptr);                   // 验字体是否真存在（缺字体 GDI 会**静默回退**成宋体）
+api gdi32 int DeleteObject(ptr);                             // 换字体时把旧句柄还掉（否则每换一次漏两个字体对象）
+// ===== 正文改用 DirectWrite 渲染（studio_text.dll 垫片，源码 apps\studio_native\studio_text.c）=====
+//   GDI 的灰度 AA 只能整像素定位、不做 gamma 校正 ⇒ 同字号总比 VS Code（Chromium/DirectWrite）软一档；
+//   垫片把 Direct2D 包成平函数（FLINT 没有 COM），借用它的灰度抗锯齿，观感对齐 Chromium。
+api studio_text int tx_init();
+api studio_text int tx_fontA(ptr, int, int);
+api studio_text int tx_begin(ptr, int, int);
+api studio_text int tx_end();
+api studio_text int tx_text(int, int, int, ptr, int, int);
+api studio_text int tx_measure(int, ptr, int);
+// ===== 原生跨进程能力（都放进 studio_text.dll，理由 = PE 导入预算）=====
+//   实测（tools\导入预算.ps1）：本 exe 已用 88/96 个导入位。剪贴板（OpenClipboard/EmptyClipboard/
+//   SetClipboardData/GetClipboardData/CloseClipboard + GlobalAlloc/Lock/Unlock = 8 个）＋文件对话框
+//   （comdlg32 的 GetOpenFileNameW / GetSaveFileNameW ＋一个模块）直接进 exe 就爆预算。
+//   做成垫片函数 ⇒ 每个只占 **1 个**导入位、模块复用已经加载的 studio_text.dll。
+api studio_text int tx_clip_put(ptr, int);              // UTF-8 文本 → Windows 剪贴板
+api studio_text int tx_clip_get(ptr, int);              // 剪贴板 → UTF-8，返回字节数（0 = 空）
+api studio_text int tx_dlg_open(ptr, ptr, int);         // 资源管理器"打开"对话框：hwnd, buf, cap
+api studio_text int tx_dlg_save(ptr, ptr, int, ptr);    // "另存为"：hwnd, buf, cap, 默认文件名
+api studio_text int tx_dlg_folder(ptr, ptr, int);       // "打开文件夹"（工作区根）：hwnd, buf, cap
+// v1.2（2026-10-27）：带"起始文件夹"的三个版本 —— 让对话框每次开在**上次用过的位置**。
+//   为什么必须加在垫片里：GetOpenFileNameW 只认 lpstrInitialDir、SHBrowseForFolder 只认
+//   BFFM_SETSELECTION 回调，FLINT 侧既没有结构体也没有回调函数指针，只能由 C 垫片代劳。
+//   旧导出原样保留（行为一字不改）⇒ 已编好的探针/旧 exe 不受影响。
+api studio_text int tx_dlg_open2(ptr, ptr, int, ptr);          // …＋起始文件夹（UTF-8；空 = CWD）
+api studio_text int tx_dlg_save2(ptr, ptr, int, ptr, ptr);     // …＋默认名＋起始文件夹
+api studio_text int tx_dlg_folder2(ptr, ptr, int, ptr);        // …＋起始文件夹
+// v1.3（2026-10-27）：**持久 shell**（内置终端从"每条命令起一个 cmd /c"改成"一个 cmd 一直活着"）。
+//   为什么放垫片：管道句柄、CreateProcess 的 STARTUPINFO、PeekNamedPipe 这些在 FLINT 侧都没有结构体；
+//   垫片里 40 行 C 就能做到，而且读输出是**非阻塞**的（不卡消息循环）。
+api studio_text int tx_sh_start(ptr);          // 起 cmd（参数 = 工作目录 UTF-8；0 = 当前目录）
+api studio_text int tx_sh_write(ptr, int);     // 写一条命令（自动补 CRLF）
+api studio_text int tx_sh_read(ptr, int);      // 非阻塞读输出；返回字节数，-1 = 管道断了
+api studio_text int tx_sh_alive();             // 1 = 子进程还活着
+api studio_text int tx_sh_stop();              // 杀掉并关句柄
+api studio_text int tx_edge_hook(ptr, int);             // 边框 N px 内换缩放光标（子类化窗口过程）
+api studio_text int tx_aa(int);                         // 文字抗锯齿：1 = ClearType / 0 = 灰度（垫片 v1.5）
+api studio_text int tx_aa_get();
+
+// 像素尺寸（GDI 的 SIZE 结构）
+struct SZE { int cx; int cy; }
+api kernel32 int CreateProcessA(int, int, int, int, int, int, int, int, int, int);
+api kernel32 int WaitForSingleObject(int, int);
+api kernel32 int GetExitCodeProcess(int, int);
+api kernel32 int CloseHandle(int);
+api kernel32 int TerminateProcess(int, int);
+// `GetCurrentProcess` 已删（同上：declared 不用也占导入位；本 app 没调用它）
+api kernel32 ptr FindFirstFileA(int, int);
+api kernel32 int FindNextFileA(ptr, int);
+api kernel32 int FindClose(ptr);
+include "../../lib/io_lib.fl"
+include "../../lib/flgui_win32.fl"
+include "../../lib/flgui_ai.fl"
+
+// 全局（v1.10.0 指针全局可用）
+char *g_src;          // 当前文件内容
+int g_srclen = 0;
+int g_cur = 0;        // 光标字节偏移
+int g_scroll = 0;     // 首行行号
+char g_file[260];
+char *g_wbuf;          // UTF-16 中转缓冲（TextOutW 用）
+char *g_hf;            // 代码字体：Consolas 15（光标/preedit/正文都跟着它）
+char *g_hf_small;      // 行号 / 输出正文：Consolas 12（小一号）
+char *g_hf_ui;         // UI 比例字体：雅黑 16（标题栏/侧栏/菜单；墨高 ≈ Segoe 13）
+char *g_hf_uib;        // UI 粗体（品牌名/状态栏左段）
+char *g_hf_brand;      // 标题栏品牌：Segoe UI Semibold 13（拉丁专用，比雅黑锐）
+char *g_hf_uis;        // 状态栏小字：雅黑 14（比界面字小一号，底部不压秤）
+char *g_hf_uisb;       // 状态栏品牌粗体：雅黑 14 / 700
+char *g_hf_ico16;      // 图标字体 16px（Segoe MDL2 Assets：运行/设置/文件夹）
+char *g_hf_ico12;      // 图标字体 12px（树箭头/查找）
+char *g_hf_ico10;      // 图标字体 10px（窗口按钮）
+char *g_br;            // 全 app 唯一的填充画刷 = DC_BRUSH（颜色靠 SetDCBrushColor 换 ⇒ 零对象创建）
+int g_fweight = 400;   // 代码字体字重（studio.cfg 的 weight=；CJK 想更粗就给 600/700）
+int g_cjkpx = 0;       // 汉字段字号（0 = 自动 = 代码字号 + 2；CJK 太小会糊，比拉丁大 2px 更实）
+// ===== 双语"分开渲染"：ASCII 段用代码字体，非 ASCII 段（汉字/全角标点）用 CJK 字体 =====
+//   为什么：Consolas 没有汉字，GDI 走"字体链接"挑一个替补字体，替补往往是宋体、笔画细且与拉丁风格不搭。
+//   ⇒ 干脆按字节段自己换字体：代码列宽仍是等宽的，汉字用专门的中文字体（cfg 的 cjk=）。
+char *g_cjk;           // CJK 字体句柄（和代码字体同字号）
+char g_cjkface[64];    // CJK 字体族名（studio.cfg 的 cjk=，默认 Noto Sans SC Medium）
+int g_tx_code = 0;     // DirectWrite 代码字体 id（0 = 垫片不可用 ⇒ 回退 GDI 绘制）
+int g_tx_cjk = 0;      // DirectWrite 汉字字体 id
+int g_txok = 0;        // 1 = 垫片可用
+// g_txok 只说"垫片在"，不代表两个 id 都拿到了（建 format 失败时 id 会是 0）。
+//   正文走 D2D 之前必须两个 id 都在，否则 tx_text 静默 return 1 ⇒ 屏幕上一片空白、
+//   行号（GDI 层）却还在 —— 2026-10-27 的"字号轮一圈文字消失"就是这么暴露的。
+int g_txready = 0;     // 1 = 正文可以走 DirectWrite（两个字体 id 齐了）
+int g_txdy = 0;        // DirectWrite 竖直校准偏移（px）
+
+// 行起点表（最多 2400 行）
+//   ⚠️ 原来是 400：`build_lines` 到 399 行就停 ⇒ 打开 2255 行的 `lib\flgui_win32.fl` 只认前 399 行，
+//      行号永远到不了 4 位数，"行号列宽自适应"根本无从验证（状态栏也永远显示 399 行）。
+//      ⇒ 抬到 2400（容纳 2399 行，够 flgui_win32.fl 的 2255 行留余量）。代价 = .data 多 ~32 KB
+//      （两个 int 数组各 2000 格 × 8 字节），实测启动/打字/滚动无可感变慢。
+int g_lstart[2400];
+int g_llen[2400];
+int g_nlines = 0;
+char *g_out;          // 编译输出
+int g_outlen = 0;
+int g_nerr = 0;       // 上次编译解析出的诊断条数（输出面板标题 / 状态栏用；0 = 无诊断）
+int g_oscroll = 0;    // 输出面板首行（滚轮滚它；每次新编译归零）
+// 括号匹配（2026-10-27）：光标贴着括号时，把配对的另一端也标出来（-1 = 没有）
+int g_bra = -1;
+int g_brb = -1;
+// ===== 设置面板（字体/字号/换行都搬进来了；2026-10-26）=====
+//   为什么：F9/Ctrl+F9 这种"盲轮"没法看选项，也不能一眼看到当前值 ⇒ 做成卡片式设置页，
+//   行 = 一个设置项，←→ 调值、↑↓ 选行、Esc 关；改动即时 set_font ＋ 写 studio.cfg（与老路径同一套落盘）。
+int g_seton = 0;      // 1 = 设置面板打开（此时键盘/鼠标只走面板）
+int g_setrow = 0;     // 选中行 0..5（代码字体 / 字号 / 中文字体 / 中文号 / 自动换行 / 界面字号）
+// 未保存标记 ＋ 界面字号（2026-10-26 追"能用版"）：
+//   · 切文件/关窗时**先存盘**，避免"打开另一个文件把没保存的改动静默吃掉"（原来就是这样丢的）
+//   · 界面字号进 cfg（ui=）＋ 设置页第 6 行，用户不用改代码
+int g_dirty = 0;
+int g_uipx = 19;
+int g_aa = 1;          // 文字抗锯齿：1 = ClearType（Windows 默认观感）/ 0 = 灰度 AA（cfg 的 aa=）
+
+// ===== 布局常量（全 app 唯一来源：绘制与命中共用，别再写字面量）=====
+//   2026-10-27 起从散落的字面量里收上来；新代码只许读这些名字。
+int g_sideW = 220;      // 侧栏宽（含右描边）
+int g_titleH = 34;     // 标题栏高
+int g_menuH = 26;      // 顶栏菜单条高
+int g_statusH = 26;    // 状态栏高
+int g_textGap = 6;     // 菜单条下沿到正文首行的间隙
+int g_gutterBase = 240; // 行号右边界（3 位数；4 位起每多一位 +8）
+int g_gutterGap = 28;  // 行号右边界到正文起点的距离
+// ===== 工作区（2026-10-26）=====
+//   空 = 跟随进程 CWD（老行为）；非空 = 用户"打开文件夹"选的根，文件树从它开始扫，cfg 里存 ws=。
+//   为什么要有它：IDE 的 CWD 取决于从哪儿启动，双击/从别处起就看不到项目；工作区把"看哪个目录"变成显式状态。
+char g_ws[260];
+// ===== 会话状态（studio.cfg 的"非设置"段；2026-10-27）=====
+//   为什么：设置项（字体/字号/换行/工作区）只是 cfg 的一半。真正让人"接着上次用"的是**视图状态**：
+//   上次开的文件、光标在哪、滚到第几行、窗口多大/在哪、文件树滚到哪 —— 这些不该每次重建。
+//   落盘时机：只在**正常退出**（× / 菜单 退出 / WM_QUIT）与"改设置/换工作区"时写；
+//   进程被强杀（探针 Stop-Process）不写 ⇒ 探针沙箱不会被上一轮的残留污染。
+char g_lastfile[260];     // 上次打开的文件（启动时优先恢复它）
+int g_winx = 120;         // 窗口位置/大小（退出时按 GetWindowRect 实测，不靠猜）
+int g_winy = 90;
+int g_winw = 1000;
+int g_winh = 700;
+int g_winmax = 0;         // 1 = 上次是"窗口全屏"档（fs=1），启动时还原；真全屏(fs=2)不记
+int g_fsmode = 0;         // main 的 fs 同步过来（save_cfg 判"要不要记几何"）
+int g_treesc = 0;         // 文件树首行（退出时记，启动时还原）
+// 每文件视图记忆（最近 12 个文件）：路径 + 光标字节 + 首行**源码行号**。
+//   ⚠️ 首行记"源码行"而不是"显示行"：窗口宽度/软换行变了以后显示行会整体漂，
+//      记显示行的话换个窗口大小再开就落到别处（实测过这类偏移）。
+char g_vpath[3120];       // 12 × 260
+int g_vcur[12];
+int g_vline[12];
+int g_vn = 0;
+int g_pendline = -1;      // 待恢复的首行（-1 = 无）；wrap 表建好之后由 main 套上
+// ===== 资源管理器对话框的**上次位置**（2026-10-27）=====
+//   口径（用户 2026-10-27 拍板）：三个对话框**共用同一个位置**（"当然要放一起"），cfg 里
+//   一条 `dlgdir=` 就够，能分清是哪个对话框用过的（三种动线都在同一个地方，用户不用记三套目录）。
+//   空 = 还没用过 ⇒ 退回"当前文件所在目录 / 当前工作区"（比进程 CWD 更接近用户预期）。
+//   老 cfg 里的 dopen/dsave/dfolder 仍能读（迁移用）。
+char g_dlgdir[260];
+char g_curface[64];       // 当前代码字体族（set_font 同步；给"对话框选完立刻落盘"用）
+// ===== 顶栏菜单（2026-10-26）=====
+//   g_menu = 0 关闭 / 1..4 = 当前展开的文件·编辑·运行·视图；菜单项动作统一走 act 码，
+//   鼠标点菜单与快捷键只负责"设 act"，真正执行集中在 main 里一处 ⇒ 两条入口不会各写一份。
+int g_menu = 0;
+int g_hover = 0;      // 下拉里悬停的行（-1 = 无）
+int *g_hwnd;          // 主窗口句柄（do_save 需要它弹"另存为"）
+// ===== 内置终端（2026-10-26）=====
+char *g_term;         // 终端输出（滚动缓冲，只追加）
+int g_termlen = 0;
+int g_termon = 0;     // 1 = 面板展开
+int g_termfocus = 0;  // 1 = 键盘进命令输入行
+char g_cmd[256];      // 命令输入
+int g_cmdlen = 0;
+int g_tscroll2 = 0;   // 终端首行
+// 持久 shell（2026-10-27）：一个 cmd.exe 一直活着，输出非阻塞读
+char *g_shbuf;        // 读缓冲（VirtualAlloc 8192）
+int g_shon = 0;       // 1 = shell 在跑
+char g_hist[1920];    // 命令历史（↑↓ 翻；12 槽 × 160 字节，环形；FLINT 不支持二维全局数组）
+int g_histn = 0;      // 已记条数（环形，取模 12）
+int g_histpos = 0;    // 当前翻到第几条（= g_histn 表示"在最新"）
+char g_status[128];
+char *g_srv;          // 子进程 studio_server.exe（窗口退出时收掉）
+int g_srvpid = 0;
+// ===== 文件树（2026-10-26 追"能用版"）=====
+//   原来左栏是"固定扫 lib + apps\studio_native，最多 9 条"，项目里 600+ 个 .fl 只能靠 Ctrl+O 翻；
+//   现在是一棵可展开/折叠的树（目录点一下展开，文件点一下打开），只列 .fl，跳过 tmp/.git。
+char g_tpath[64000];      // 每行完整相对路径（400 行 × 160 字节）
+int g_tdepth[400];         // 缩进层级
+int g_tdir[400];           // 1 = 目录
+int g_tn = 0;              // 行数
+int g_tscroll = 0;         // 首行
+char g_dopen[10240];       // 已展开目录（64 × 160，重建时保留状态）
+int g_ndopen = 0;
+int g_kleft = 0;
+int g_kright = 0;
+int g_kup = 0;
+int g_kdown = 0;
+int g_ks = 0;
+int g_kenter = 0;
+int g_kpgup = 0;
+int g_kpgdn = 0;
+int g_kf11 = 0;      // F11：窗口全屏（工作区）开关
+int g_kesc = 0;      // Esc：退出全屏（含真全屏）
+int g_kplus = 0;     // Ctrl+= 字体放大
+int g_kminus = 0;    // Ctrl+- 字体缩小
+int g_kzero = 0;     // Ctrl+0 字体复位
+int g_kf9 = 0;       // F9 换字体族
+int g_kf9c = 0;      // Ctrl+F9 换"汉字段"字体
+int g_kn = 0;        // Ctrl+N 新建
+int g_kf5 = 0;       // F5 运行（编译并执行）
+int g_kbq = 0;       // Ctrl+` 内置终端
+int g_kdig[9];
+// ===== 软换行（视觉换行）：把"源码行"摊成"显示行" =====
+//   为什么需要独立一张表：源码一行可能占屏幕好几行，光标/点击/翻页/滚动条/选区全都要按**显示行**算，
+//   而"行号 / 状态栏 / Ln,Col"仍按**源码行**算（和 VS Code 一致：行号只标一行的第一显示行）。
+int g_wrapmode = 1;    // 1 = 横向放不下自动折行（Alt+Z 切换；studio.cfg 的 wrap=）
+int g_vb[4096];        // 显示行起点（相对**行首**的字节偏移）
+int g_ve[4096];        // 显示行终点（同上；不含换行符）
+int g_lrow[2401];      // 每行第一个显示行的下标（哨兵 g_lrow[g_nlines] = 显示行总数）
+int g_lw[2400];        // 每行像素宽缓存（-1 = 未知；只给"可能超宽"的长行算，短行连量都不量）
+int g_nrows = 0;       // 显示行总数
+int g_needwrap = 1;    // 1 = 下一帧重建软换行表
+int g_wrapw = 0;       // 上一次建表用的可用宽度（窗口尺寸/字号变了必须重建）
+int g_fontpx = 14;     // 当前代码字号 px（折行下界估算用，set_font 里同步）
+// ===== 选区 / 撤销 / 查找 =====
+int g_selon = 0;       // 1 = 有选区（g_sel = 锚点，光标是另一端）
+int g_sel = 0;         // 选区锚点（字节偏移）
+int g_dragsel = 0;     // 1 = 鼠标正在拖选（按住左键期间逐帧更新光标）
+int g_findon = 0;      // 1 = 查找条打开（此时键盘进查找框，不进正文）
+char g_find[64];       // 查找串（UTF-8）
+int g_findlen = 0;
+int g_findn = 0;       // 最近一次查找的命中总数
+int g_findrep = 0;     // 1 = 替换模式（Ctrl+H，查找条变两行）
+int g_repf = 0;        // 替换模式下 0 = 查找框有焦点，1 = 替换框
+char g_rep[64];        // 替换串（UTF-8）
+int g_replen = 0;
+int g_fmax = 60;       // 查找/替换串的长度上限（char 数组 64，留 4 字节余量）
+int g_kh = 0;          // Ctrl+H（替换）
+char *g_undo;          // 撤销快照 arena（24 槽 × 256KB，VirtualAlloc）
+int g_ulen[24];        // 每槽的字节数
+int g_un = 0;          // 已存快照数
+int g_ui = 0;          // 当前状态下标（hist[g_ui] = 现在屏幕上的内容）
+int g_ums = 0;         // 最近一次快照的时刻（400ms 内的连续编辑合并成一步）
+int g_kz = 0;          // Ctrl+Z
+int g_ky = 0;          // Ctrl+Y
+int g_ka = 0;          // Ctrl+A
+int g_kc = 0;          // Ctrl+C
+int g_kx = 0;          // Ctrl+X
+int g_kv = 0;          // Ctrl+V
+int g_kf = 0;          // Ctrl+F
+int g_ko = 0;          // Ctrl+O
+int g_khome = 0;       // Home
+int g_kend = 0;        // End
+int g_kdel = 0;        // Delete
+int g_ktab = 0;        // Tab（插两个空格）
+int g_kaz = 0;         // Alt+Z（软换行开关）
+int g_kf3 = 0;         // F3（下一个命中）
+int g_khr = 0;
+char *g_cbuf;          // 编辑内部剪贴板（跨进程剪贴板走 studio_text.dll 的 tx_clip_*，见 stage 2）
+int g_cblen = 0;
+// ===== Ctrl+字母的"副作用字符" =====
+//   ⚠️ 实测坑：Ctrl+F 的 `f` 这个 WM_CHAR 常常**晚一帧**才到（那时 Ctrl 已经松开），于是被当成普通字符
+//   插进正文 / 查找框。症状：Ctrl+F 打开查找条后查询框里立刻多一个 `f`，搜 "int" 变成搜 "fint" ⇒ 永远搜不到。
+//   ⇒ 每个 Ctrl 字母快捷键落地时登记"这个字符要丢掉"，键处理的最前面把它吃掉（300ms 内有效，防止误吞后面的真按键）。
+int g_dropch = 0;
+int g_dropms = 0;
+
+int drop_char(int c) {
+  g_dropch = c;
+  g_dropms = GetTickCount();
+  return 0;
+}
+
+int ap2(char *d, int p, char *s) {
+  int i = 0;
+  while (s[i] != 0) { d[p] = s[i]; p = p + 1; i = i + 1; }
+  // ⚠️ 必须收尾写 NUL：旧版只写字符不写 0 ⇒ 短串盖长串会留尾巴
+  //   （实测：g_status 先 "compile OK" 再 "opened" ⇒ 显示 "openede OK"；
+  //     g_file 先 "apps/studio_native/main.fl" 再 "lib\cn_lib.fl" ⇒ 标题栏成 "lib\cn_lib.flative/main.fl"）。
+  //   追加链（cmd/pat/sb1…）都用返回值当下一个 p，NUL 会被下一次写入覆盖 ⇒ 无副作用。
+  d[p] = 0;
+  return p;
+}
+
+int sl2(char *s) {
+  int i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  return i;
+}
+
+// ===== 多字体系统：**唯一**的造字体入口 =====
+// 参数：px = 像素高度（正数 = 字符单元高）；weight 400 = 常规 / 700 = 粗体；face = 字面名（ASCII）。
+//   其余参数：quality 4 = ANTIALIASED_QUALITY（**灰度**抗锯齿）。
+//     为什么不跟 ui_font_make 的 5（CLEARTYPE_QUALITY）：Dark+ 底色是深灰，ClearType 的次像素
+//     渲染在深底上留彩色描边（实测截图里出现 #7F4526 / #252563 这类单像素彩边）⇒ 灰度 AA 更接近
+//     VS Code 深色主题；且 advance 与 AA 无关，逐字宽度不变（光标尺子不受影响）。
+// ⚠️ charset **必须 1（DEFAULT_CHARSET）**：给 0 = ANSI_CHARSET 时中文会落到方框/替换字形。
+// ⚠️ 返回句柄是地址值 ⇒ 只能用指针类型接（int 形参会截断；本仓库的全局指针从 v1.10.0 起可用）。
+int *mk_font(int px, int weight, char *face) {
+  return CreateFontA(px, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, g_aa != 0 ? 5 : 4, 0, face);
+}
+
+// 同上，但**指定质量**：4 = 灰度 AA，5 = ClearType（次像素）。
+//   实测（2026-10-26）：正文/小字仍用灰度（深底上 ClearType 有彩边），**UI 13px 那几档试 ClearType**
+//   —— 目的是给 12~13px 的界面字找回一点"锐"，见 tmp\icons\z-ui-*.png 的 A/B 截图。
+int *mk_font_q(int px, int weight, char *face, int q) {
+  return CreateFontA(px, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, q, 0, face);
+}
+
+// 图标字体族：Win10/11 自带的 MDL2 Assets（U+E700.. 私有区）。没有它就退回系统符号字体。
+//   为什么用图标字体而不是继续 fill_rect 拼：同一套网格、同一笔宽、GDI 自带抗锯齿 —— 手拼图形的
+//   斜边是硬锯齿，正是"看起来廉价"的第一眼来源（2026-10-27 用户反馈后改）。
+char *ico_face() {
+  if (font_ok("Segoe MDL2 Assets") != 0) { return "Segoe MDL2 Assets"; }
+  return "Segoe UI Symbol";
+}
+
+// 界面字体（标题栏/侧栏/状态栏/设置卡片）：字号来自 studio.cfg 的 ui=（设置页第 6 行可调）
+//   为什么雅黑：界面中文原来靠字体链接回退宋体，13px 上一团毛刺；雅黑 16 的墨高才等于 Segoe 13。
+int set_ui(int px) {
+  int *o1 = g_hf_ui;
+  int *o2 = g_hf_uib;
+  int *o3 = g_hf_brand;
+  int *o4 = g_hf_uis;
+  int *o5 = g_hf_uisb;
+  int *o6 = g_hf_ico16;
+  int *o7 = g_hf_ico12;
+  int *o8 = g_hf_ico10;
+  if (px < 12) { px = 12; }
+  if (px > 22) { px = 22; }
+  // 抗锯齿质量跟 cfg 的 aa= 走：1 = ClearType（Windows 默认观感）/ 0 = 灰度（深底无彩边但发软）。
+  //   2026-10-27 实测：同字号下 ClearType 的主干有 1px 硬芯、灰度是 3~4px 过渡 ⇒ 小字差得很明显。
+  int ui_q = 4;
+  if (g_aa != 0) { ui_q = 5; }
+  g_uipx = px;
+  g_hf_ui = mk_font_q(px, 400, "Microsoft YaHei UI", ui_q);
+  g_hf_uib = mk_font_q(px, 700, "Microsoft YaHei UI", ui_q);
+  g_hf_brand = mk_font_q(14, 400, "Segoe UI Semibold", ui_q);
+  g_hf_uis = mk_font_q(16, 400, "Microsoft YaHei UI", ui_q);
+  g_hf_uisb = mk_font_q(16, 700, "Microsoft YaHei UI", ui_q);
+  g_hf_ico16 = mk_font_q(16, 400, ico_face(), ui_q);
+  g_hf_ico12 = mk_font_q(12, 400, ico_face(), ui_q);
+  g_hf_ico10 = mk_font_q(10, 400, ico_face(), 4);
+  if (o1 != 0) { DeleteObject(o1); }
+  if (o2 != 0) { DeleteObject(o2); }
+  if (o3 != 0) { DeleteObject(o3); }
+  if (o4 != 0) { DeleteObject(o4); }
+  if (o5 != 0) { DeleteObject(o5); }
+  if (o6 != 0) { DeleteObject(o6); }
+  if (o7 != 0) { DeleteObject(o7); }
+  if (o8 != 0) { DeleteObject(o8); }
+  return 0;
+}
+
+// 换字体：**每次换都顺手把背景模式设成 TRANSPARENT**。
+//   为什么绑在一起：GDI 的 BkMode 是 DC 状态，默认 OPAQUE + 白底色 ⇒ 一旦某条路径漏设，
+//   每个字后面都会刷一条白底（编辑器看着像"白底浅字"）—— 绑成一个入口就不会漏。
+int use_font(int *dc, char *hf) {
+  SelectObject(dc, hf);
+  SetBkMode(dc, 1);            // TRANSPARENT
+  return 0;
+}
+
+// 全 app 唯一的矩形填充入口：颜色**只由 col 参数决定**。
+//   ⚠️ 为什么不再 CreateSolidBrush 一堆画刷：gwb_rect_fill 的 a=255 快路径是
+//      `SetDCBrushColor(dc, color); FillRect(dc, &rc, brush)` —— 传**实心画刷**时 color 参数被忽略，
+//      真正上色的是画刷自己的颜色（CreateSolidBrush 那一刻定死）。于是"改了颜色字面量却没生效"、
+//      "拿错画刷 ⇒ 整片浅底"这两类事故都从这儿来（上一版白底即此）。
+//      ⇒ 统一传 DC_BRUSH（g_br = GetStockObject(18)）⇒ SetDCBrushColor 真生效，颜色只有一个作者。
+//   注意：GetStockObject(0) 是 WHITE_BRUSH（不是 DC_BRUSH！DC_BRUSH = 18），写错就是整片纯白。
+int fill_rect(struct Surf *s, int x0, int y0, int x1, int y1, int col) {
+  return gwb_rect_fill(s, x0, y0, x1, y1, col, 255, g_br);
+}
+
+// 建行表
+// ===== 括号匹配（2026-10-27）=====
+//   只认同类型的括号（`(`↔`)` / `[`↔`]` / `{`↔`}`），从光标那一侧往外数嵌套层数。
+int br_open_ch(int c) {
+  if (c == 40 || c == 91 || c == 123) { return 1; }
+  return 0;
+}
+int br_close_ch(int c) {
+  if (c == 41 || c == 93 || c == 125) { return 1; }
+  return 0;
+}
+int br_pair_of(int c) {
+  if (c == 40) { return 41; }
+  if (c == 91) { return 93; }
+  if (c == 123) { return 125; }
+  if (c == 41) { return 40; }
+  if (c == 93) { return 91; }
+  if (c == 125) { return 123; }
+  return 0;
+}
+
+// 从 pos 的括号找配对；找到就写 g_bra/g_brb 并返回 1
+int br_match(int pos) {
+  int c = 0;
+  int want = 0;
+  int i = 0;
+  int d = 0;
+  g_bra = 0 - 1;
+  g_brb = 0 - 1;
+  if (pos < 0 || pos >= g_srclen) { return 0; }
+  c = g_src[pos] & 255;
+  if (br_open_ch(c) == 0 && br_close_ch(c) == 0) { return 0; }
+  want = br_pair_of(c);
+  d = 0;
+  i = pos;
+  if (br_open_ch(c) != 0) {
+    while (i < g_srclen) {
+      int x = g_src[i] & 255;
+      if (x == c) { d = d + 1; }
+      else if (x == want) {
+        d = d - 1;
+        if (d == 0) { g_bra = pos; g_brb = i; return 1; }
+      }
+      i = i + 1;
+    }
+  } else {
+    while (i >= 0) {
+      int x = g_src[i] & 255;
+      if (x == c) { d = d + 1; }
+      else if (x == want) {
+        d = d - 1;
+        if (d == 0) { g_bra = i; g_brb = pos; return 1; }
+      }
+      i = i - 1;
+    }
+  }
+  return 0;
+}
+
+int line_of_pos(int pos) {
+  int i = 0;
+  while (i < g_nlines) {
+    if (pos >= g_lstart[i] && pos <= g_lstart[i] + g_llen[i]) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 取路径的目录部分（不带末尾分隔符）；没有分隔符 = 空串。
+//   为什么要它：编译/运行的临时源必须落在**被测文件旁边**（include 按被编译文件目录解析），
+//   原来写死 `apps\studio_native\` ⇒ 打开 tmp\x.fl 或从别处启动时全错（用户实测：编译不给他过）。
+int dir_of(char *path, char *out) {
+  int i = 0;
+  int last = -1;
+  int k = 0;
+  while (path[i] != 0) {
+    if (path[i] == 92 || path[i] == 47) { last = i; }
+    i = i + 1;
+  }
+  if (last < 0) { out[0] = 0; return 0; }
+  while (k < last && k < 250) { out[k] = path[k]; k = k + 1; }
+  out[k] = 0;
+  return k;
+}
+
+int path_join(char *out, char *dir, char *name) {
+  int p = 0;
+  if (dir[0] != 0) {
+    p = ap2(out, 0, dir);
+    out[p] = 92;
+    p = p + 1;
+  }
+  return ap2(out, p, name);
+}
+
+// 取路径的"基名"（最后一个 '/' 或 '\' 之后；两种分隔符都认）。
+//   另存为的**默认文件名**只该是这个：旧版把整条 g_file 传给垫片，垫片为防路径注入把 '/' ':' 全换成
+//   '_' ⇒ 对话框里出现 "apps_studio_native_main.fl" 这种怪名字（实测过）。
+int base_of(char *path, char *out) {
+  int i = 0;
+  int o = 0;
+  while (path[i] != 0) {
+    if (path[i] == 92 || path[i] == 47) { o = i + 1; }
+    i = i + 1;
+  }
+  return ap2(out, 0, path + o);
+}
+
+// 对话框的起始目录：**三个对话框共用** g_dlgdir（用户口径："放一起"）；
+//   没记过就回退：fallback=1（选文件夹）先看工作区，否则用当前文件所在目录。
+//   为什么要有回退：进程 CWD 往往不是用户想去的目录（从别处双击启动时 CWD 可能是任何地方）。
+int dlg_initdir(char *out, int fallback) {
+  out[0] = 0;
+  if (g_dlgdir[0] != 0) { ap2(out, 0, g_dlgdir); return 1; }
+  if (fallback != 0 && g_ws[0] != 0) { ap2(out, 0, g_ws); return 1; }
+  dir_of(g_file, out);
+  if (out[0] != 0) { return 1; }
+  return 0;
+}
+
+int build_lines() {
+  int i = 0;
+  int ls = 0;
+  int n = 0;
+  g_nlines = 0;
+  while (i <= g_srclen && n < 2399) {
+    if (i == g_srclen || g_src[i] == 10) {
+      g_lstart[n] = ls;
+      g_llen[n] = i - ls;
+      n = n + 1;
+      ls = i + 1;
+    }
+    i = i + 1;
+  }
+  g_nlines = n;
+  return n;
+}
+
+// 光标所在行/列
+int cur_line() {
+  int i = 0;
+  int n = 0;
+  while (i < g_cur) {
+    if (g_src[i] == 10) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+
+int cur_col(int line) {
+  if (line < 0) { return 0; }
+  if (line >= g_nlines) { return 0; }
+  return g_cur - g_lstart[line];
+}
+
+// ===== 光标定位：**按"码点 × 渲染像素宽"算，不按字节数算** =====
+// 经典坑（本轮修）：原来光标 x = 268 + (字节偏移)*9 ⇒ 一个汉字占 3 字节就被当成 3 列（27px），
+//   而它实际只画约 15px ⇒ 每过一个汉字，光标相对正文就"多走一截"，一路累积 ⇒"位移逐步过量"。
+//   ⇒ 三件事都得按码点：① 左/右走一个码点（不是 1 字节，否则会插到 UTF-8 中间）② x 用 GDI 实测前缀宽
+//     ③ 上下移动用**像素列**当目标（同一条竖线上落点一致）。
+int is_cont(int pos) {                   // UTF-8 续字节 10xxxxxx
+  if (pos < 0) { return 0; }
+  if (pos >= g_srclen) { return 0; }
+  if ((g_src[pos] & 192) == 128) { return 1; }
+  return 0;
+}
+
+int cp_prev(int pos) {                   // 往前一个码点的起点
+  int p = pos - 1;
+  while (p > 0) {
+    if (is_cont(p) == 0) { break; }
+    p = p - 1;
+  }
+  return p;
+}
+
+int cp_next(int pos) {                   // 往后一个码点的起点
+  int p = pos + 1;
+  while (p < g_srclen) {
+    if (is_cont(p) == 0) { break; }
+    p = p + 1;
+  }
+  return p;
+}
+
+// 一个字节是不是非 ASCII（UTF-8 首字节 >= 0x80 ⇒ 这一段是汉字/全角标点）
+int is_cjk_b(int c) { if ((c & 255) >= 128) { return 1; } return 0; }
+
+// 按段的第一个字节挑字体：CJK 段 → g_cjk，其余 → 代码字体 g_hf
+char *font_for(char *p) {
+  if (is_cjk_b(p[0]) != 0) { return g_cjk; }
+  return g_hf;
+}
+
+// 量 b[start..start+n) 的像素宽（**按段挑字体**，与 draw_line_hl 的分段口径一致）
+int px_span(struct Surf *s, char *b, int start, int n) {
+  struct SZE sz;
+  int wl = 0;
+  sz.cx = 0; sz.cy = 0;
+  if (n <= 0) { return 0; }
+  if (n > 3900) { n = 3900; }
+  wl = MultiByteToWideChar(65001, 0, b + start, n, g_wbuf, 3900);
+  if (wl <= 0) { return 0; }
+  // DirectWrite 路线：宽度必须用**同一台引擎**量（否则光标和字形各走各的、越走越偏）
+  if (g_txready != 0) {
+    return tx_measure(is_cjk_b(b[start]) != 0 ? g_tx_cjk : g_tx_code, g_wbuf, wl);
+  }
+  SelectObject(s->dc, font_for(b + start));
+  GetTextExtentPoint32W(s->dc, g_wbuf, wl, &sz);
+  return sz.cx;
+}
+
+// 从 line 行首到 pos 的**渲染像素宽**（逐段挑字体累加；不猜 8/15 这种魔法数）
+int px_upto(struct Surf *s, int line, int pos) {
+  int l0 = 0;
+  int e = 0;
+  int p = 0;
+  int q = 0;
+  int w = 0;
+  if (line < 0) { return 0; }
+  if (line >= g_nlines) { return 0; }
+  l0 = g_lstart[line];
+  e = pos;
+  if (e <= l0) { return 0; }
+  p = l0;
+  while (p < e) {
+    int cj = is_cjk_b(g_src[p]);
+    q = p + 1;
+    while (q < e && is_cjk_b(g_src[q]) == cj) { q = q + 1; }
+    w = w + px_span(s, g_src, p, q - p);
+    p = q;
+  }
+  return w;
+}
+
+// 反查：在这一行里找出"像素宽不超过 target 的最右落点"
+int pos_at_px(struct Surf *s, int line, int target) {
+  int l0 = 0;
+  int e = 0;
+  int p = 0;
+  int q = 0;
+  int best = 0;
+  int w = 0;
+  if (line < 0) { return 0; }
+  if (line >= g_nlines) { return g_srclen; }
+  l0 = g_lstart[line];
+  e = l0 + g_llen[line];
+  if (target <= 0) { return l0; }
+  p = l0;
+  best = l0;
+  while (p < e) {
+    q = cp_next(p);
+    if (q > e) { q = e; }
+    w = px_upto(s, line, q);
+    if (w > target) { return p; }
+    best = q;
+    p = q;
+  }
+  return best;
+}
+
+// ===== 软换行（视觉换行）：源码行 → 显示行 =====
+//   ⚠️ 为什么要有这张表：一行源码折成 3 个显示行之后，光标 y、点击落点、翻页、滚动条、选区、上下键
+//      全都得按"显示行"算；而**行号/状态栏 Ln,Col 仍按源码行**（VS Code 也是这样：行号只标一行第一格）。
+int px_range(struct Surf *s, int a, int b) {          // 任意 [a,b) 的渲染像素宽（按脚本切段，和 px_span 同口径）
+  int p = 0;
+  int q = 0;
+  int w = 0;
+  int cj = 0;
+  if (b <= a) { return 0; }
+  p = a;
+  while (p < b) {
+    cj = is_cjk_b(g_src[p]);
+    q = p + 1;
+    // ⚠️ 每段**最多 2000 字节**：`px_span` 内部走 `MultiByteToWideChar`，转换缓冲只有 3900 宽
+    //   （超了会被静默截断 ⇒ 一段 5000 字节的超长行会被量短、折行位置算错）。切段就永远不会撞上限。
+    while (q < b && is_cjk_b(g_src[q]) == cj && q - p < 2000) { q = q + 1; }
+    w = w + px_span(s, g_src, p, q - p);
+    p = q;
+  }
+  return w;
+}
+
+// 整行像素宽（缓存进 g_lw；-1 = 没算过）
+int line_w(struct Surf *s, int line) {
+  int l0 = 0;
+  if (line < 0) { return 0; }
+  if (line >= g_nlines) { return 0; }
+  if (g_lw[line] >= 0) { return g_lw[line]; }
+  l0 = g_lstart[line];
+  g_lw[line] = px_range(s, l0, l0 + g_llen[line]);
+  return g_lw[line];
+}
+
+// 重建显示行表。avail = 一行放得下的像素宽（正文左边界 .. 滚动条左边）
+//   性能要点：**短行一律不量**。每字节至少 minw 像素（14px 字 ⇒ 4px/字节），字节数 × minw ≤ avail 的行
+//   必然一行装得下 ⇒ 直接记成"整行一个显示行"。实测 1674 行的文件里要真去量的行只有个位数，
+//   所以每次按键重建的代价 ≈ 一次 build_lines（不会掉帧）。
+int wrap_build(struct Surf *s, int avail) {
+  int line = 0;
+  int p = 0;
+  int e = 0;
+  int q = 0;
+  int q2 = 0;
+  int guess = 0;
+  int lw = 0;
+  int minw = 0;
+  int guard = 0;
+  g_nrows = 0;
+  // 每字节的**上界**像素宽（注意是上界！）：短行"肯定放得下"才允许跳过测量。
+  //   最宽的字节是 ASCII 单字节（等宽约 0.6em，14px 字 ⇒ 8px）；汉字是 3 字节约 16px（5.3px/字节）。
+  //   ⚠️ 这个常数**方向错了就是真 bug**：第一版取 (px*3)/10=4、第二版取 (px+4)/3=6（都偏小），
+  //   于是 98 字节的一行（真实宽 784px > 可用 714px）被判定"一行放得下"⇒ **不折行、直接被右边界裁掉**。
+  //   实测症状：`main.fl` 第 3 行（`// 编译: E:\FLINT-lab\...`）画到 x=979 就没了，下面没有续行。
+  minw = (g_fontpx * 2) / 3;
+  if (minw < 4) { minw = 4; }
+  if (avail < 40) { avail = 40; }
+  while (line < g_nlines) {
+    g_lrow[line] = g_nrows;
+    p = g_lstart[line];
+    e = p + g_llen[line];
+    if (g_llen[line] <= 0 || g_wrapmode == 0 || g_llen[line] * minw <= avail) {
+      if (g_nrows < 4095) { g_vb[g_nrows] = 0; g_ve[g_nrows] = g_llen[line]; g_nrows = g_nrows + 1; }
+    } else {
+      lw = line_w(s, line);
+      if (lw <= avail) {
+        if (g_nrows < 4095) { g_vb[g_nrows] = 0; g_ve[g_nrows] = g_llen[line]; g_nrows = g_nrows + 1; }
+      } else {
+        while (p < e && g_nrows < 4095) {
+          if (px_range(s, p, e) <= avail) {
+            q = e;
+          } else {
+            // 先用"按比例估"的落点，再逐码点收/放（等宽字体下估值几乎一次命中）
+            guess = ((e - p) * avail) / (lw > 0 ? lw : 1);
+            if (guess < 1) { guess = 1; }
+            q = p + guess;
+            if (q > e) { q = e; }
+            while (q < e && is_cont(q) != 0) { q = q + 1; }
+            guard = 0;
+            while (q > p && guard < 60) {
+              if (px_range(s, p, q) <= avail) { break; }
+              q2 = cp_prev(q);
+              if (q2 <= p) { q = p; break; }
+              q = q2;
+              guard = guard + 1;
+            }
+            if (q <= p) { q = cp_next(p); if (q > e) { q = e; } }
+            guard = 0;
+            while (q < e && guard < 60) {
+              q2 = cp_next(q);
+              if (q2 > e) { break; }
+              if (px_range(s, p, q2) > avail) { break; }
+              q = q2;
+              guard = guard + 1;
+            }
+          }
+          g_vb[g_nrows] = p - g_lstart[line];
+          g_ve[g_nrows] = q - g_lstart[line];
+          g_nrows = g_nrows + 1;
+          p = q;
+        }
+      }
+    }
+    line = line + 1;
+  }
+  g_lrow[g_nlines] = g_nrows;
+  return g_nrows;
+}
+
+// 显示行 → 源码行（二分：g_lrow 单调递增）
+int row_line(int row) {
+  int lo = 0;
+  int hi = 0;
+  int mid = 0;
+  hi = g_nlines - 1;
+  if (hi < 0) { return 0; }
+  while (lo < hi) {
+    mid = (lo + hi + 1) / 2;
+    if (g_lrow[mid] <= row) { lo = mid; } else { hi = mid - 1; }
+  }
+  return lo;
+}
+
+// 字节偏移 → 它所在的显示行（落在折行点上时算下一显示行的开头，和 VS Code 一致）
+int row_of_pos(int pos) {
+  int ln = 0;
+  int r = 0;
+  int rel = 0;
+  int lim = 0;
+  if (g_nrows <= 0) { return 0; }
+  if (g_nlines <= 0) { return 0; }
+  ln = cur_line();
+  if (ln > g_nlines - 1) { ln = g_nlines - 1; }
+  if (ln < 0) { return 0; }
+  rel = pos - g_lstart[ln];
+  r = g_lrow[ln];
+  lim = g_lrow[ln + 1];
+  while (r + 1 < lim && g_vb[r + 1] <= rel) { r = r + 1; }
+  return r;
+}
+
+// 显示行 + 行内像素偏移 → 字节偏移（点哪儿落哪儿）
+int pos_in_row(struct Surf *s, int row, int dx) {
+  int ln = 0;
+  int a = 0;
+  int b = 0;
+  int p = 0;
+  int q = 0;
+  int best = 0;
+  if (g_nrows <= 0) { return 0; }
+  if (row < 0) { row = 0; }
+  if (row > g_nrows - 1) { row = g_nrows - 1; }
+  ln = row_line(row);
+  a = g_lstart[ln] + g_vb[row];
+  b = g_lstart[ln] + g_ve[row];
+  if (dx <= 0) { return a; }
+  p = a;
+  best = a;
+  while (p < b) {
+    q = cp_next(p);
+    if (q > b) { q = b; }
+    if (px_range(s, a, q) > dx) { return p; }
+    best = q;
+    p = q;
+  }
+  return best;
+}
+
+// 行表变了（插入/删除/换行/打开文件）→ 重建行表 + 作废宽度缓存 + 让本帧重算显示行
+int rebuild(int need_lines) {
+  int i = 0;
+  if (need_lines != 0) { build_lines(); }
+  i = 0;
+  while (i < 2400) { g_lw[i] = 0 - 1; i = i + 1; }
+  g_needwrap = 1;
+  return 0;
+}
+
+// ===== 撤销 / 重做（整缓冲快照）=====
+//   为什么整缓冲快照：本编辑器的改动路径很多（键盘 / IME 边打边插 / IME 上屏 / 撤回 / 粘贴），
+//   逐条记录"反向操作"要每处都配对写一遍，漏一处就是数据损坏；快照法只有"存/取"两个动作。
+//   代价 = 24 槽 × 256KB = 6MB 虚拟内存（VirtualAlloc 按需提交），相对于"不省体积"的口径可以忽略。
+int undo_store(int slot) {
+  int off = 0;
+  int i = 0;
+  if (g_undo == 0) { return 0; }
+  off = slot * 262144;
+  while (i < g_srclen) { g_undo[off + i] = g_src[i]; i = i + 1; }
+  g_ulen[slot] = g_srclen;
+  return 1;
+}
+
+// 编辑**之后**调用：把当前状态推进历史。400ms 内的连续编辑合并成一步（打一个词只撤回一次）。
+int undo_push() {
+  int now = 0;
+  int k = 0;
+  if (g_undo == 0) { return 0; }
+  g_dirty = 1;                                  // 任何一次编辑都算"未保存"（切文件/关窗会先写盘）
+  now = GetTickCount();
+  if (g_ui > 0 && now - g_ums < 400) {          // 合并：覆盖"本串"的末状态，不改下标
+    undo_store(g_ui);
+    g_ums = now;
+    return 0;
+  }
+  if (g_ui < g_un - 1) { g_un = g_ui + 1; }     // 新编辑 ⇒ 丢掉 redo 段
+  if (g_un >= 24) {                             // 满了：整体下移一格（24 槽够深，极少走到）
+    k = 1;
+    while (k < 23) {
+      int i = 0;
+      int a = k * 262144;
+      int b = (k - 1) * 262144;
+      while (i < g_ulen[k]) { g_undo[b + i] = g_undo[a + i]; i = i + 1; }
+      g_ulen[k - 1] = g_ulen[k];
+      k = k + 1;
+    }
+    g_un = 23;
+    g_ui = g_ui - 1;
+    if (g_ui < 0) { g_ui = 0; }
+  }
+  g_ui = g_un;
+  g_un = g_un + 1;
+  undo_store(g_ui);
+  g_ums = now;
+  return 1;
+}
+
+int undo_restore(int slot) {
+  int off = 0;
+  int i = 0;
+  if (g_undo == 0) { return 0; }
+  if (slot < 0 || slot >= g_un) { return 0; }
+  off = slot * 262144;
+  i = 0;
+  while (i < g_ulen[slot]) { g_src[i] = g_undo[off + i]; i = i + 1; }
+  g_srclen = g_ulen[slot];
+  if (g_cur > g_srclen) { g_cur = g_srclen; }
+  g_selon = 0;
+  rebuild(1);
+  return 1;
+}
+
+int undo_do() {
+  if (g_undo == 0) { return 0; }
+  if (g_ui <= 0) { ap2(g_status, 0, "undo: 已到最早"); return 0; }
+  g_ui = g_ui - 1;
+  undo_restore(g_ui);
+  ap2(g_status, 0, "undo");
+  return 1;
+}
+
+int redo_do() {
+  if (g_undo == 0) { return 0; }
+  if (g_ui >= g_un - 1) { ap2(g_status, 0, "redo: 已到最新"); return 0; }
+  g_ui = g_ui + 1;
+  undo_restore(g_ui);
+  ap2(g_status, 0, "redo");
+  return 1;
+}
+
+// 选区端点（永远 sel_a <= sel_b）；没有选区时两者都等于光标
+int sel_a() {
+  if (g_selon == 0) { return g_cur; }
+  if (g_sel < g_cur) { return g_sel; }
+  return g_cur;
+}
+
+int sel_b() {
+  if (g_selon == 0) { return g_cur; }
+  if (g_sel < g_cur) { return g_cur; }
+  return g_sel;
+}
+
+// 删掉 [a,b)（供"有选区时打字/退格 = 替换选区"和剪切用）
+int del_range(int a, int b) {
+  int n = 0;
+  int i = 0;
+  if (b <= a) { return 0; }
+  if (a < 0) { a = 0; }
+  if (b > g_srclen) { b = g_srclen; }
+  n = b - a;
+  i = a;
+  while (i + n < g_srclen) { g_src[i] = g_src[i + n]; i = i + 1; }
+  g_srclen = g_srclen - n;
+  g_cur = a;
+  return n;
+}
+
+// 一次 TextOutW 画一整行：源码是 UTF-8，GDI 的 A 版走 ANSI 代码页 ⇒ 中文全乱码，
+//   必须先 MultiByteToWideChar(CP_UTF8=65001) 转成 UTF-16 再调 W 版。
+int draw_line(int *dc, int x, int y, int s, int n) {
+  int wl = 0;
+  if (n <= 0) { return 0; }
+  wl = MultiByteToWideChar(65001, 0, g_src + s, n, g_wbuf, 4000);
+  TextOutW(dc, x, y, g_wbuf, wl);
+  return 0;
+}
+
+// 画一行纯字面量（同样走 UTF-16）
+int draw_str(int *dc, int x, int y, char *s) {
+  int n = sl2(s);
+  int wl = 0;
+  if (n <= 0) { return 0; }
+  wl = MultiByteToWideChar(65001, 0, s, n, g_wbuf, 4000);
+  TextOutW(dc, x, y, g_wbuf, wl);
+  return 0;
+}
+
+// 量一段**任意 UTF-8 缓冲**的像素宽（IME 合成串用；与 px_upto 同一条口径：跟字体实测，不猜）
+int px_of(struct Surf *s, char *b, int n) {
+  struct SZE sz;
+  int wl = 0;
+  sz.cx = 0; sz.cy = 0;
+  if (n <= 0) { return 0; }
+  if (n > 3900) { n = 3900; }
+  SelectObject(s->dc, g_hf);
+  wl = MultiByteToWideChar(65001, 0, b, n, g_wbuf, 3900);
+  if (wl <= 0) { return 0; }
+  GetTextExtentPoint32W(s->dc, g_wbuf, wl, &sz);
+  return sz.cx;
+}
+
+// 画一段**任意 UTF-8 缓冲**（不是从 g_src 取行 ⇒ IME 合成串/preedit 用）
+int draw_buf(int *dc, int x, int y, char *b, int n) {
+  int wl = 0;
+  if (n <= 0) { return 0; }
+  if (n > 3900) { n = 3900; }
+  wl = MultiByteToWideChar(65001, 0, b, n, g_wbuf, 3900);
+  if (wl <= 0) { return 0; }
+  TextOutW(dc, x, y, g_wbuf, wl);
+  return 0;
+}
+
+// ===== 语法高亮（VS Code Dark+ 语义）=====
+//   口径（与 docs\语言参考.md §1 对齐）：
+//   ① 注释只有 `//` 到行尾（本语言**没有块注释**）；② 字符串 `"..."` / 字符 `'...'` 里 `\` 转义跳过
+//      （不跳的话 `\"` 会把字符串提前收尾，后半行颜色全错）；③ 数字 `0x..` / `1.5` / `12` 一类；
+//      ④ 标识符按 ASCII 字符类切，命中关键字表才上色；⑤ **连续非 ASCII 字节必须整段画** ——
+//      一个汉字 3 字节，拆成单字节喂 MultiByteToWideChar 会变成替换符（中文注释会"烂一半"）；
+//      ⑥ 其余标点/空白逐字节，宽度照样实测（px_of），不猜 8px。
+//   颜色由 main 传进来（全 app 颜色只有一个作者，见 c_* 注释）。
+int is_az(int c) { return ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95); }   // A-Z a-z _
+int is_09(int c) { return (c >= 48 && c <= 57); }                                        // 0-9
+
+// s[0..n) 是否等于字面量 lit（先比长度，再逐字节比 —— 不用 strncmp，避免"长度没管"的假命中）
+int t_is(char *s, int n, char *lit) {
+  int m = sl2(lit);
+  int i = 0;
+  if (n != m) { return 0; }
+  while (i < m) {
+    if (s[i] != lit[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 关键字 → 颜色；返回 0 = 不是关键字（**所有颜色都非 0**，0 当"未命中"哨兵）
+//   关键字表抄自 src\parse.c 的 is_keyword()：控制流 / 内置类型 / 声明修饰词三档。
+int kw_col(char *s, int n, int c_kw, int c_type, int c_ctrl) {
+  if (t_is(s, n, "if") != 0 || t_is(s, n, "else") != 0 || t_is(s, n, "while") != 0
+      || t_is(s, n, "for") != 0 || t_is(s, n, "switch") != 0 || t_is(s, n, "case") != 0
+      || t_is(s, n, "default") != 0 || t_is(s, n, "return") != 0
+      || t_is(s, n, "break") != 0 || t_is(s, n, "continue") != 0) { return c_ctrl; }
+  if (t_is(s, n, "int") != 0 || t_is(s, n, "int_32") != 0 || t_is(s, n, "int_64") != 0
+      || t_is(s, n, "char") != 0 || t_is(s, n, "void") != 0 || t_is(s, n, "double") != 0
+      || t_is(s, n, "uint_8") != 0 || t_is(s, n, "uint_32") != 0
+      || t_is(s, n, "uint_64") != 0) { return c_type; }
+  if (t_is(s, n, "struct") != 0 || t_is(s, n, "api") != 0 || t_is(s, n, "new") != 0
+      || t_is(s, n, "own") != 0 || t_is(s, n, "share") != 0 || t_is(s, n, "ptr") != 0) { return c_kw; }
+  return 0;
+}
+
+// 软换行续行的"起始状态"：0 = 普通 / 1 = 在 // 注释里 / 2 = 在 "字符串" 里 / 3 = 在 '字符' 里
+//   为什么需要：draw_line_hl 是按**显示行**调用的，续行从 b0 开始重新判色 ⇒ 上一格开头的 `//`
+//   在续行里已经看不见了，续行的字就会被当成代码重新上色（用户实测："触发视觉换行后注释高亮失效"）。
+//   这里把"行首到 b0"扫一遍，只判 3 种跨行状态（注释到行尾、两个引号），代价是每行几十字节。
+int hl_state_at(int line, int b0) {
+  int l0 = g_lstart[line];
+  int e = l0 + b0;
+  int p = l0;
+  while (p < e) {
+    int c = g_src[p];
+    if (c == 47 && p + 1 < e && g_src[p + 1] == 47) { return 1; }
+    if (c == 34 || c == 39) {
+      int qc = c;
+      p = p + 1;
+      while (p < e) {
+        if (g_src[p] == 92) { p = p + 2; }
+        else if (g_src[p] == qc) { p = p + 1; break; }
+        else { p = p + 1; }
+      }
+      continue;
+    }
+    p = p + 1;
+  }
+  return 0;
+}
+
+// 画一整行（按段上色）：返回行尾 x。每段一次 TextOutW ⇒ 光标 x 仍由 px_upto 用同一字体前缀实测，不受影响。
+//   ⚠️ b0/b1 = **这一显示行**在源码行里的字节范围（相对行首）。软换行后一行源码要分几次画，
+//      续行的起始状态由 hl_state_at() 从前缀推出来 ⇒ 注释里的续行仍是注释色（与 VS Code 一致）。
+int draw_line_hl(struct Surf *s, int x, int y, int line, int b0, int b1,
+                 int c_def, int c_com, int c_str, int c_num, int c_kw, int c_type, int c_ctrl) {
+  int l0 = 0;
+  int e = 0;
+  int p = 0;
+  int q = 0;
+  int c = 0;
+  int cl = 0;
+  int carry = 0;
+  int px = x;
+  if (line < 0) { return x; }
+  if (line >= g_nlines) { return x; }
+  l0 = g_lstart[line] + b0;
+  e = g_lstart[line] + b1;
+  if (e > g_lstart[line] + g_llen[line]) { e = g_lstart[line] + g_llen[line]; }
+  p = l0;
+  carry = hl_state_at(line, b0);
+  while (p < e) {
+    c = g_src[p];
+    q = 0;
+    cl = 0;
+    // ⓪ 续行：上一格开始的状态先接着走（注释剩一整行；字符串/字符走到收尾引号为止）
+    if (carry == 1) {
+      q = e; cl = c_com; carry = 0;
+    } else if (carry == 2 || carry == 3) {
+      int qc = 34;
+      if (carry == 3) { qc = 39; }
+      q = p + 1;
+      while (q < e) {
+        if (g_src[q] == 92) { q = q + 2; }
+        else if (g_src[q] == qc) { q = q + 1; break; }
+        else { q = q + 1; }
+      }
+      cl = c_str;
+      if (carry == 3) { cl = c_num; }
+      carry = 0;
+    }
+    // ① `//` 注释：吞到行尾（先判它，字符串里的 `//` 走下面第②条）
+    if (q == 0 && c == 47) {
+      if (p + 1 < e && g_src[p + 1] == 47) { q = e; cl = c_com; }
+    }
+    if (q == 0) {
+      if (c == 34) {                                    // ② 字符串
+        q = p + 1;
+        while (q < e) {
+          if (g_src[q] == 92) { q = q + 2; }
+          else if (g_src[q] == 34) { q = q + 1; break; }
+          else { q = q + 1; }
+        }
+        cl = c_str;
+      }
+      else if (c == 39) {                               // 字符字面量 'a' / '\n'
+        q = p + 1;
+        while (q < e) {
+          if (g_src[q] == 92) { q = q + 2; }
+          else if (g_src[q] == 39) { q = q + 1; break; }
+          else { q = q + 1; }
+        }
+        cl = c_num;
+      }
+      else if (is_09(c) != 0) {                         // ③ 数字（含 0x.. / 1.5）
+        q = p + 1;
+        while (q < e) {
+          if (is_09(g_src[q]) != 0 || is_az(g_src[q]) != 0 || g_src[q] == 46) { q = q + 1; }
+          else { break; }
+        }
+        cl = c_num;
+      }
+      else if (is_az(c) != 0) {                         // ④ 标识符 → 查关键字表
+        q = p + 1;
+        while (q < e) {
+          if (is_az(g_src[q]) != 0 || is_09(g_src[q]) != 0) { q = q + 1; }
+          else { break; }
+        }
+        cl = kw_col(g_src + p, q - p, c_kw, c_type, c_ctrl);
+      }
+      else if (c >= 128) {                              // ⑤ 连续非 ASCII 整段（别拆 UTF-8）
+        q = p + 1;
+        while (q < e && g_src[q] >= 128) { q = q + 1; }
+      }
+      else { q = p + 1; }                               // ⑥ 标点 / 空白
+    }
+    if (q > e) { q = e; }
+    if (cl == 0) { SetTextColor(s->dc, c_def); } else { SetTextColor(s->dc, cl); }
+    // ⚠️ 颜色段 ≠ 字体段：注释/字符串是"整段一个颜色"，但里面中英混排 ⇒ 还要按字节类再切成
+    //    CJK/拉丁小段分别挑字体，否则整条中文注释都会落回 Consolas 的字体链接替补（细字体）。
+    {
+      int r = p;
+      while (r < q) {
+        int cj = is_cjk_b(g_src[r]);
+        int rr = r + 1;
+        while (rr < q && is_cjk_b(g_src[rr]) == cj) { rr = rr + 1; }
+        if (g_txready != 0) {
+          int wl = MultiByteToWideChar(65001, 0, g_src + r, rr - r, g_wbuf, 3900);
+          int col = (cl == 0) ? c_def : cl;
+          tx_text(cj != 0 ? g_tx_cjk : g_tx_code, px, y + g_txdy, g_wbuf, wl, col);
+          px = px + tx_measure(cj != 0 ? g_tx_cjk : g_tx_code, g_wbuf, wl);
+        } else {
+          use_font(s->dc, font_for(g_src + r));
+          draw_buf(s->dc, px, y, g_src + r, rr - r);
+          px = px + px_span(s, g_src, r, rr - r);
+        }
+        r = rr;
+      }
+    }
+    p = q;
+  }
+  return px;
+}
+
+// 十进制数字 → 追加到 d[p..]（返回新的 p）。逐位倒着放进临时缓冲再翻过来，不用 % 和字符串拼接。
+int num_ap(char *d, int p, int v) {
+  char b[16];
+  int n = 0;
+  int i = 0;
+  if (v < 0) { d[p] = 45; p = p + 1; v = 0 - v; }
+  if (v == 0) { b[n] = 48; n = n + 1; }
+  while (v > 0) { b[n] = 48 + (v - (v / 10) * 10); n = n + 1; v = v / 10; }
+  i = n - 1;
+  while (i >= 0) { d[p] = b[i]; p = p + 1; i = i - 1; }
+  return p;
+}
+
+// 用**当前已选字体**量一段 UTF-8 的像素宽（不换字体 ⇒ 与紧接着的 TextOutW 是同一把尺子）。
+//   px_upto/px_of 会强制切到代码字体，排版 UI 文字时不能用它们量。
+int px_cur(struct Surf *s, char *b, int n) {
+  struct SZE sz;
+  int wl = 0;
+  sz.cx = 0; sz.cy = 0;
+  if (n <= 0) { return 0; }
+  if (n > 3900) { n = 3900; }
+  wl = MultiByteToWideChar(65001, 0, b, n, g_wbuf, 3900);
+  if (wl <= 0) { return 0; }
+  GetTextExtentPoint32W(s->dc, g_wbuf, wl, &sz);
+  return sz.cx;
+}
+
+// 十进制数字（按当前字体画；比例字体下不再按每位 8px 硬推 —— 那是等宽字体的假设）
+int draw_num(int *dc, int x, int y, int v) {
+  char b[16];
+  int p = 0;
+  p = num_ap(b, 0, v);
+  b[p] = 0;
+  draw_str(dc, x, y, b);
+  return 0;
+}
+
+// 行号/序号用：右对齐画数字（宽度 GetTextExtentPoint32W 实测，不按"每位 7px"估 —— 比例字体上估法必错位）
+int draw_num_r(struct Surf *s, int xr, int y, int v) {
+  char b[16];
+  int p = 0;
+  int w = 0;
+  p = num_ap(b, 0, v);
+  b[p] = 0;
+  w = px_cur(s, b, p);
+  draw_str(s->dc, xr - w, y, b);
+  return 0;
+}
+
+// ===== 行号列宽自适应 =====
+//   旧版把"行号右边界 240 / 正文起点 268"写死 ⇒ 文件过 999 行后 4 位数会挤到侧栏（220 那条描边上）。
+//   口径：3 位数沿用 240/268；**每多一位，右边界与正文起点各 +8px**。
+//   为什么是 +8：行号用等宽小一号字体（12px Consolas），一位数字 advance ≈ 7~8px ⇒ 右边界加 8
+//   正好把多出来那一位"向右让出去"，左边沿仍留在侧栏描边 220 的右边（实测 4 位数最左像素 = 230）。
+//   全 app 只认这一对值（main 里的 gx/tx），别再写字面量 240/268。
+int gutter_x(int n) {
+  int d = 1;
+  int t = n;
+  if (t < 1) { t = 1; }
+  while (t >= 10) { t = t / 10; d = d + 1; }
+  if (d <= 3) { return g_gutterBase; }
+  return g_gutterBase + (d - 3) * 8;
+}
+
+// ===== 垂直滚动条几何（滑块高/位置）=====
+//   高度 = 轨道高 × 可见行/总行数，下限 24px（太短抓不住）；位置按 g_scroll 线性映射。
+//   ⚠️ 这几个函数只做"算"，不读全局滚动状态（滚动量由调用方传）⇒ 输入与绘制用同一把尺子。
+int sb_thumb_h(int track, int n, int vis) {
+  int h = 0;
+  if (track <= 0) { return 0; }
+  if (n <= 0 || vis <= 0 || vis >= n) { return track; }
+  h = (track * vis) / n;
+  if (h < 24) { h = 24; }
+  if (h > track) { h = track; }
+  return h;
+}
+
+// 返回滑块顶相对**轨道顶**的偏移（调用方加 tbh）
+int sb_thumb_y(int track, int th, int n, int vis, int scroll) {
+  int span = 0;
+  int maxs = 0;
+  if (track <= th || n <= 0 || vis <= 0 || vis >= n) { return 0; }
+  span = track - th;
+  maxs = n - vis;
+  if (maxs < 1) { maxs = 1; }
+  if (scroll < 0) { scroll = 0; }
+  if (scroll > maxs) { scroll = maxs; }
+  return (span * scroll) / maxs;
+}
+
+// 右对齐画一段（宽度用当前字体实测）：返回这段的左边 x，调用方减掉间距后继续往左排。
+int draw_right(struct Surf *s, int xr, int y, char *str) {
+  int n = sl2(str);
+  int w = px_cur(s, str, n);
+  draw_str(s->dc, xr - w, y, str);
+  return xr - w;
+}
+
+// 带裁剪画一段：侧栏文件名 / 标题栏路径可能很长 —— 不许画到隔壁区（GDI 的 TextOutW 不认"栏"，得自己压裁剪框）
+int draw_clip(struct Surf *s, int x, int y, int cx0, int cy0, int cx1, int cy1, char *str) {
+  SaveDC(s->dc);
+  IntersectClipRect(s->dc, cx0, cy0, cx1, cy1);
+  draw_str(s->dc, x, y, str);
+  RestoreDC(s->dc, 0 - 1);
+  return 0;
+}
+
+// s 是否以 tail 结尾（侧栏"当前文件"高亮用：文件表里存的是 `lib\xxx.fl`，g_file 可能是完整路径）
+int ends_with(char *s, char *tail) {
+  int n = sl2(s);
+  int m = sl2(tail);
+  int i = 0;
+  if (m <= 0) { return 0; }
+  if (m > n) { return 0; }
+  while (i < m) {
+    if (s[n - m + i] != tail[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// —— 编辑缓冲操作 ——
+int ins_byte(int pos, int ch) {
+  int i = g_srclen;
+  if (g_srclen >= 250000) { return 0; }
+  if (pos > g_srclen) { pos = g_srclen; }
+  while (i > pos) { g_src[i] = g_src[i - 1]; i = i - 1; }
+  g_src[pos] = ch;
+  g_srclen = g_srclen + 1;
+  return 0;
+}
+
+int del_byte(int pos) {
+  int i = pos;
+  // ⚠️ 必须允许 pos == 0（删数组首字节）：退格退到"文件第一个字符"时 pos 就是 0。
+  //   旧守卫写 `pos <= 0` ⇒ 首字节永远删不掉、但 g_cur 照样减到 0 ⇒ 正文里留一个**删不掉的虚影**
+  //   （buffer 里还留着那一个字节，光标已到 0，之后狂按退格也没用）。
+  if (pos < 0 || g_srclen <= 0) { return 0; }
+  while (i < g_srclen - 1) { g_src[i] = g_src[i + 1]; i = i + 1; }
+  g_srclen = g_srclen - 1;
+  return 0;
+}
+
+// 矩形命中（客户区坐标，含边界）——顶栏自绘按钮用
+int hit_box(int mx, int my, int x0, int y0, int x1, int y1) {
+  if (mx < x0) { return 0; }
+  if (mx > x1) { return 0; }
+  if (my < y0) { return 0; }
+  if (my > y1) { return 0; }
+  return 1;
+}
+
+// ===== 自绘小图标（纯 fill_rect 拼，不引入新 API）=====
+// 只留还在用的：火花标记（设置卡片头）＋ 折线菱形。运行三角/滑杆/文件夹已换成图标字体
+// （见下面的 draw_ico），手拼图形的斜边是硬锯齿，是"界面显廉价"的第一眼来源（2026-10-27）。
+// 菱形：按行铺 1px 横条（对角线只能用这个画，本仓没导 Polygon）
+int glyph_diamond(struct Surf *s, int cx, int cy, int rx, int ry, int col) {
+  int dy = 0 - ry;
+  while (dy <= ry) {
+    int ad = dy;
+    int half = 0;
+    if (ad < 0) { ad = 0 - ad; }
+    if (ry > 0) { half = (rx * (ry - ad)) / ry; }
+    if (half < 0) { half = 0; }
+    fill_rect(s, cx - half, cy + dy, cx + half + 1, cy + dy + 1, col);
+    dy = dy + 1;
+  }
+  return 0;
+}
+
+// ===== 图标字体（Segoe MDL2 Assets）=====
+//   U+E000..U+F8FF 全在 BMP ⇒ 码位永远是 3 字节 UTF-8，借道现成的 draw_buf 就能画。
+//   为什么换掉原来的 fill_rect 手拼图标（2026-10-27）：手拼的斜边是硬锯齿、笔宽/视觉重量
+//   各自为政，是"界面显廉价"的第一眼来源；图标字体自带 hinting + 灰度抗锯齿，风格统一。
+int cp_utf8(char *b, int cp) {
+  b[0] = 0xE0 | ((cp >> 12) & 15);
+  b[1] = 0x80 | ((cp >> 6) & 63);
+  b[2] = 0x80 | (cp & 63);
+  return 3;
+}
+
+// 画一个图标：hf 决定尺寸（g_hf_ico16 / g_hf_ico12 / g_hf_ico10），x/y 是字形左上角
+int draw_ico(struct Surf *s, int x, int y, char *hf, int cp, int col) {
+  char b[8];
+  cp_utf8(b, cp);
+  use_font(s->dc, hf);
+  SetTextColor(s->dc, col);
+  draw_buf(s->dc, x, y, b, 3);
+  return 0;
+}
+
+// ===== 菜单数据：标题 / 项数 / 标签 / 快捷键串 / 动作码 =====
+//   动作码（act）：1 新建 2 打开文件 3 打开文件夹 4 保存 5 另存为 6 撤销 7 重做 8 查找
+//                 9 编译 10 内置终端 11 外部 CMD 12 换行 13 设置 20 退出 21 全选 22 清空输出
+char *menu_title(int m) {
+  if (m == 1) { return "文件"; }
+  if (m == 2) { return "编辑"; }
+  if (m == 3) { return "运行"; }
+  if (m == 4) { return "视图"; }
+  return "";
+}
+
+int menu_count(int m) {
+  if (m == 1) { return 6; }
+  if (m == 2) { return 4; }
+  if (m == 3) { return 5; }
+  if (m == 4) { return 3; }
+  return 0;
+}
+
+char *menu_label(int m, int i) {
+  if (m == 1) {
+    if (i == 0) { return "新建文件"; }
+    if (i == 1) { return "打开文件..."; }
+    if (i == 2) { return "打开文件夹..."; }
+    if (i == 3) { return "保存"; }
+    if (i == 4) { return "另存为..."; }
+    return "退出";
+  }
+  if (m == 2) {
+    if (i == 0) { return "撤销"; }
+    if (i == 1) { return "重做"; }
+    if (i == 2) { return "查找"; }
+    return "全选";
+  }
+  if (m == 3) {
+    if (i == 0) { return "运行（cmd 窗口）"; }
+    if (i == 1) { return "运行（内置终端）"; }
+    if (i == 2) { return "编译当前文件"; }
+    if (i == 3) { return "内置终端面板"; }
+    return "外部 CMD 窗口（工作区）";
+  }
+  if (i == 0) { return "自动换行"; }
+  if (i == 1) { return "设置..."; }
+  return "清空输出面板";
+}
+
+char *menu_keys(int m, int i) {
+  if (m == 1) {
+    if (i == 0) { return "Ctrl+N"; }
+    if (i == 1) { return "Ctrl+O"; }
+    if (i == 2) { return "Ctrl+Shift+O"; }
+    if (i == 3) { return "Ctrl+S"; }
+    if (i == 4) { return "Ctrl+Shift+S"; }
+    return "";
+  }
+  if (m == 2) {
+    if (i == 0) { return "Ctrl+Z"; }
+    if (i == 1) { return "Ctrl+Y"; }
+    if (i == 2) { return "Ctrl+F"; }
+    return "Ctrl+A";
+  }
+  if (m == 3) {
+    if (i == 0) { return "F5"; }
+    if (i == 1) { return "Shift+F5"; }
+    if (i == 2) { return "Ctrl+Enter"; }
+    if (i == 3) { return "Ctrl+`"; }
+    return "";
+  }
+  if (i == 0) { return "Alt+Z"; }
+  if (i == 1) { return "F9"; }
+  return "";
+}
+
+int menu_act(int m, int i) {
+  if (m == 1) {
+    if (i == 0) { return 1; }
+    if (i == 1) { return 2; }
+    if (i == 2) { return 3; }
+    if (i == 3) { return 4; }
+    if (i == 4) { return 5; }
+    return 20;
+  }
+  if (m == 2) {
+    if (i == 0) { return 6; }
+    if (i == 1) { return 7; }
+    if (i == 2) { return 8; }
+    return 21;
+  }
+  if (m == 3) {
+    if (i == 0) { return 23; }
+    if (i == 1) { return 24; }
+    if (i == 2) { return 9; }
+    if (i == 3) { return 10; }
+    return 11;
+  }
+  if (i == 0) { return 12; }
+  if (i == 1) { return 13; }
+  return 22;
+}
+
+// 菜单 m 的标题在顶栏里的左边界（这里只算"标题串 + 24px 内边距"，与绘制同源）
+int menu_x(struct Surf *s, int m) {
+  int x = 10;
+  int k = 1;
+  while (k < m) {
+    x = x + px_cur(s, menu_title(k), sl2(menu_title(k))) + 24;
+    k = k + 1;
+  }
+  return x;
+}
+
+// 顶栏菜单条的背景（标题栏下面那 24px）
+int menu_band(struct Surf *s, int W, int y0, int y1, int c_menu, int c_active) {
+  fill_rect(s, 0, y0, W, y1, c_menu);
+  fill_rect(s, 0, y1 - 1, W, y1, 0x002B2B2B);
+  return 0;
+}
+
+// 下拉面板：返回行高（24），调用方用它算命中
+int menu_drop(struct Surf *s, int m, int x0, int y0, int w, int rowh,
+              int c_bg, int c_fg, int c_dim, int c_hot) {
+  int i = 0;
+  int y = 0;
+  fill_rect(s, x0, y0, x0 + w, y0 + menu_count(m) * rowh + 6, c_bg);
+  fill_rect(s, x0, y0, x0 + 1, y0 + menu_count(m) * rowh + 6, 0x003C3C3C);
+  fill_rect(s, x0 + w - 1, y0, x0 + w, y0 + menu_count(m) * rowh + 6, 0x003C3C3C);
+  fill_rect(s, x0, y0 + menu_count(m) * rowh + 5, x0 + w, y0 + menu_count(m) * rowh + 6, 0x003C3C3C);
+  y = y0 + 3;
+  while (i < menu_count(m)) {
+    if (g_hover == i) { fill_rect(s, x0 + 1, y, x0 + w - 1, y + rowh, c_hot); }
+    SetTextColor(s->dc, c_fg);
+    use_font(s->dc, g_hf_ui);
+    draw_str(s->dc, x0 + 12, y + 4, menu_label(m, i));
+    SetTextColor(s->dc, c_dim);
+    draw_right(s, x0 + w - 12, y + 4, menu_keys(m, i));
+    y = y + rowh;
+    i = i + 1;
+  }
+  return rowh;
+}
+
+// 新建文件：清空缓冲 + 标记未保存（保存时会先弹"另存为"）
+int do_new_file() {
+  char *keep = g_file;
+  ap2(g_file, 0, "untitled.fl");
+  if (g_undo != 0) { g_dirty = 1; }
+  g_srclen = 0;
+  g_cur = 0;
+  g_scroll = 0;
+  g_selon = 0;
+  g_sel = 0;
+  g_dragsel = 0;
+  g_dirty = 1;
+  rebuild(1);
+  if (g_undo != 0) {
+    g_un = 0;
+    g_ui = 0;
+    undo_store(0);
+    g_un = 1;
+    g_ums = 0;
+  }
+  ap2(g_status, 0, "new file");
+  return 0;
+}
+
+// ===== 内置终端（2026-10-27：持久 shell）=====
+//   旧版：每条命令 `cmd /c ... > tmp\studio_term.log` 跑一次 ⇒ `cd` 不保持、看不到流式输出、
+//   而且每条都要 WaitForSingleObject 最多 15 秒（把消息循环一起卡住）。
+//   新版：一个 cmd.exe 一直活着（垫片 `tx_sh_*`，管道 + PeekNamedPipe 非阻塞读）⇒
+//   `cd` / 环境变量 / 内建命令都像真 shell 一样保持，输出边跑边出来（VS Code 终端的手感）。
+//   边界：不是真 TTY —— 没有光标寻址/颜色、Ctrl+C 不打断（要停就 `exit` 再开）、交互式程序体验有限。
+int term_raw(char *s, int n) {
+  int i = 0;
+  if (g_term == 0) { return 0; }
+  if (g_termlen + n + 2 >= 32000) {
+    // 满了就**砍掉前面一半**（保留尾部）：直接清空会把长输出中间那截弄丢
+    int keep = 16000;
+    int st = g_termlen - keep;
+    if (st < 0) { st = 0; }
+    i = 0;
+    while (st + i < g_termlen) { g_term[i] = g_term[st + i]; i = i + 1; }
+    g_termlen = i;
+  }
+  i = 0;
+  while (i < n && g_termlen < 31990) {
+    int c = s[i] & 255;
+    if (c == 13) { i = i + 1; }                      // CRLF → LF（画的时候只认 10）
+    else if (c == 27) {                              // 跳过 ANSI/VT 序列（ESC … 到 @~ 之间那个字节）
+      while (i < n) {
+        int d = s[i] & 255;
+        i = i + 1;
+        if (d >= 64 && d <= 126) { break; }
+      }
+    } else {
+      g_term[g_termlen] = c;
+      g_termlen = g_termlen + 1;
+      i = i + 1;
+    }
+  }
+  g_term[g_termlen] = 0;
+  return 0;
+}
+
+int term_add(char *s) {
+  int n = sl2(s);
+  term_raw(s, n);
+  term_raw("\n", 1);
+  return 0;
+}
+
+// 起持久 shell（第一次用终端时懒启动；工作目录 = 工作区，没有工作区就用当前文件目录）
+int term_start() {
+  char dir[300];
+  if (g_shon != 0) { return 1; }
+  dir[0] = 0;
+  if (g_ws[0] != 0) { ap2(dir, 0, g_ws); }
+  else { dir_of(g_file, dir); }
+  if (tx_sh_start(&dir[0]) == 0) {
+    term_add("[shell: 启动失败（无法创建 cmd 进程）]");
+    g_shon = 0;
+    return 0;
+  }
+  g_shon = 1;
+  term_add("[shell: cmd.exe 已启动（持久会话，cd 会保持）]");
+  return 1;
+}
+
+// 每帧读一次输出（非阻塞；没数据立刻返回）
+int term_poll() {
+  int n = 0;
+  int rounds = 0;
+  if (g_shon == 0 || g_shbuf == 0) { return 0; }
+  while (rounds < 8) {
+    n = tx_sh_read(g_shbuf, 8000);
+    if (n < 0) {
+      term_add("[shell: 管道已断开]");
+      g_shon = 0;
+      break;
+    }
+    if (n == 0) { break; }
+    term_raw(g_shbuf, n);
+    rounds = rounds + 1;
+  }
+  if (g_shon != 0 && tx_sh_alive() == 0) { g_shon = 0; }
+  return 0;
+}
+
+int term_hist_push(char *cmd) {
+  int i = 0;
+  int same = 0;
+  if (cmd[0] == 0) { return 0; }
+  if (g_histn > 0) { int hp = ((g_histn - 1) % 12) * 160; if (t_is(g_hist + hp, sl2(g_hist + hp), cmd) != 0) { same = 1; } }
+  if (same == 0) {
+    ap2(g_hist + (g_histn % 12) * 160, 0, cmd);
+    g_histn = g_histn + 1;
+  }
+  g_histpos = g_histn;
+  i = 0;
+  return 0;
+}
+
+// 把第 k 条历史（从末尾往前数）填进命令行；返回 1 = 有内容
+int term_hist_pick(int back) {
+  int k = 0;
+  int idx = 0;
+  if (g_histn <= 0) { return 0; }
+  k = g_histn - 1 - back;
+  if (k < 0) { k = 0; }
+  if (k > g_histn - 1) { k = g_histn - 1; }
+  idx = k % 12;
+  ap2(g_cmd, 0, g_hist + idx * 160);
+  g_cmdlen = sl2(g_cmd);
+  return 1;
+}
+
+// 运行（编译并执行）：当前缓冲 → 临时源 → hlc 编成 tmp\studio_run.exe → 开 cmd 窗口跑它。
+//   为什么要 cmd 窗口：FLINT 产物是控制台程序，没有终端就看不到输出；/k 让窗口在程序退出后留着。
+int do_run(int mode) {
+  char cmd[1024];
+  char sdir[300];
+  char srcp[420];
+  char exep[420];
+  char logp[420];
+  int pi[6];
+  char si[104];
+  int i = 0;
+  int p = 0;
+  int c = 0;
+  int n = 0;
+  // 和 do_compile 同一套路径规则：临时源/exe/log 都放在**当前文件旁边**
+  dir_of(g_file, &sdir[0]);
+  path_join(&srcp[0], &sdir[0], "_studio_edit.fl");
+  path_join(&exep[0], &sdir[0], "_studio_run.exe");
+  path_join(&logp[0], &sdir[0], "_studio_run.log");
+  std::file_write(&srcp[0], g_src, g_srclen);
+  p = 0;
+  p = ap2(cmd, p, "cmd.exe /c \"\"E:\\FLINT-lab\\hlc.exe\" \"");
+  p = ap2(cmd, p, &srcp[0]);
+  p = ap2(cmd, p, "\" -o \"");
+  p = ap2(cmd, p, &exep[0]);
+  p = ap2(cmd, p, "\" > \"");
+  p = ap2(cmd, p, &logp[0]);
+  p = ap2(cmd, p, "\" 2>&1\"");
+  cmd[p] = 0;
+  i = 0;
+  while (i < 6) { pi[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < 104) { si[i] = 0; i = i + 1; }
+  si[0] = 104;
+  g_termon = 0;
+  g_termfocus = 0;
+  g_oscroll = 0;
+  if (CreateProcessA(0, cmd, 0, 0, 0, 0x08000000, 0, 0, &si[0], pi) == 0) {
+    ap2(g_status, 0, "run: spawn FAILED");
+    return 0;
+  }
+  WaitForSingleObject(pi[0], 20000);
+  GetExitCodeProcess(pi[0], &c);
+  CloseHandle(pi[0]);
+  CloseHandle(pi[1]);
+  n = std::file_read(&logp[0], g_out, 16000);
+  if (n < 0) { n = 0; }
+  g_outlen = n;
+  g_nerr = 0;
+  if (c != 0) {
+    ap2(g_status, 0, "run FAILED（编译不过，看输出面板）");
+    return 0;
+  }
+  // mode = 1：不开窗口，改成在内置终端面板里跑（两种"运行"途径由用户选）
+  if (mode != 0) {
+    g_termon = 1;
+    g_termfocus = 0;
+    term_run(&exep[0]);
+    ap2(g_status, 0, "running (terminal)");
+    return 1;
+  }
+  p = 0;
+  p = ap2(cmd, p, "cmd.exe /k \"");
+  p = ap2(cmd, p, &exep[0]);
+  p = ap2(cmd, p, "\"");
+  cmd[p] = 0;
+  i = 0;
+  while (i < 6) { pi[i] = 0; i = i + 1; }
+  CreateProcessA(0, cmd, 0, 0, 0, 0, 0, 0, &si[0], pi);
+  ap2(g_status, 0, "running (cmd window)");
+  return 1;
+}
+
+// 把一行命令发进持久 shell（回车/内置终端"运行"都走这里）
+//   `cls` / `clear` 自己处理：直接清屏，不发给 cmd（cmd 的 cls 会往管道里吐 ANSI 序列，反而更乱）
+int term_run(char *cmd) {
+  char line[600];
+  int p = 0;
+  int n = 0;
+  n = sl2(cmd);
+  if (n == 0) { return 0; }
+  if (t_is(cmd, n, "cls") != 0 || t_is(cmd, n, "clear") != 0) {
+    g_termlen = 0;
+    if (g_term != 0) { g_term[0] = 0; }
+    return 0;
+  }
+  if (term_start() == 0) { return 0; }
+  // 管道没有终端回显 ⇒ 我们自己把命令行写进缓冲区，用户才看得到"我敲了什么"
+  p = ap2(line, 0, "> ");
+  p = ap2(line, p, cmd);
+  line[p] = 10;
+  line[p + 1] = 0;
+  term_raw(&line[0], p + 1);
+  term_hist_push(cmd);
+  tx_sh_write(cmd, n);
+  return 1;
+}
+
+// 外部 CMD 窗口：真控制台（/k 保持打开），工作目录 = 工作区
+int term_spawn_cmd() {
+  char line[700];
+  int pi[6];
+  char si[104];
+  int i = 0;
+  int p = 0;
+  p = ap2(line, 0, "cmd.exe /k cd /d \"");
+  p = ap2(line, p, g_ws);
+  p = ap2(line, p, "\"");
+  line[p] = 0;
+  i = 0;
+  while (i < 6) { pi[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < 104) { si[i] = 0; i = i + 1; }
+  si[0] = 104;
+  CreateProcessA(0, line, 0, 0, 0, 0, 0, 0, &si[0], pi);
+  ap2(g_status, 0, "cmd window");
+  return 0;
+}
+
+// 火花标记（FLC 的 logo）：竖菱形 + 横菱形叠成四角星
+int glyph_spark(struct Surf *s, int cx, int cy, int r, int col) {
+  int n = r / 3 + 1;
+  glyph_diamond(s, cx, cy, n, r, col);
+  glyph_diamond(s, cx, cy, r, n, col);
+  return 0;
+}
+
+// ===== 窗口模式 =====
+//   0 = 普通（用户上次的位置/大小）／1 = 窗口全屏（铺工作区，保留标题栏与状态栏）／2 = 真全屏（整屏 + TOPMOST，藏标题栏与状态栏）
+//   为什么不 ShowWindow(SW_MAXIMIZE)：本窗是 WS_POPUP 自绘窗，"最大化"的语义由我们自己定（标题栏/状态栏留不留），
+//   直接 SetWindowPos 到目标矩形最可控；库的 DIB 余量 = 主屏分辨率（见 gui_win_surf 注释）⇒ 整屏也放得下，不用重建表面。
+//   SPI_GETWORKAREA(0x30) 给"工作区"（不含任务栏）⇒ 窗口全屏**不盖任务栏**；真全屏才整屏并置顶。
+int set_winmode(struct GuiWin *g, int mode, int *pw, int *ph) {
+  struct RECT rc;
+  int sw = GetSystemMetrics(0);
+  int sh = GetSystemMetrics(1);
+  rc.l = 120; rc.t = 90; rc.r = 1120; rc.b = 790;
+  // 离开普通档之前，把**实时**矩形记进 g_win*：拖过边框/挪过位置之后按 F11 再 Esc，
+  //   必须回到用户自己的大小，而不是写死的 1000×700@120,90（那就是"窗口莫名弹回原样"）。
+  //   ⚠️ 只在 g_fsmode == 0（当前是普通档）时记：已经在全屏档里再切 1↔2 不能把全屏矩形当成普通档大小。
+  if (mode != 0 && g_fsmode == 0) {
+    struct RECT cur;
+    cur.l = 0; cur.t = 0; cur.r = 0; cur.b = 0;
+    GetWindowRect(g->hwnd, &cur);
+    if (cur.r - cur.l >= 620 && cur.b - cur.t >= 420) {
+      g_winx = cur.l;
+      g_winy = cur.t;
+      g_winw = cur.r - cur.l;
+      g_winh = cur.b - cur.t;
+    }
+  }
+  if (mode == 2) {
+    rc.l = 0; rc.t = 0; rc.r = sw; rc.b = sh;
+    SetWindowPos(g->hwnd, 0 - 1, 0, 0, sw, sh, 0);          // HWND_TOPMOST = -1：真全屏要盖住任务栏
+  }
+  else if (mode == 1) {
+    rc.l = 0; rc.t = 0; rc.r = sw; rc.b = sh;
+    SystemParametersInfoA(0x0030, 0, &rc, 0);
+    if (rc.r - rc.l < 200) { rc.l = 0; rc.t = 0; rc.r = sw; rc.b = sh; }   // 取不到工作区就退整屏
+    SetWindowPos(g->hwnd, 0 - 2, rc.l, rc.t, rc.r - rc.l, rc.b - rc.t, 0);
+  }
+  else {
+    // 普通档 = 上次的几何（cfg 恢复的或本次会话里拖出来的）；越界值退回默认，别把窗口开在屏幕外
+    if (g_winw < 620 || g_winw > sw) { g_winw = 1000; }
+    if (g_winh < 420 || g_winh > sh) { g_winh = 700; }
+    if (g_winx < 0 - g_winw + 200 || g_winx > sw - 200) { g_winx = 120; }
+    if (g_winy < 0 || g_winy > sh - 80) { g_winy = 90; }
+    rc.l = g_winx; rc.t = g_winy;
+    rc.r = g_winx + g_winw; rc.b = g_winy + g_winh;
+    SetWindowPos(g->hwnd, 0 - 2, rc.l, rc.t, g_winw, g_winh, 0);
+  }
+  g->w = rc.r - rc.l;
+  g->h = rc.b - rc.t;
+  if (pw != 0) { *pw = rc.r - rc.l; }
+  if (ph != 0) { *ph = rc.b - rc.t; }
+  return 0;
+}
+
+// ===== 自定义字体（只换"代码字体"；UI 字体固定 Segoe UI，不跟着变）=====
+//   配置：cwd 下的 `studio.cfg`，两行可选项 —— `font=Consolas` / `size=15`（缺省就是这两个值）。
+//   运行期：Ctrl+= 放大 / Ctrl+- 缩小 / Ctrl+0 复位 15 / F9 换字体族（每次改动都写回 studio.cfg）。
+//   ⚠️ 行高 lh 必须跟字号一起变（lh = px + 3）：只换字体不改 lh 会让行距挤在一起、光标高矮对不上。
+// 字体候选表（**中英双语设计**优先；顺序 = F9 轮换顺序，0 是默认）
+//   为什么先查"装没装"：CreateFontA 对不存在的字体族**不报错**，而是静默回退成宋体（实测：
+//   Cascadia Mono / Sarasa Mono SC / JetBrains Mono 都 → [宋体]）⇒ 看起来"换字体没反应"，
+//   而且回退那一下要现场建字形缓存、会卡几下（用户实测的"第二个卡好几下"就是它）。
+//   ⚠️ 只用 **ASCII 族名**：GetTextFaceA 返回的是**本地化**名（Microsoft YaHei → "微软雅黑"），
+//      而我们的 font_ok 是按字节比名字 ⇒ 中文族名会误判"没装"，雅黑因此退出候选表。
+//   ⚠️ NotoSansSC-VF.ttf 是变量字体，GDI 只暴露 Thin/Light/DemiLight/Regular/Medium/Black 这些**独立族名**，
+//      给 Medium 传 weight=700 **不会**变粗（实测 ink 完全一样）；要粗就得直接选 `Noto Sans SC Bold`。
+// 汉字段候选（Ctrl+F9 轮换；F9 只管拉丁/代码字体）
+char *cjk_at_idx(int i) {
+  if (i == 1) { return "Noto Sans SC Bold"; }
+  if (i == 2) { return "Noto Sans SC Black"; }
+  if (i == 3) { return "Noto Sans SC"; }
+  if (i == 4) { return "Noto Sans SC DemiLight"; }
+  return "Noto Sans SC Medium";
+}
+
+char *font_at_idx(int i) {
+  if (i == 1) { return "Noto Sans SC Bold"; }      // 全双语（中文也用它，想统一风格时选）
+  if (i == 2) { return "Noto Sans SC Medium"; }
+  if (i == 3) { return "Noto Sans SC"; }
+  if (i == 4) { return "Noto Sans SC Black"; }
+  if (i == 5) { return "Noto Sans SC DemiLight"; }
+  return "Consolas";                                // 默认：等宽拉丁（代码列对齐），汉字段另走 g_cjk
+}
+
+// 这个字体族真的存在吗（GDI 返回的实际脸名必须与请求的一致）
+int font_ok(char *face) {
+  char fb[64];
+  int *dc = 0;
+  int *hf = 0;
+  int *old = 0;
+  int n = 0;
+  int yes = 0;
+  dc = GetDC(0);
+  if (dc == 0) { return 0; }
+  hf = mk_font(12, 400, face);
+  old = SelectObject(dc, hf);
+  n = GetTextFaceA(dc, 60, &fb[0]);
+  SelectObject(dc, old);
+  ReleaseDC(0, dc);
+  if (hf != 0) { DeleteObject(hf); }
+  if (n <= 0) { return 0; }
+  fb[60] = 0;
+  if (t_is(fb, n, face) != 0) { yes = 1; }
+  return yes;
+}
+
+// 在 buf[0..n) 里找 `key=...` 行：*pint 收到数字，否则 out 收到字符串。命中返回 1。
+int cfg_line(char *buf, int n, char *key, char *out, int cap, int *pint) {
+  int i = 0;
+  int kl = sl2(key);
+  while (i < n) {
+    int ls = i;
+    int le = 0;
+    int k = 0;
+    int hit = 1;
+    while (i < n && buf[i] != 10) { i = i + 1; }
+    le = i;
+    if (le > ls && buf[le - 1] == 13) { le = le - 1; }
+    if (le - ls > kl) {
+      while (k < kl) { if (buf[ls + k] != key[k]) { hit = 0; } k = k + 1; }
+      if (hit != 0 && buf[ls + kl] == 61) {          // '='
+        if (pint != 0) {
+          int v = 0;
+          int sg = 1;
+          int q = ls + kl + 1;
+          // 负数：窗口坐标可能是负的（双屏/贴边），所以这里认前导 '-'
+          if (q < le && buf[q] == 45) { sg = 0 - 1; q = q + 1; }
+          while (q < le && buf[q] >= 48 && buf[q] <= 57) { v = v * 10 + (buf[q] - 48); q = q + 1; }
+          *pint = v * sg;
+        } else {
+          int q = ls + kl + 1;
+          int j = 0;
+          while (q < le && j < cap - 1) { out[j] = buf[q]; j = j + 1; q = q + 1; }
+          out[j] = 0;
+        }
+        return 1;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// ===== studio.cfg v2：设置段 ＋ 状态段（2026-10-27）=====
+//   纯文本 key=value，一行一条；认不出的键一律忽略（老版本读新 cfg / 新版本读老 cfg 都不会炸）。
+//   为什么要"状态段"：设置项只回答"界面长什么样"；用户真正要的是**接着上次用** ——
+//   上次开的文件、光标在哪、滚到第几行、窗口多大/在哪、文件树滚到哪。
+//   为什么还放同一个文件：IDE 是便携式（cwd 里一份 cfg 就是它的全部记忆），拆两个文件只会多一条
+//   "谁先写"的竞态，没有收益。
+// 从 buf[s..e) 读十进制整数（认前导 '-'；没数字 = 0）
+int cfg_atoi(char *buf, int s, int e) {
+  int v = 0;
+  int i = s;
+  int sg = 1;
+  if (i < e && buf[i] == 45) { sg = 0 - 1; i = i + 1; }
+  while (i < e && buf[i] >= 48 && buf[i] <= 57) { v = v * 10 + (buf[i] - 48); i = i + 1; }
+  return v * sg;
+}
+
+// 两个路径是不是同一个文件：分隔符 '/' 与 '\' 等价 ＋ ASCII 大小写不敏感（Windows 口径）
+int cfg_path_eq(char *a, char *b) {
+  int i = 0;
+  while (1) {
+    int x = a[i] & 255;
+    int y = b[i] & 255;
+    if (x == 0 && y == 0) { return 1; }
+    if (x >= 65 && x <= 90) { x = x + 32; }
+    if (y >= 65 && y <= 90) { y = y + 32; }
+    if (x != y) {
+      int xs = 0;
+      int ys = 0;
+      if (x == 92 || x == 47) { xs = 1; }
+      if (y == 92 || y == 47) { ys = 1; }
+      if (xs == 0 || ys == 0) { return 0; }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 在视图表里找这个路径（-1 = 没有）
+int cfg_view_find(char *path) {
+  int i = 0;
+  while (i < g_vn) {
+    if (cfg_path_eq(path, g_vpath + i * 260) != 0) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 记一个文件的视图（路径/光标字节/首行源码行号）。满了丢掉最旧的一条（下标 0）。
+int cfg_view_put(char *path, int cur, int line) {
+  int i = cfg_view_find(path);
+  if (i < 0) {
+    if (g_vn < 12) {
+      i = g_vn;
+      g_vn = g_vn + 1;
+    } else {
+      int k = 0;
+      while (k < 11) {
+        ap2(g_vpath + k * 260, 0, g_vpath + (k + 1) * 260);
+        g_vcur[k] = g_vcur[k + 1];
+        g_vline[k] = g_vline[k + 1];
+        k = k + 1;
+      }
+      i = 11;
+    }
+    ap2(g_vpath + i * 260, 0, path);
+  }
+  g_vcur[i] = cur;
+  g_vline[i] = line;
+  return i;
+}
+
+// 扫**全部** `vf=` 行（同一键可重复出现；cfg_line 只认第一条，所以这里另写一份全量解析）
+//   行格式：`vf=<路径>|<光标字节>|<首行源码行号>`；路径里不许出现 '|'（Windows 文件名本来也不许）。
+int cfg_views(char *buf, int n) {
+  int i = 0;
+  g_vn = 0;
+  while (i < n) {
+    int ls = i;
+    int le = 0;
+    while (i < n && buf[i] != 10) { i = i + 1; }
+    le = i;
+    if (le > ls && buf[le - 1] == 13) { le = le - 1; }
+    if (le - ls > 3 && buf[ls] == 118 && buf[ls + 1] == 102 && buf[ls + 2] == 61) {   // "vf="
+      if (g_vn < 12) {
+        int vi = g_vn;
+        int q = ls + 3;
+        int j = 0;
+        int cur = 0;
+        int line = 0;
+        while (q < le && buf[q] != 124 && j < 259) {       // 124 = '|'
+          g_vpath[vi * 260 + j] = buf[q];
+          j = j + 1;
+          q = q + 1;
+        }
+        g_vpath[vi * 260 + j] = 0;
+        if (q < le) {
+          int q2 = q + 1;
+          int q3 = q2;
+          while (q3 < le && buf[q3] != 124) { q3 = q3 + 1; }
+          cur = cfg_atoi(buf, q2, q3);
+          q = q3;
+        }
+        if (q < le) { line = cfg_atoi(buf, q + 1, le); }
+        g_vcur[vi] = cur;
+        g_vline[vi] = line;
+        g_vn = g_vn + 1;
+      }
+    }
+    i = i + 1;
+  }
+  return g_vn;
+}
+
+// 把"上次看到哪儿"套到刚读进来的缓冲上（open_file 与启动恢复共用）。
+//   ⚠️ 首行只记到 g_pendline：显示行表（wrap）要等窗口宽度定了才建得出来，
+//      所以"源码行号 → 显示行"的换算由 main 在 wrap_build 之后做。
+int view_apply(char *path) {
+  int vi = cfg_view_find(path);
+  int c2 = 0;
+  if (vi < 0) { g_pendline = 0 - 1; return 0; }
+  c2 = g_vcur[vi];
+  if (c2 < 0) { c2 = 0; }
+  if (c2 > g_srclen) { c2 = g_srclen; }
+  while (c2 > 0 && is_cont(c2) != 0) { c2 = c2 - 1; }     // 别落在 UTF-8 续字节上
+  g_cur = c2;
+  g_pendline = g_vline[vi];
+  return 1;
+}
+
+// 快照当前文件的视图（只进内存表；落盘由 save_cfg 统一做）。
+//   未命名缓冲不记：它在磁盘上没有身份，记了会把下次启动指到一个不存在的 "untitled.fl"。
+int session_capture() {
+  if (g_file[0] == 0) { return 0; }
+  if (t_is(g_file, sl2(g_file), "untitled.fl") != 0) { return 0; }
+  cfg_view_put(g_file, g_cur, row_line(g_scroll));
+  ap2(g_lastfile, 0, g_file);
+  g_treesc = g_tscroll;
+  return 1;
+}
+
+// ===== 探针通道：滚动位置（2026-10-27）=====
+//   ST 行的 7 个字段是 flgui_ai 的固定契约（别的 app / 探针也按位读），所以**另起一行**：
+//   `SC <首行源码行号> <首显示行> <待恢复行>`，只在变化时追加（不把 ai.state 再撑大一圈）。
+//   为什么需要它：滚动位置在屏幕上只能靠"像素位移相关系数"间接估，恢复得准不准根本没法判；
+//   有了这一行，"cfg 记的 / 启动恢复的 / 界面上的"三边可以直接对数字。
+int g_asc = -999;
+int g_ascpend = -999;
+
+int ai_scroll(int top, int row, int pend) {
+  char b[96];
+  int o = 0;
+  struct FileSt f;
+  o = ai_put(b, 0, "SC ");
+  o = o + ai_num(b + o, top);
+  o = o + ai_put(b, o, " ");
+  o = o + ai_num(b + o, row);
+  o = o + ai_put(b, o, " ");
+  o = o + ai_num(b + o, pend);
+  o = o + ai_put(b, o, "\n");
+  if (std::open(&f, "ai.state", 2) == 0) { return 0; }
+  std::write(&f, b, o);
+  std::close(&f);
+  return 1;
+}
+
+// 终端探针通道：`TS <shell 在跑> <输出字节数> <命令行长度>`（只在变化时写）
+//   为什么需要：终端内容在像素上只能数"有没有字"，判不了"命令跑完没有 / cd 保持没有"。
+//   有了这一行，探针能直接看"每发一条命令输出有没有长"。
+int g_astm = -999;
+int g_astm2 = -999;
+
+int ai_term(int shon, int tlen, int clen) {
+  char b[96];
+  int o = 0;
+  struct FileSt f;
+  o = ai_put(b, 0, "TS ");
+  o = o + ai_num(b + o, shon);
+  o = o + ai_put(b, o, " ");
+  o = o + ai_num(b + o, tlen);
+  o = o + ai_put(b, o, " ");
+  o = o + ai_num(b + o, clen);
+  o = o + ai_put(b, o, "\n");
+  if (std::open(&f, "ai.state", 2) == 0) { return 0; }
+  std::write(&f, b, o);
+  std::close(&f);
+  return 1;
+}
+
+int load_cfg(char *face, int *psz) {
+  char *buf = VirtualAlloc(0, 4096, 0x3000, 4);
+  int n = 0;
+  if (buf == 0) { return 0; }
+  n = std::file_read("studio.cfg", buf, 4000);
+  if (n <= 0) { return 0; }
+  cfg_line(buf, n, "font", face, 60, 0);
+  cfg_line(buf, n, "size", 0, 0, psz);
+  cfg_line(buf, n, "weight", 0, 0, &g_fweight);
+  cfg_line(buf, n, "cjk", g_cjkface, 60, 0);
+  cfg_line(buf, n, "cjksize", 0, 0, &g_cjkpx);
+  cfg_line(buf, n, "wrap", 0, 0, &g_wrapmode);
+  cfg_line(buf, n, "ui", 0, 0, &g_uipx);
+  cfg_line(buf, n, "aa", 0, 0, &g_aa);          // 1 = ClearType（默认）/ 0 = 灰度 AA
+  cfg_line(buf, n, "ws", g_ws, 250, 0);
+  // —— 状态段：窗口几何 / 上次文件 / 文件树滚动 / 每文件视图 ——
+  cfg_line(buf, n, "winx", 0, 0, &g_winx);
+  cfg_line(buf, n, "winy", 0, 0, &g_winy);
+  cfg_line(buf, n, "winw", 0, 0, &g_winw);
+  cfg_line(buf, n, "winh", 0, 0, &g_winh);
+  cfg_line(buf, n, "winmax", 0, 0, &g_winmax);
+  cfg_line(buf, n, "tree", 0, 0, &g_treesc);
+  cfg_line(buf, n, "file", g_lastfile, 260, 0);
+  // 资源管理器对话框的最后位置（三个对话框共用一个；老键只做迁移读取）
+  cfg_line(buf, n, "dlgdir", g_dlgdir, 260, 0);
+  if (g_dlgdir[0] == 0) { cfg_line(buf, n, "dopen", g_dlgdir, 260, 0); }
+  if (g_dlgdir[0] == 0) { cfg_line(buf, n, "dsave", g_dlgdir, 260, 0); }
+  if (g_dlgdir[0] == 0) { cfg_line(buf, n, "dfolder", g_dlgdir, 260, 0); }
+  cfg_views(buf, n);
+  return 1;
+}
+
+// 写盘：设置段（8 条）＋ 状态段（窗口/上次文件/树）＋ 每文件视图（最多 12 条 vf=）
+//   ⚠️ 缓冲区 8192：12 条 vf 行最多 12×270 ≈ 3.2 KB，加设置段/状态段约 0.9 KB，
+//      原来的 char b[160] 连原来的 8 条设置项都快贴边，加视图段必须放大。
+int save_cfg(char *face, int sz) {
+  char b[8192];
+  int p = 0;
+  int i = 0;
+  struct RECT rc;
+  // 写盘前先记"当前看到哪儿"：所有 save_cfg 调用点（改设置/换工作区/退出）自动带上视图快照
+  session_capture();
+  // 窗口几何：真全屏(fs=2) 是铺满整屏，记它会把下次启动顶成全屏 ⇒ 只在 0/1 档取当前矩形。
+  //   位置/大小不靠"拖动时维护 g.x/g.y"（那要改拖窗/缩放两条路径），退出时 GetWindowRect 实测最省。
+  if (g_hwnd != 0) {
+    if (g_fsmode != 2) {
+      rc.l = 0; rc.t = 0; rc.r = 0; rc.b = 0;
+      GetWindowRect(g_hwnd, &rc);
+      g_winx = rc.l;
+      g_winy = rc.t;
+      g_winw = rc.r - rc.l;
+      g_winh = rc.b - rc.t;
+    }
+    if (g_fsmode == 1) { g_winmax = 1; } else { g_winmax = 0; }
+  }
+  p = ap2(b, 0, "font=");
+  p = ap2(b, p, face);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "size=");
+  p = num_ap(b, p, sz);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "weight=");
+  p = num_ap(b, p, g_fweight);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "cjk=");
+  p = ap2(b, p, g_cjkface);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "cjksize=");
+  p = num_ap(b, p, g_cjkpx);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "wrap=");
+  p = num_ap(b, p, g_wrapmode);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "ui=");
+  p = num_ap(b, p, g_uipx);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "aa=");
+  p = num_ap(b, p, g_aa);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "ws=");
+  p = ap2(b, p, g_ws);
+  b[p] = 10; p = p + 1;
+  // —— 状态段 ——
+  p = ap2(b, p, "winx=");
+  p = num_ap(b, p, g_winx);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "winy=");
+  p = num_ap(b, p, g_winy);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "winw=");
+  p = num_ap(b, p, g_winw);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "winh=");
+  p = num_ap(b, p, g_winh);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "winmax=");
+  p = num_ap(b, p, g_winmax);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "tree=");
+  p = num_ap(b, p, g_treesc);
+  b[p] = 10; p = p + 1;
+  p = ap2(b, p, "file=");
+  p = ap2(b, p, g_lastfile);
+  b[p] = 10; p = p + 1;
+  // 资源管理器对话框的最后位置（三个对话框共用一份 —— 用户口径"放一起，能分清就行"）
+  p = ap2(b, p, "dlgdir=");
+  p = ap2(b, p, g_dlgdir);
+  b[p] = 10; p = p + 1;
+  // —— 每文件视图（最近 12 条；旧的在前面，新条目总在最后一行，人读也顺）——
+  i = 0;
+  while (i < g_vn && p < 7800) {
+    p = ap2(b, p, "vf=");
+    p = ap2(b, p, g_vpath + i * 260);
+    b[p] = 124; p = p + 1;                 // '|'
+    p = num_ap(b, p, g_vcur[i]);
+    b[p] = 124; p = p + 1;
+    p = num_ap(b, p, g_vline[i]);
+    b[p] = 10; p = p + 1;
+    i = i + 1;
+  }
+  std::file_write("studio.cfg", b, p);
+  return 0;
+}
+
+// 立刻落盘（用"当前字体"的全局副本）：对话框里选完位置要马上记住，不等退出。
+//   为什么需要：save_cfg 要 face/sz（main 的局部量），而 do_open_dlg / do_save_as / do_open_folder
+//   都拿不到它们 ⇒ set_font 同步 g_curface/g_fontpx，这里只做一次转发。
+int save_cfg_now() {
+  if (g_curface[0] == 0) { ap2(g_curface, 0, font_at_idx(0)); }
+  return save_cfg(g_curface, g_fontpx);
+}
+
+// 换字体：px 夹到 10..26；返回夹过的 px，*plh 同步成 px+6；旧句柄还掉（换一次不漏对象）
+//   行高口径：px + 6（15px 字 → 21px 行，≈1.4 倍）。旧版 px + 3（1.2 倍）挤成一片灰墙，
+//   是"界面显廉价"的另一半原因（2026-10-27 用户反馈后放宽）；D2D 的竖直校准 g_txdy 跟着重算。
+int set_font(int px, char *face, char *cjkface, int *plh) {
+  int *o1 = 0;
+  int *o2 = 0;
+  int *o3 = 0;
+  int cp = 0;
+  if (px < 10) { px = 10; }
+  if (px > 26) { px = 26; }
+  o1 = g_hf;
+  o2 = g_hf_small;
+  o3 = g_cjk;
+  g_hf = mk_font(px, g_fweight, face);
+  g_hf_small = mk_font(px, 400, face);          // 行号/输出：与正文字高同档（旧版 -3 只有 6px 墨高，肉眼就是"看不清"）
+  // 汉字段字号：默认比代码字号大 2px。为什么 —— 小字号上汉字笔画会"化开"，拉丁可以小、汉字不行；
+  //   两者字号解耦（studio.cfg 的 cjksize=）。
+  cp = g_cjkpx;
+  if (cp < 8) { cp = px + 2; }
+  g_cjk = mk_font(cp, 400, cjkface);
+  // DirectWrite 字体（同一套 face/px；垫片不可用时 id 保持 0 ⇒ 绘制回退 GDI）
+  //   ⚠️ 只在真拿到 id 时才覆盖：垫片建 format 失败会返回 0，直接赋值就把"还能用的旧 id"
+  //      抹成 0，正文立刻一片空白（2026-10-27 那个 bug 的第二层保险）。
+  if (g_txok != 0) {
+    int tcode = tx_fontA(face, px, g_fweight);
+    int tcjk = tx_fontA(cjkface, cp, 400);
+    if (tcode != 0) { g_tx_code = tcode; }
+    if (tcjk != 0) { g_tx_cjk = tcjk; }
+    if (g_tx_code != 0 && g_tx_cjk != 0) { g_txready = 1; } else { g_txready = 0; }
+  }
+  if (o1 != 0) { DeleteObject(o1); }
+  if (o2 != 0) { DeleteObject(o2); }
+  if (o3 != 0) { DeleteObject(o3); }
+  g_fontpx = px;
+  ap2(g_curface, 0, face);   // 给 save_cfg_now 用（对话框选完位置立刻落盘时拿不到 main 的 fface）
+  rebuild(0);            // 字号变了 ⇒ 显示行要重算（宽度全变）
+  if (plh != 0) { *plh = px + 6; }
+  // D2D 正文的竖直校准：行高比字高多 6，留 1px 顶部 + 居中 ⇒ 偏移 4（15px 字时）
+  g_txdy = 2;   // 实测：lh = px+6 时正文在行内居中（±0.5px；偏大就整体偏下）
+  return px;
+}
+
+// ===== 设置面板：行标签 / 调值 =====
+// 标签返回的是**字面量**（不要拷进 buffer，调用处直接 draw_str）
+char *set_label(int row) {
+  if (row == 0) { return "代码字体"; }
+  if (row == 1) { return "字号"; }
+  if (row == 2) { return "中文字体"; }
+  if (row == 3) { return "中文号"; }
+  if (row == 4) { return "自动换行"; }
+  return "界面字号";
+}
+
+// 把第 row 行往 d（+1 / -1）方向调一格：改完立刻 set_font ＋ save_cfg（与 F9 老路径同一套落盘）
+int set_adjust(int row, int d, char *fface, int *pfsz, int *plh, int *pfidx, int *pcjidx, int fmask, int cjmask) {
+  int px = 0;
+  int ni = 0;
+  int k = 0;
+  int v = 0;
+  if (row == 0) {
+    ni = *pfidx;
+    k = 0;
+    while (k < 6) {
+      if (d > 0) { ni = ni + 1; if (ni > 5) { ni = 0; } }
+      else { ni = ni - 1; if (ni < 0) { ni = 5; } }
+      if ((fmask & (1 << ni)) != 0) { break; }
+      k = k + 1;
+    }
+    if (ni != *pfidx) {
+      *pfidx = ni;
+      ap2(fface, 0, font_at_idx(ni));
+    }
+  } else if (row == 1) {
+    *pfsz = *pfsz + d;
+    if (*pfsz < 10) { *pfsz = 10; }
+    if (*pfsz > 26) { *pfsz = 26; }
+  } else if (row == 2) {
+    ni = *pcjidx;
+    k = 0;
+    while (k < 5) {
+      if (d > 0) { ni = ni + 1; if (ni > 4) { ni = 0; } }
+      else { ni = ni - 1; if (ni < 0) { ni = 4; } }
+      if ((cjmask & (1 << ni)) != 0) { break; }
+      k = k + 1;
+    }
+    if (ni != *pcjidx) {
+      *pcjidx = ni;
+      ap2(g_cjkface, 0, cjk_at_idx(ni));
+    }
+  } else if (row == 3) {
+    // 0 = 自动（代码字号 +2）→ 12 → 14 → … → 24 → 回 0
+    v = g_cjkpx;
+    if (d > 0) {
+      if (v == 0) { v = 12; }
+      else {
+        v = v + 2;
+        if (v > 24) { v = 0; }
+      }
+    } else {
+      if (v == 0) { v = 24; }
+      else {
+        v = v - 2;
+        if (v < 12) { v = 0; }
+      }
+    }
+    g_cjkpx = v;
+  } else if (row == 4) {
+    if (g_wrapmode != 0) { g_wrapmode = 0; } else { g_wrapmode = 1; }
+  } else {
+    // 界面字号：12..22（只影响标题栏/侧栏/状态栏/卡片，不动正文）
+    int u = g_uipx + d;
+    set_ui(u);
+  }
+  px = set_font(*pfsz, fface, g_cjkface, plh);
+  *pfsz = px;
+  save_cfg(fface, *pfsz);
+  return 0;
+}
+
+// 按键边沿（按住的期间只算一次）
+int edge(int vk, int *last) {
+  int now = GetAsyncKeyState(vk) & 0x8000;
+  int r = 0;
+  if (now != 0 && *last == 0) { r = 1; }
+  if (now != 0) { *last = 1; } else { *last = 0; }
+  return r;
+}
+
+// 按住不放 = 连续触发（2026-10-27 修"方向键按住没反应"）
+//   根因：`edge()` 只认"按下沿"，而 GetAsyncKeyState 在按住期间**一直是 1**，没有新的边沿
+//   ⇒ 光标只走一格。Windows 的键盘自动重复是系统在发 WM_KEYDOWN，但本 app 的导航键全走物理轮询
+//   （方向键不产生 WM_CHAR），所以必须自己补重复：按下即动一次，之后每 45ms 再动一次。
+//   （首次重复等 250ms —— 和系统键盘重复的手感一致：轻点一下只走一格，按住不放才开始连续走。）
+int g_repdue[256];
+
+int rep(int vk, int *last) {
+  int now = GetAsyncKeyState(vk) & 0x8000;
+  int t = GetTickCount();
+  int i = vk & 255;
+  if (now == 0) { *last = 0; return 0; }
+  if (*last == 0) { *last = 1; g_repdue[i] = t + 250; return 1; }   // 按下沿：立刻走一格，下次 250ms 后
+  if (t >= g_repdue[i]) { g_repdue[i] = t + 45; return 1; }         // 按住：之后每 45ms 一格
+  return 0;
+}
+
+// 存盘
+int do_save() {
+  int n = 0;
+  // 新建的文件还没有路径：先弹"另存为"，别往 "untitled.fl" 里写（不然 Ctrl+S 会在工作区里造一个假文件）
+  if (t_is(g_file, sl2(g_file), "untitled.fl") != 0) {
+    char pb[512];
+    int k = 0;
+    int ok = 0;
+    while (k < 512) { pb[k] = 0; k = k + 1; }
+    ok = tx_dlg_save(g_hwnd, &pb[0], 500, g_file);
+    if (ok == 0 || pb[0] == 0) { ap2(g_status, 0, "save cancelled"); return 0; }
+    ap2(g_file, 0, &pb[0]);
+  }
+  n = std::file_write(g_file, g_src, g_srclen);
+  if (n == 0) { ap2(g_status, 0, "save FAILED"); } else { ap2(g_status, 0, "saved"); g_dirty = 0; }
+  return n;
+}
+
+// ===== 诊断解析：hlc 的报错行 → 「文件 + 行 + 列」 =====
+//   实测格式（2026-10-26，hlc.exe 直接跑）：`hlc 编译错误（apps\studio_native\_studio_edit.fl 第 5 行第 12 列）:`
+//   只认这一种中文格式（「（」+ 路径 + 「 第 N 行第 M 列」）：**不认** `file:line:col` 那类英文写法，
+//   认不出就不高亮、点了不跳 —— 宁缺勿错（误判成别的位置比不跳更糟）。
+int b3is(char *b, int i, int c0, int c1, int c2) {
+  if ((b[i] & 255) != c0) { return 0; }
+  if ((b[i + 1] & 255) != c1) { return 0; }
+  if ((b[i + 2] & 255) != c2) { return 0; }
+  return 1;
+}
+
+// 在本行 b[0..n) 里找诊断：成功 = 1 且填出 pf/pfl（文件起点/长度，指向 b 内部）、pln/pcl（1-based 行列）
+int diag_at(char *b, int n, int *pf, int *pfl, int *pln, int *pcl) {
+  int i = 0;
+  while (i + 7 < n) {
+    // 「第 」= E7 AC AC 20
+    if (b3is(b, i, 0xE7, 0xAC, 0xAC) != 0 && (b[i + 3] & 255) == 32) {
+      int p = i + 4;
+      int v = 0;
+      int d = 0;
+      while (p < n && is_09(b[p] & 255) != 0) {
+        v = v * 10 + ((b[p] & 255) - 48);
+        p = p + 1;
+        d = d + 1;
+      }
+      // 「 行第 」= 20 E8 A1 8C E7 AC AC 20
+      if (d > 0 && p + 7 < n) {
+        if ((b[p] & 255) == 32 && b3is(b, p + 1, 0xE8, 0xA1, 0x8C) != 0
+            && b3is(b, p + 4, 0xE7, 0xAC, 0xAC) != 0 && (b[p + 7] & 255) == 32) {
+          int q = p + 8;
+          int w = 0;
+          int e = 0;
+          while (q < n && is_09(b[q] & 255) != 0) {
+            w = w * 10 + ((b[q] & 255) - 48);
+            q = q + 1;
+            e = e + 1;
+          }
+          if (e > 0) {
+            // 文件 = 「（」(EF BC 88) 之后 .. 「第」之前的那个空格（去尾空格）
+            int k = i - 1;
+            int fs = 0 - 1;
+            while (k >= 0) {
+              if (b3is(b, k, 0xEF, 0xBC, 0x88) != 0) { fs = k + 3; break; }
+              k = k - 1;
+            }
+            if (fs >= 0) {
+              int fe = i - 1;
+              while (fe > fs && (b[fe - 1] & 255) == 32) { fe = fe - 1; }
+              if (fe > fs) {
+                *pf = fs;
+                *pfl = fe - fs;
+                *pln = v;
+                *pcl = w;
+                return 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 跳到诊断位置：**只跳当前缓冲**（编译写的是 apps\studio_native\_studio_edit.fl，内容 = 当前缓冲；
+//   写成别的文件时只更新状态栏，不动光标 —— v1 不做跨文件打开，避免把缓冲区换成"读失败的空文件"）
+int diag_jump(char *file, int flen, int line1, int col1) {
+  char fb[260];
+  int i = 0;
+  int L = line1 - 1;
+  int c = col1 - 1;
+  int ok = 0;
+  int pos = 0;
+  int lim = 0;
+  int k = 0;
+  if (flen <= 0 || flen > 250) { return 0; }
+  while (i < flen) { fb[i] = file[i]; i = i + 1; }
+  fb[flen] = 0;
+  if (ends_with(fb, "_studio_edit.fl") != 0) { ok = 1; }
+  if (ends_with(g_file, fb) != 0) { ok = 1; }
+  if (ok == 0) { ap2(g_status, 0, "diag: other file"); return 0; }
+  if (L < 0) { L = 0; }
+  if (L > g_nlines - 1) { L = g_nlines - 1; }
+  if (L < 0) { L = 0; }
+  pos = g_lstart[L];
+  lim = pos + g_llen[L];
+  while (k < c && pos < lim) { pos = cp_next(pos); k = k + 1; }
+  g_cur = pos;
+  g_sel = pos;
+  g_selon = 0;
+  g_dragsel = 0;
+  ap2(g_status, 0, "jumped to diag");
+  return 1;
+}
+
+// 编译（把输出抓到 g_out）
+int do_compile() {
+  char cmd[1024];
+  char sdir[300];
+  char srcp[420];
+  char exep[420];
+  char logp[420];
+  int pi[6];
+  char si[104];
+  int r = 0;
+  int c = 0;
+  int i = 0;
+  int p = 0;
+  int n = 0;
+
+  // 临时源必须写在**源码同目录**：FLINT 的 include 相对于被编译文件所在目录解析，
+  //   写到 tmp\ 会让 ../../lib/io_lib.fl 变成 tmp\..\..\..\lib\io_lib.fl（实测直接编译失败）
+  //   2026-10-27：目录改成"当前文件的目录"（原来写死 apps\studio_native ⇒ 打开 tmp\x.fl 就编不过）
+  dir_of(g_file, &sdir[0]);
+  path_join(&srcp[0], &sdir[0], "_studio_edit.fl");
+  path_join(&exep[0], &sdir[0], "_studio_edit.exe");
+  path_join(&logp[0], &sdir[0], "_studio_edit.log");
+  std::file_write(&srcp[0], g_src, g_srclen);
+  p = 0;
+  p = ap2(cmd, p, "cmd.exe /c \"\"E:\\FLINT-lab\\hlc.exe\" \"");
+  p = ap2(cmd, p, &srcp[0]);
+  p = ap2(cmd, p, "\" -o \"");
+  p = ap2(cmd, p, &exep[0]);
+  p = ap2(cmd, p, "\" > \"");
+  p = ap2(cmd, p, &logp[0]);
+  p = ap2(cmd, p, "\" 2>&1\"");
+  cmd[p] = 0;
+  i = 0;
+  while (i < 6) { pi[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < 104) { si[i] = 0; i = i + 1; }
+  si[0] = 104;
+  r = CreateProcessA(0, cmd, 0, 0, 0, 0x08000000, 0, 0, &si[0], pi);
+  if (r == 0) { ap2(g_status, 0, "spawn FAILED"); return 0 - 1; }
+  WaitForSingleObject(pi[0], 20000);
+  GetExitCodeProcess(pi[0], &c);
+  CloseHandle(pi[0]);
+  CloseHandle(pi[1]);
+  n = std::file_read(&logp[0], g_out, 16000);
+  if (n < 0) { n = 0; }
+  g_outlen = n;
+  g_oscroll = 0;                                    // 新日志从第一行开始看
+  // 数诊断条数：面板标题显示「N 条诊断」，状态栏显示「compile FAILED · N err」
+  {
+    int i5 = 0;
+    int j5 = 0;
+    int ff = 0;
+    int fl = 0;
+    int ll = 0;
+    int cc = 0;
+    g_nerr = 0;
+    while (i5 < g_outlen) {
+      j5 = i5;
+      while (j5 < g_outlen && g_out[j5] != 10) { j5 = j5 + 1; }
+      if (j5 > i5) {
+        if (diag_at(g_out + i5, j5 - i5, &ff, &fl, &ll, &cc) != 0) { g_nerr = g_nerr + 1; }
+      }
+      i5 = j5 + 1;
+    }
+  }
+  if (c == 0) {
+    ap2(g_status, 0, "compile OK");
+  } else {
+    int sp = 0;
+    sp = ap2(g_status, 0, "compile FAILED");
+    if (g_nerr > 0) {
+      sp = ap2(g_status, sp, " · ");
+      sp = num_ap(g_status, sp, g_nerr);
+      sp = ap2(g_status, sp, " err");
+    }
+  }
+  return c;
+}
+// 起一个子进程并立刻返回（不等它结束）
+int spawn_new(char *cmdline, int *pi) {
+  char si[104];
+  int i = 0;
+  i = 0;
+  while (i < 104) { si[i] = 0; i = i + 1; }
+  si[0] = 104;
+  return CreateProcessA(0, cmdline, 0, 0, 0, 0x08000000, 0, 0, &si[0], pi);
+}
+
+int has_ext2(char *name, char *ext) {
+  int n = sl2(name);
+  int m = sl2(ext);
+  int i = 0;
+  if (n < m) { return 0; }
+  while (i < m) {
+    if (name[n - m + i] != ext[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// ===== 文件树：扫描 ＋ 展开状态（2026-10-26）=====
+//   设计：只列目录 + .fl（跳过 tmp / .git），目录点一下展开/折叠，**展开状态存 g_dopen**（重建后保留）。
+//   上限：400 行、64 个展开目录、4 层深 —— 够走完本仓库（root 下 19 个目录、619 个 .fl）且 .data 不至于爆。
+int base_off(char *p) {                    // 最后一个 '\' 之后的下标（侧栏只显示文件名）
+  int i = 0;
+  int o = 0;
+  while (p[i] != 0) {
+    if (p[i] == 92) { o = i + 1; }
+    i = i + 1;
+  }
+  return o;
+}
+
+int dopen_find(char *path) {
+  int i = 0;
+  while (i < g_ndopen) {
+    if (t_is(g_dopen + i * 160, sl2(g_dopen + i * 160), path) != 0) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 分隔符等价判断：app 里 g_file 用的是 '/'（历史写法），树里用的是 '\' ⇒ 比较时一律视为同一个字符
+int ch_slash(int c) {
+  if ((c & 255) == 92) { return 1; }
+  if ((c & 255) == 47) { return 1; }
+  return 0;
+}
+
+int path_end_eq(char *s, char *tail) {          // s 是否以 tail 结尾（忽略 '/' 与 '\' 的差别）
+  int n = sl2(s);
+  int m = sl2(tail);
+  int i = 0;
+  if (m <= 0 || m > n) { return 0; }
+  while (i < m) {
+    int a = s[n - m + i] & 255;
+    int b = tail[i] & 255;
+    if (a == b) { i = i + 1; }
+    else if (ch_slash(a) != 0 && ch_slash(b) != 0) { i = i + 1; }
+    else { return 0; }
+  }
+  return 1;
+}
+
+int dopen_add(char *path) {
+  int q = 0;
+  if (g_ndopen >= 64) { return 0; }
+  if (dopen_find(path) >= 0) { return 0; }
+  q = g_ndopen * 160;
+  ap2(g_dopen, q, path);
+  g_ndopen = g_ndopen + 1;
+  return 1;
+}
+
+int dopen_del(char *path) {
+  int i = dopen_find(path);
+  int j = 0;
+  if (i < 0) { return 0; }
+  j = i;
+  while (j < g_ndopen - 1) {
+    ap2(g_dopen, j * 160, g_dopen + (j + 1) * 160);
+    j = j + 1;
+  }
+  g_ndopen = g_ndopen - 1;
+  return 1;
+}
+
+int tree_push(char *full, int depth, int isdir) {
+  int q = 0;
+  if (g_tn >= 400) { return 0; }
+  q = g_tn * 160;
+  ap2(g_tpath, q, full);
+  g_tdepth[g_tn] = depth;
+  g_tdir[g_tn] = isdir;
+  g_tn = g_tn + 1;
+  return 1;
+}
+
+// 拼一个条目的完整路径：有工作区就带工作区前缀（这样 open_file 拿到的就是能直接读的路径）
+int tree_mkfull(char *full, char *dir, char *nm) {
+  int fp = 0;
+  if (dir[0] != 0) { fp = ap2(full, 0, dir); }
+  else if (g_ws[0] != 0) { fp = ap2(full, 0, g_ws); }
+  else { return ap2(full, 0, nm); }
+  full[fp] = 92;
+  return ap2(full, fp + 1, nm);
+}
+
+int tree_scan(char *dir, int depth) {
+  char pat[600];
+  char full[420];
+  char nm[300];
+  char fd[320];
+  char *h = 0;
+  int k = 0;
+  int nn = 0;
+  int isd = 0;
+  int sk = 0;
+  if (dir[0] == 0) {
+    if (g_ws[0] != 0) {
+      k = ap2(pat, 0, g_ws);
+      pat[k] = 92; pat[k + 1] = 42; pat[k + 2] = 0;
+    } else {
+      ap2(pat, 0, "*");
+    }
+  } else {
+    k = ap2(pat, 0, dir);
+    pat[k] = 92; pat[k + 1] = 42; pat[k + 2] = 0;
+  }
+  h = FindFirstFileA(pat, fd);
+  if (h == 0) { return 0; }
+  while (g_tn < 400) {
+    nn = ap2(nm, 0, fd + 44);
+    nm[nn] = 0;
+    isd = (fd[0] & 255) & 16;            // FILE_ATTRIBUTE_DIRECTORY
+    sk = 0;
+    if (nm[0] == 46 && nm[1] == 0) { sk = 1; }
+    if (nm[0] == 46 && nm[1] == 46 && nm[2] == 0) { sk = 1; }
+    if (t_is(nm, nn, "tmp") != 0) { sk = 1; }
+    if (t_is(nm, nn, ".git") != 0) { sk = 1; }
+    if (nm[0] == 95) { sk = 1; }   // 下划线开头的都是 IDE 自己的编译/运行临时物（_studio_edit.* / _studio_run.*），别当项目文件列
+    if (sk == 0 && isd != 0) {
+      tree_mkfull(full, dir, nm);
+      tree_push(full, depth, 1);
+      if (dopen_find(full) >= 0 && depth < 3) { tree_scan(full, depth + 1); }
+    } else if (sk == 0 && isd == 0) {
+      if (has_ext2(nm, ".fl") != 0) {
+        tree_mkfull(full, dir, nm);
+        tree_push(full, depth, 0);
+      }
+    }
+    if (FindNextFileA(h, fd) == 0) { break; }
+  }
+  FindClose(h);
+  return 0;
+}
+
+int tree_build() {
+  g_tn = 0;
+  tree_scan("", 0);
+  return g_tn;
+}
+
+// 打开文件后把该行滚进可视区（找不到就什么都不做）
+int tree_reveal(char *path) {
+  int i = 0;
+  while (i < g_tn) {
+    if (path_end_eq(path, g_tpath + i * 160) != 0) {
+      if (i < g_tscroll || i > g_tscroll + 14) { g_tscroll = i - 7; }   // 行高 26 ⇒ 一屏约 15 行
+      if (g_tscroll < 0) { g_tscroll = 0; }
+      return i;
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 把 path 的每一级父目录记进展开表（否则打开深层文件时它在树里是"藏起来"的，reveal 找不到）
+int tree_open_parents(char *path) {
+  char seg[400];
+  int i = 0;
+  int n = 0;
+  seg[0] = 0;
+  while (path[i] != 0) {
+    if (path[i] == 92 || path[i] == 47) {
+      if (n > 0) { dopen_add(seg); }
+      // ⚠️ 分隔符必须**留在 seg 里且统一成 '\'**：① 否则第二级会变成 "appsstudio_native"（缺分隔符），
+      //    dopen 里就少了 "apps\studio_native" ⇒ 它不展开 ⇒ 当前文件在树里根本不存在（实测症状）；
+      //    ② g_file 历来用 '/'，而树里全用 '\' ⇒ 必须归一化成同一种，否则 dopen_find 永远不命中。
+      if (n < 380) { seg[n] = 92; n = n + 1; seg[n] = 0; }
+    } else {
+      if (n < 380) { seg[n] = path[i]; n = n + 1; seg[n] = 0; }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 打开文件 = 展开父目录 ＋ 存盘/读盘 ＋ 重建树 ＋ 滚进可视区（侧栏/Ctrl+O/Ctrl+数字 都走这条）
+int tree_open(char *path) {
+  tree_open_parents(path);
+  open_file(path);
+  tree_build();
+  tree_reveal(path);
+  return 0;
+}
+
+
+int open_file(char *path) {
+  int n = 0;
+  // 先落盘：原来直接换缓冲 ⇒ 打开另一个文件会**静默丢掉**当前未保存的改动（数据丢失，不能算能用）
+  if (g_dirty != 0) { do_save(); }
+  session_capture();           // 旧文件的光标/首行先记进视图表（切回来还能回到原处）
+  ap2(g_file, 0, path);
+  n = std::file_read(path, g_src, 250000);
+  if (n < 0) { n = 0; }
+  g_srclen = n;
+  g_cur = 0;
+  g_scroll = 0;
+  g_selon = 0;
+  g_sel = 0;
+  g_dragsel = 0;
+  g_dirty = 0;                 // 刚读进来的内容 = 已保存
+  view_apply(path);            // 这个文件上次看到哪儿（光标字节 + 首行源码行号）
+  rebuild(1);
+  // 打开新文件 = 新的历史起点（不然 Ctrl+Z 会把上一个文件的内容倒回来）
+  if (g_undo != 0) {
+    g_un = 0;
+    g_ui = 0;
+    undo_store(0);
+    g_un = 1;
+    g_ums = 0;
+  }
+  ap2(g_status, 0, "opened");
+  return n;
+}
+// ===== 选区 / 复制 / 粘贴 =====
+//   复制粘贴先走**进程内缓冲**（g_cbuf），跨进程剪贴板在 stage 2 换成 studio_text.dll 的 tx_clip_*：
+//   两处接口一致，换的时候只动这两个函数内部的 2 行（不改调用方）。
+int do_copy() {
+  int a = 0;
+  int b = 0;
+  int ln2 = 0;
+  int k = 0;
+  if (g_cbuf == 0) { return 0; }
+  if (g_selon != 0) {
+    a = sel_a();
+    b = sel_b();
+  } else {
+    // 没选区：复制整行（含换行，VS Code 的手感）
+    ln2 = cur_line();
+    if (ln2 < 0 || ln2 >= g_nlines) { return 0; }
+    a = g_lstart[ln2];
+    b = a + g_llen[ln2];
+    if (b < g_srclen) { b = b + 1; }
+  }
+  k = b - a;
+  if (k <= 0) { return 0; }
+  if (k > 250000) { k = 250000; }
+  b = 0;
+  while (b < k) { g_cbuf[b] = g_src[a + b]; b = b + 1; }
+  g_cblen = k;
+  tx_clip_put(g_cbuf, g_cblen);      // 同时放进 Windows 剪贴板（别的程序也能粘贴）
+  {
+    char st[48];
+    int p = 0;
+    p = ap2(st, 0, "copied ");
+    p = num_ap(st, p, k);
+    p = ap2(st, p, " B");
+    st[p] = 0;
+    ap2(g_status, 0, st);
+  }
+  return k;
+}
+
+int do_cut() {
+  int a = 0;
+  int b = 0;
+  if (g_selon == 0) { return 0; }
+  a = sel_a();
+  b = sel_b();
+  if (b <= a) { return 0; }
+  if (do_copy() <= 0) { return 0; }
+  del_range(a, b);
+  g_selon = 0;
+  undo_push();
+  rebuild(1);
+  ap2(g_status, 0, "cut");
+  return b - a;
+}
+
+int do_paste() {
+  int i = 0;
+  int cn = 0;
+  if (g_cbuf == 0) { return 0; }
+  cn = tx_clip_get(g_cbuf, 250000);   // 优先用系统剪贴板（从别的程序复制过来的文本）
+  if (cn > 0) { g_cblen = cn; }
+  if (g_cblen <= 0) { return 0; }
+  if (g_selon != 0) { del_range(sel_a(), sel_b()); g_selon = 0; }
+  i = 0;
+  while (i < g_cblen) {
+    ins_byte(g_cur, g_cbuf[i] & 255);
+    g_cur = g_cur + 1;
+    i = i + 1;
+  }
+  undo_push();
+  rebuild(1);
+  ap2(g_status, 0, "pasted");
+  return g_cblen;
+}
+
+// ===== 查找（Ctrl+F）：大小写不敏感的 ASCII 子串查找，命中即选中 =====
+int find_at(int from) {
+  int i = 0;
+  int j = 0;
+  int c1 = 0;
+  int c2 = 0;
+  if (g_findlen <= 0) { return 0 - 1; }
+  if (from < 0) { from = 0; }
+  i = from;
+  while (i + g_findlen <= g_srclen) {
+    j = 0;
+    while (j < g_findlen) {
+      c1 = g_src[i + j] & 255;
+      c2 = g_find[j] & 255;
+      if (c1 >= 65 && c1 <= 90) { c1 = c1 + 32; }
+      if (c2 >= 65 && c2 <= 90) { c2 = c2 + 32; }
+      if (c1 != c2) { break; }
+      j = j + 1;
+    }
+    if (j >= g_findlen) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+int find_next() {
+  int st = 0;
+  int hit = 0;
+  int n = 0;
+  int i = 0;
+  char st2[48];
+  int p = 0;
+  if (g_findlen <= 0) { return 0; }
+  if (g_selon != 0) { st = sel_b(); } else { st = g_cur + 1; }
+  if (st < 0) { st = 0; }
+  hit = find_at(st);
+  if (hit < 0 && st > 0) { hit = find_at(0); }        // 绕回开头
+  if (hit < 0) {
+    g_findn = 0;
+    ap2(g_status, 0, "not found");
+    return 0;
+  }
+  g_cur = hit;
+  g_sel = hit + g_findlen;
+  g_selon = 1;
+  n = 0;
+  i = 0;
+  while (i + g_findlen <= g_srclen) {                 // 命中总数（状态栏显示）
+    int h2 = find_at(i);
+    if (h2 < 0) { break; }
+    n = n + 1;
+    i = h2 + 1;
+  }
+  g_findn = n;
+  p = ap2(st2, 0, "find: ");
+  p = num_ap(st2, p, n);
+  p = ap2(st2, p, " hits");
+  st2[p] = 0;
+  ap2(g_status, 0, st2);
+  return 1;
+}
+
+// 打开查找条：如果当前有选区，就把选区当查找串（VS Code 的行为）
+int find_open() {
+  int a = 0;
+  int b = 0;
+  int k = 0;
+  g_findon = 1;
+  g_findrep = 0;
+  g_repf = 0;
+  if (g_selon != 0) {
+    a = sel_a();
+    b = sel_b();
+    k = 0;
+    while (a + k < b && k < g_fmax) {
+      g_find[k] = g_src[a + k];
+      k = k + 1;
+    }
+    g_findlen = k;
+    g_find[k] = 0;
+  }
+  return 1;
+}
+
+// 打开替换条（Ctrl+H）：与 Ctrl+F 同一条，只是多一行替换框；有选区照样预填查找串
+int find_open_rep() {
+  int fo = 0;
+  fo = find_open();      // 先走 Ctrl+F 的公共逻辑（含"有选区就预填查找串"），再切替换模式
+  g_findon = 1;
+  g_findrep = 1;
+  g_repf = 0;
+  return 1;
+}
+
+// 替换当前一个命中 → 跳到下一个。命中由"当前选区或 g_cur 处"决定；先 undo_push 再改。
+int replace_one() {
+  int hit = 0;
+  int k = 0;
+  int n = 0;
+  int cut = 0;
+  int u = 0;
+  int fn = 0;
+  int sp = 0;
+  if (g_findlen <= 0) { return 0; }
+  hit = g_cur;
+  if (g_selon != 0) { hit = sel_a(); }
+  if (find_at(hit) != hit) {
+    fn = find_next();
+    if (g_findn <= 0) {
+      sp = ap2(g_status, 0, "not found");
+      return 0;
+    }
+    hit = g_cur;
+  }
+  u = undo_push();
+  cut = del_range(hit, hit + g_findlen);
+  k = 0;
+  while (k < g_replen) {
+    if (g_srclen < 250000) { ins_byte(hit + k, g_rep[k]); }
+    k = k + 1;
+  }
+  n = 1;
+  g_selon = 0;
+  g_cur = hit + g_replen;
+  if (g_cur > g_srclen) { g_cur = g_srclen; }
+  g_dirty = 1;
+  fn = find_next();
+  sp = ap2(g_status, 0, "replaced 1");
+  return n;
+}
+
+// 全部替换：从 0 扫到结尾，逐个换；插入的串不参与再匹配（从 hit+替换长度 继续）。
+int replace_all() {
+  int hit = 0;
+  int k = 0;
+  int n = 0;
+  int from = 0;
+  char sb[40];
+  int p = 0;
+  int cut = 0;
+  int u = 0;
+  int sp = 0;
+  if (g_findlen <= 0) { return 0; }
+  u = undo_push();
+  hit = find_at(0);
+  while (hit >= 0) {
+    cut = del_range(hit, hit + g_findlen);
+    k = 0;
+    while (k < g_replen) {
+      if (g_srclen < 250000) { ins_byte(hit + k, g_rep[k]); }
+      k = k + 1;
+    }
+    n = n + 1;
+    from = hit + g_replen;
+    if (from >= g_srclen) { break; }
+    hit = find_at(from);
+  }
+  g_selon = 0;
+  g_cur = 0;
+  g_dirty = 1;
+  p = ap2(sb, 0, "replaced ");
+  p = num_ap(sb, p, n);
+  sb[p] = 0;
+  sp = ap2(g_status, 0, sb);
+  return n;
+}
+
+// 查找条占用的正文高度：0 = 没开；26 = Ctrl+F；52 = Ctrl+H（两行）
+int findbar_h() {
+  if (g_findon == 0) { return 0; }
+  if (g_findrep != 0) { return 52; }
+  return 26;
+}
+
+// 选工作区（打开文件夹）：只负责"选 + 设 g_ws + 重建树"；写 cfg / 置重画由调用处做
+//   2026-10-27：选择框的起点 = **上次选工作区的位置**（dfolder=），没有就先用当前工作区 / 当前文件目录。
+int do_open_folder(int *hwnd) {
+  char pb[512];
+  char init[260];
+  int k = 0;
+  int ok = 0;
+  k = 0;
+  while (k < 512) { pb[k] = 0; k = k + 1; }
+  dlg_initdir(&init[0], 1);
+  if (init[0] != 0) { ok = tx_dlg_folder2(hwnd, &pb[0], 500, &init[0]); }
+  else { ok = tx_dlg_folder(hwnd, &pb[0], 500); }
+  if (ok != 0 && pb[0] != 0) {
+    ap2(g_ws, 0, &pb[0]);
+    ap2(g_dlgdir, 0, &pb[0]);           // 记住这次选的位置（三个对话框共用）
+    g_ndopen = 0;                       // 换根了：旧根的展开路径全部作废
+    g_tscroll = 0;
+    tree_build();
+    ap2(g_status, 0, "workspace opened");
+    tree_reveal(g_file);
+    save_cfg_now();                     // 立刻落盘（调用处那份 save_cfg 是冗余保险）
+  } else {
+    ap2(g_status, 0, "打开文件夹已取消");
+  }
+  return ok;
+}
+
+// 打开文件（资源管理器对话框）：走 studio_text.dll 的 tx_dlg_open2（GetOpenFileNameW + 起始目录）
+//   2026-10-27：起点 = **上次"打开文件"用过的目录**（dopen=），选完把新目录记回去。
+int do_open_dlg(int *hwnd) {
+  char pb[512];
+  char init[260];
+  int k = 0;
+  int ok = 0;
+  k = 0;
+  while (k < 512) { pb[k] = 0; k = k + 1; }
+  dlg_initdir(&init[0], 0);
+  if (init[0] != 0) { ok = tx_dlg_open2(hwnd, &pb[0], 500, &init[0]); }
+  else { ok = tx_dlg_open(hwnd, &pb[0], 500); }
+  if (ok != 0 && pb[0] != 0) {
+    dir_of(&pb[0], g_dlgdir);           // 记住"这次打开的文件"所在目录（不含文件名）
+    save_cfg_now();
+    tree_open(&pb[0]);          // 打开任意文件（绝对路径也行）：展开父目录 + 重建树 + 滚进可视区
+  } else {
+    ap2(g_status, 0, "打开已取消");
+  }
+  return ok;
+}
+
+// 另存为（同样走垫片）：先选路径，再写盘，之后所有保存都写到新路径
+//   2026-10-27：起点 = **上次另存为用过的目录**（dsave=）；默认文件名只给**基名**（旧版传整条路径会被垫片
+//   把 '/' ':' 换成 '_'，对话框里出现 "apps_studio_native_main.fl" 这种名字）。
+int do_save_as(int *hwnd) {
+  char pb[512];
+  char init[260];
+  char base[260];
+  int k = 0;
+  int ok = 0;
+  k = 0;
+  while (k < 512) { pb[k] = 0; k = k + 1; }
+  base_of(g_file, &base[0]);
+  dlg_initdir(&init[0], 0);
+  if (init[0] != 0) { ok = tx_dlg_save2(hwnd, &pb[0], 500, &base[0], &init[0]); }
+  else { ok = tx_dlg_save(hwnd, &pb[0], 500, &base[0]); }
+  if (ok != 0 && pb[0] != 0) {
+    ap2(g_file, 0, &pb[0]);
+    dir_of(&pb[0], g_dlgdir);
+    do_save();
+    save_cfg_now();
+  } else {
+    ap2(g_status, 0, "另存为已取消");
+  }
+  return ok;
+}
+
+// ===== 绘制分区：标题栏 =====
+//   从 main 里抽出来的第一块（2026-10-27 工业级改造）：main 只留"装配 + 时序"，
+//   具体长什么样交给分区函数。判据：整窗像素快照 diff 必须还是 0。
+//   参数：s = 画布，W = 窗宽，tbh = 标题栏高（0 = 真全屏，整条不画），in = 本帧输入（hover 用）
+int paint_title(struct Surf *s, int W, int tbh, struct GuiInput *in) {
+  // 品牌色块 3×12 + "FLINT Studio"（Segoe UI Semibold：拉丁小字比雅黑锐）
+  fill_rect(s, 12, 11, 15, 23, c_accent);
+  use_font(s->dc, g_hf_brand);
+  SetTextColor(s->dc, 0x00DCDCDC);
+  draw_str(s->dc, 22, 11, "FLINT Studio");
+  {
+    int bx = 22 + px_cur(s, "FLINT Studio", 12) + 14;   // 路径紧跟品牌，间距固定 14
+    use_font(s->dc, g_hf_uis);
+    SetTextColor(s->dc, 0x009D9D9D);
+    if (g_dirty != 0) {
+      // 未保存标记：品牌与路径之间的小圆点（VS Code 标题栏那个 ●）
+      fill_rect(s, bx - 9, 15, bx - 3, 21, c_accent);
+      fill_rect(s, bx - 8, 14, bx - 4, 22, c_accent);
+    }
+    draw_clip(s, bx, 8, bx, 0, W - 118, tbh, g_file);   // 路径长了只在本段裁，不压到窗口按钮
+  }
+  // 运行按钮（▶）：点它 = 编译并执行（等价 F5 / 菜单 运行 第一项）
+  if (hit_box(in->mx, in->my, W - 170, 0, W - 136, tbh) != 0) {
+    fill_rect(s, W - 170, 0, W - 136, tbh, 0x00505050);
+  }
+  draw_ico(s, W - 161, 9, g_hf_ico16, 0xE768, 0x0055C58A);
+  // 设置按钮（齿轮）：悬停浅一档
+  if (hit_box(in->mx, in->my, W - 136, 0, W - 102, tbh) != 0) {
+    fill_rect(s, W - 136, 0, W - 102, tbh, 0x00505050);
+  }
+  draw_ico(s, W - 131, 9, g_hf_ico16, 0xE713, 0x00CCCCCC);
+  // 窗口按钮：10px 图标、34px 宽；hover 亮一档，关闭键 hover 变红底白叉（VS Code/Win11 同款）
+  {
+    int hovmax = hit_box(in->mx, in->my, W - 102, 0, W - 68, tbh);
+    int hovmin = hit_box(in->mx, in->my, W - 68, 0, W - 34, tbh);
+    int hovcls = hit_box(in->mx, in->my, W - 34, 0, W, tbh);
+    if (hovmax != 0) { fill_rect(s, W - 102, 0, W - 68, tbh, 0x00505050); }
+    if (hovmin != 0) { fill_rect(s, W - 68, 0, W - 34, tbh, 0x00505050); }
+    if (hovcls != 0) { fill_rect(s, W - 34, 0, W, tbh, 0x002311E8); }
+    draw_ico(s, W - 90, 12, g_hf_ico10, 0xE922, 0x00CCCCCC);
+    draw_ico(s, W - 56, 12, g_hf_ico10, 0xE921, 0x00CCCCCC);
+    draw_ico(s, W - 22, 12, g_hf_ico10, 0xE8BB, 0x00FFFFFF);
+  }
+  return 0;
+}
+
+// ===== 调色板（全 app 唯一来源；2026-10-27 从 main 提成文件作用域）=====
+//   搬出来的原因：绘制要按区域拆成函数，颜色是跨区域共用的"事实"，不该锁在 main 的栈上。
+//   有单一字面量初值的全局是本仓允许的写法（见 docs\语言边界.md）。
+int c_bg = 0x001E1E1E;      // #1E1E1E 编辑区底（Default Dark Modern editor.background）
+int c_side = 0x00262525;    // #252526 侧栏 sideBar.background
+int c_title = 0x003C3C3C;   // #3C3C3C 标题栏 titleBar.activeBackground
+int c_fg = 0x00CCCCCC;      // #CCCCCC 正文 foreground
+int c_dim = 0x00858585;     // #858585 弱化 / 行号 editorLineNumber.foreground
+int c_line = 0x002B2B2B;    // #2B2B2B 描边 / 分隔
+int c_cur = 0x002E2D2A;     // #2A2D2E 当前行 editor.lineHighlightBackground
+int c_sel = 0x003D3737;     // #37373D 侧栏"当前文件"行底 list.activeSelectionBackground（非焦点）
+int c_tsel = 0x00784F26;    // #264F78 正文选区 editor.selectionBackground（VS Code Dark+ 的蓝底）
+                            //   为什么不用 c_sel：把 #37373D 用在正文上几乎看不出来（实测选区 8693 px 但肉眼像没选）
+int c_caret = 0x00ADAFAE;   // #AEAFAD 光标 editorCursor.foreground
+int c_accent = 0x00CC7A00;  // #007ACC 强调 / 状态栏 statusBar.background
+int c_err = 0x007187F4;     // #F48771 诊断/错误行 editorError.foreground（输出面板里可点的那些行）
+// —— 语法高亮六色（Dark+ token 色，取 User 主题里 editor.tokenColorCustomizations 的默认值）——
+int c_kw = 0x00D69C56;      // #569CD6 关键字 / 声明修饰词
+int c_type = 0x00B0C94E;    // #4EC9B0 内置类型
+int c_ctrl = 0x00C086C5;    // #C586C0 控制流关键字
+int c_str = 0x007891CE;     // #CE9178 字符串 / 字符字面量
+int c_com = 0x0055996A;     // #6A9955 注释
+int c_num = 0x00A8CEB5;     // #B5CEA8 数字
+
+// ===== 绘制分区：侧栏（头部 + 文件树）=====
+//   从 main 抽出的第二块（2026-10-27）：hover 底色、选中行、缩进参考线、箭头、文件名。
+//   判据：整窗像素快照 diff 必须仍是 0。
+int paint_sidebar(struct Surf *s, int tbh, int MB, int sb_top, struct GuiInput *in) {
+    // —— 侧栏头：文件夹图标（点它 = 打开工作区）＋ 工作区名；下面才是文件树 ——
+    if (hit_box(in->mx, in->my, 0, tbh + MB, (g_sideW - 1), tbh + MB + 28) != 0) {
+      fill_rect(s, 0, tbh + MB, (g_sideW - 1), tbh + MB + 28, c_cur);
+    }
+    draw_ico(s, 12, tbh + MB + 6, g_hf_ico16, 0xE8B7, 0x00C8C8C8);
+    use_font(s->dc, g_hf_ui);
+    SetTextColor(s->dc, 0x00BBBBBB);
+    if (g_ws[0] != 0) {
+      draw_clip(s, 36, tbh + MB + 6, 36, tbh + MB, 214, tbh + MB + 27, g_ws + base_off(g_ws));
+    } else {
+      draw_str(s->dc, 36, tbh + MB + 6, "打开文件夹");
+    }
+    {
+      int ti = g_tscroll;
+      int fy = tbh + MB + 30;
+      while (ti < g_tn && fy < sb_top - 4) {
+        char *pp = g_tpath + ti * 160;
+        int isd = g_tdir[ti];
+        int bi = base_off(pp);
+        int px2 = 10 + g_tdepth[ti] * 16;
+        int fcur = 0;
+        int fhot = hit_box(in->mx, in->my, 0, fy, (g_sideW - 1), fy + 25);
+        if (isd == 0 && g_file[0] != 0) { if (path_end_eq(g_file, pp) != 0) { fcur = 1; } }
+        if (fcur != 0) {
+          fill_rect(s, 0, fy, g_sideW, fy + 26, c_sel);
+          fill_rect(s, 0, fy, 2, fy + 26, c_accent);
+        } else if (fhot != 0) {
+          fill_rect(s, 0, fy, g_sideW, fy + 26, c_cur);
+        }
+        // 缩进参考线：每层一根 1px 竖线，对齐到父级箭头中心（VS Code 的 indent guide）
+        {
+          int gd = 1;
+          while (gd <= g_tdepth[ti]) {
+            int gx2 = 10 + (gd - 1) * 16 + 5;
+            fill_rect(s, gx2, fy, gx2 + 1, fy + 26, 0x00373737);
+            gd = gd + 1;
+          }
+        }
+        if (isd != 0) {
+          if (dopen_find(pp) >= 0) { draw_ico(s, px2, fy + 8, g_hf_ico10, 0xE70D, 0x00B0B0B0); }
+          else { draw_ico(s, px2, fy + 8, g_hf_ico10, 0xE76C, 0x00B0B0B0); }
+        }
+        if (isd != 0) { SetTextColor(s->dc, 0x00D6D6D6); }
+        else if (fcur != 0) { SetTextColor(s->dc, 0x00FFFFFF); }
+        else { SetTextColor(s->dc, c_fg); }
+        use_font(s->dc, g_hf_ui);
+        draw_clip(s, px2 + 16, fy + 2, px2 + 16, fy, 216, fy + 26, pp + bi);
+        fy = fy + 26;
+        ti = ti + 1;
+      }
+    }
+  return 0;
+}
+
+
+// ===== 每帧布局状态（2026-10-27 从 main 的栈搬到文件作用域）=====
+//   为什么要全局：绘制要按区域拆成函数，而这些量是"绘制与命中共用"的同一份事实；
+//   参数表塞 15 个 int 只会让调用点更难读。main 每帧照旧赋值（几何在输入之后、绘制之前推）。
+int W = 1000;       // 逻辑窗口宽
+int H = 700;        // 逻辑窗口高
+int fs = 0;         // 0 = 普通 / 1 = 窗口全屏 / 2 = 真全屏
+int tbh = 34;       // 标题栏高（真全屏 = 0）
+int MB = 26;        // 顶栏菜单条高
+int sbh = 26;       // 状态栏高（真全屏 = 0）
+int top = 66;       // 正文首行 y = tbh + MB + g_textGap
+int sb_top = 674;   // 内容区下沿 = H - sbh
+int edb = 674;      // 编辑区下边界（输出/终端面板会把它顶上来）
+int gx = 240;       // 行号右边界（gutter_x() 按位数算）
+int tx = 268;       // 正文起点 x = gx + g_gutterGap
+int lh = 21;        // 行高 = 字号 + 6
+int ln = 0;         // 当前行（源码行号）
+int col = 0;        // 当前列
+int vis = 0;        // 可视行数
+int crow = 0;       // 光标所在的显示行
+int goalx = 0;      // 上下移动时要保持的像素列（跨帧）
+int last_sig = -1;  // 上一帧画出去的签名（-1 ⇒ 第一帧必画；输入处理也会改写它）
+int sbdrag = 0;     // 1 = 正在拖滚动条滑块（跨帧）
+int sbgrab = 0;     // 按下点相对滑块顶的偏移（拖动时"抓哪儿不动哪儿"）
+int fidx = 0;       // 字体族在列表里的下标（F9 轮换；跨帧状态）
+int fmask = 0;      // 已安装候选的位掩码（只在这些里轮）
+int cjidx = 0;      // 汉字段候选下标（Ctrl+F9 轮换）
+int cjmask = 0;     // 汉字段候选已安装掩码
+int ime_sx = -1;    // 上次报给 IME 的光标位置（客户区；跨帧缓存）
+int ime_sy = -1;
+int ime_onwas = 0;  // 上一帧是否在合成（开始合成要重报一次位置）
+char fface[64];     // 当前代码字体族（studio.cfg / F9 改；跨帧状态）
+int fsz = 15;       // 当前字号 px（Ctrl+/- 改）
+
+// 编辑区 ①：当前行底色 + 选区底色（纯 GDI 填充，必须在 D2D 之前）
+int paint_editor_bg(struct Surf *s) {
+  int y = 0;
+  int i = 0;
+    // 背景层（GDI 直填，必须在 tx_begin 之前 —— D2D 的 EndDraw 会把 BeginDraw 期间的 GDI 绘制吞掉）
+    {
+      int r0 = g_scroll;
+      int ry = top;
+      while (r0 < g_nrows && ry < edb - 6) {
+        int rl = row_line(r0);
+        if (rl == ln) { fill_rect(s, g_sideW, ry, W - 14, ry + lh, c_cur); }   // 当前行：它折出的每一格都highlight
+        ry = ry + lh;
+        r0 = r0 + 1;
+      }
+    }
+    // 选区底色（每显示行按"与本行相交的那一段"画一个矩形）
+    if (g_selon != 0) {
+      int sa = sel_a();
+      int sb2 = sel_b();
+      int r0 = g_scroll;
+      int ry = top;
+      while (r0 < g_nrows && ry < edb - 6) {
+        int rl = row_line(r0);
+        int a2 = g_lstart[rl] + g_vb[r0];
+        int b2 = g_lstart[rl] + g_ve[r0];
+        if (sb2 > a2 && sa < b2) {
+          int x0 = tx;
+          int x1 = tx;
+          if (sa > a2) { x0 = tx + px_range(s, a2, sa); }
+          if (sb2 < b2) { x1 = tx + px_range(s, a2, sb2); } else { x1 = tx + px_range(s, a2, b2); }
+          if (x1 <= x0) { x1 = x0 + 5; }            // 空行/行尾也要看得见一条
+          if (x1 > W - 14) { x1 = W - 14; }
+          if (x0 < g_sideW) { x0 = g_sideW; }
+          fill_rect(s, x0, ry, x1, ry + lh, c_tsel);
+        }
+        ry = ry + lh;
+        r0 = r0 + 1;
+      }
+    }
+    y = top;
+    i = g_scroll;
+  return 0;
+}
+
+// 编辑区 ②：行号（GDI；必须在 D2D 正文之前，否则 EndDraw 会把这一层盖掉）
+int paint_gutter(struct Surf *s) {
+  int y = top;
+  int i = g_scroll;
+    // pass A：行号（GDI 画）—— 必须在 D2D 正文之前，否则 EndDraw 会把这一层盖掉
+    //   软换行后一个源码行占多格，行号只标它的**第一格**（VS Code 的做法；否则同一行号会重复出现）
+    while (i < g_nrows && y < edb - 6) {
+      int rl = row_line(i);
+      if (i == g_lrow[rl]) {
+        use_font(s->dc, g_hf_small);
+        if (rl == ln) { SetTextColor(s->dc, 0x00C6C6C6); } else { SetTextColor(s->dc, c_dim); }
+        draw_num_r(s, gx, y + g_txdy + 2, rl + 1);   // 小一号（12px）：与正文同一基线（偏移跟 g_txdy 走）
+      }
+      y = y + lh;
+      i = i + 1;
+    }
+  return 0;
+}
+
+// 编辑区 ③：正文（DirectWrite 一趟 Begin/End 包住整屏；语法高亮逐段上色）
+int paint_body(struct Surf *s) {
+  int y = top;
+  int i = g_scroll;
+    // pass B：正文（DirectWrite 一次 Begin/End 包住整屏；语法高亮逐段上色）
+    //   注：Begin/End 之间画 GDI 会被 EndDraw 吞掉 ⇒ 两个字体 id 没齐时整段走 GDI（见 draw_line_hl）
+    if (g_txready != 0) { tx_begin(s->dc, W, H); }
+    y = top;
+    i = g_scroll;
+    while (i < g_nrows && y < edb - 6) {
+      int rl2 = row_line(i);
+      draw_line_hl(s, tx, y, rl2, g_vb[i], g_ve[i], c_fg, c_com, c_str, c_num, c_kw, c_type, c_ctrl);
+      y = y + lh;
+      i = i + 1;
+    }
+    if (g_txready != 0) { tx_end(); }
+  return 0;
+}
+
+// 编辑区 ④：括号匹配下划线 + 光标 + IME 位置（GDI，必须在 D2D 之后）
+int paint_caret(struct Surf *s, struct GuiWin *g) {
+  int j = 0;
+    // 括号匹配下划线（#D7BA7D，和 VS Code 的 bracketMatch 同色）：两个端点各画 2px
+    if (g_bra >= 0 && g_brb >= 0) {
+      int bi2 = 0;
+      while (bi2 < 2) {
+        int pp2 = g_bra;
+        if (bi2 == 1) { pp2 = g_brb; }
+        {
+          int ln3 = line_of_pos(pp2);
+          if (ln3 >= 0) {
+            int rr2 = row_of_pos(pp2);
+            int yy2 = top + (rr2 - g_scroll) * lh;
+            if (yy2 >= top && yy2 + lh <= edb) {
+              int bx = tx + px_range(s, g_lstart[ln3], pp2);
+              int bw = px_range(s, pp2, pp2 + 1);
+              if (bw <= 0) { bw = 4; }
+              fill_rect(s, bx, yy2 + lh - 2, bx + bw, yy2 + lh, 0x007DBAD7);   // COLORREF = 0x00BBGGRR ⇒ #D7BA7D
+            }
+          }
+        }
+        bi2 = bi2 + 1;
+      }
+    }
+
+    // 光标（x 用**渲染像素宽**，不是字节数 × 固定宽 —— 否则汉字一多就"逐步过量"）
+    //   软换行后：行内 x 从**本显示行行首**量起（不是源码行首），否则折行后光标会跑到屏幕外
+    {
+      int rlc = row_line(crow);
+      int cxp = px_range(s, g_lstart[rlc] + g_vb[crow], g_cur);
+      int cyy = top + (crow - g_scroll) * lh;
+      if (crow >= g_scroll && crow < g_scroll + vis) {
+        // IME 合成串（preedit）：画在光标处 ＋ 下划线；**不进正文缓冲**
+        // ⚠️ auto 档下**正文里已经有这些字母**（边打边插）⇒ 再画一遍 preedit 就是"双倍字符"
+        //    （用户实测：打 nihao 时屏上是 `nihaoni'hao` —— 正文 nihao ＋ 光标后 preedit）。
+        //    判据：本会话已落盘字母数 > 起点（gui_ime_auto_p > gui_ime_auto_base）⇒ 只留正文那一份；
+        //    字母还没落盘（auto 关 / 老 app）才画 preedit。候选窗位置仍由下面的 gui_ime_at 负责。
+        if (gui_ime_on != 0) {
+          int dup2 = 0;
+          if (gui_ime_auto != 0) { if (gui_ime_auto_p > gui_ime_auto_base) { dup2 = 1; } }
+          if (dup2 == 0 && gui_ime_clen > 0) {
+            int pwid = px_of(s, &gui_ime_comp[0], gui_ime_clen);
+            use_font(s->dc, g_hf);
+            SetTextColor(s->dc, c_fg);
+            draw_buf(s->dc, tx + cxp, cyy, &gui_ime_comp[0], gui_ime_clen);
+            fill_rect(s, tx + cxp, cyy + lh - 2, tx + cxp + pwid, cyy + lh, c_accent);
+          }
+        }
+        use_font(s->dc, g_hf);
+        fill_rect(s, tx + cxp, cyy, tx + cxp + 2, cyy + lh, c_caret);
+      }
+      // 把光标位置报给 IME（**客户区坐标**：COMPOSITIONFORM/CANDIDATEFORM 都要客户区，给屏幕坐标会整体偏掉）
+      if (tx + cxp != ime_sx || cyy != ime_sy || (gui_ime_on != 0 && ime_onwas == 0)) {
+        gui_ime_at(g->hwnd, tx + cxp, cyy + lh);
+        ime_sx = tx + cxp;
+        ime_sy = cyy;
+        ime_onwas = gui_ime_on;
+      }
+    }
+  return 0;
+}
+
+// 编辑区总调度：底色(GDI) → 行号(GDI) → 正文(D2D) → 光标/IME(GDI)。顺序不许调换。
+int paint_editor(struct Surf *s, struct GuiInput *in, struct GuiWin *g) {
+    // —— 编辑区：当前行底色 + 选区底色 + 行号 + 正文（全部按**显示行**画）——
+    ln = cur_line();
+    col = cur_col(ln);
+    vis = (edb - top) / lh;
+    crow = row_of_pos(g_cur);
+  paint_editor_bg(s);
+  paint_gutter(s);
+  paint_body(s);
+  paint_caret(s, g);
+  return 0;
+}
+
+// ===== 绘制分区：输出面板 =====
+//   从 main 抽出的第四块（2026-10-27）：面板底/描边、标题、诊断条目（可点跳转）、尾部日志。
+//   判据：整窗像素快照 diff 必须仍是 0。
+int paint_output(struct Surf *s, struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 输出面板（有输出时占底部）：上描边 + 标题（UI 13）+ 正文（等宽 12）——
+    //   诊断行用 VS Code 的 errorForeground #F48771 画，并在标题后标出条数 ⇒ 一眼看出"红的那行能点"
+    if (g_outlen > 0 && g_termon == 0) {
+      int df = 0;
+      int dfl = 0;
+      int dln = 0;
+      int dcl = 0;
+      fill_rect(s, g_sideW, edb, W, edb + 1, c_line);
+      fill_rect(s, g_sideW, edb + 1, W, sb_top, c_bg);
+      use_font(s->dc, g_hf_ui);
+      SetTextColor(s->dc, 0x00BBBBBB);
+      draw_str(s->dc, 232, edb + 6, "输出");
+      if (g_nerr > 0) {
+        char nt[64];
+        int np = 0;
+        int nx = 0;
+        np = num_ap(nt, 0, g_nerr);
+        np = ap2(nt, np, " 条诊断 · 点行跳转");
+        nt[np] = 0;
+        nx = 232 + px_cur(s, "输出", 6) + 10;
+        SetTextColor(s->dc, c_err);
+        draw_str(s->dc, nx, edb + 6, nt);
+      }
+      use_font(s->dc, g_hf_small);
+      y = edb + 26;
+      i = 0;
+      // 面板滚动：先跳掉 g_oscroll 行（滚轮在面板上调它）
+      {
+        int skip = 0;
+        while (skip < g_oscroll && i < g_outlen) {
+          j = i;
+          while (j < g_outlen && g_out[j] != 10) { j = j + 1; }
+          i = j + 1;
+          skip = skip + 1;
+        }
+      }
+      while (i < g_outlen && y < sb_top - 8) {
+        j = i;
+        while (j < g_outlen && g_out[j] != 10) { j = j + 1; }
+        if (j > i) {
+          if (diag_at(g_out + i, j - i, &df, &dfl, &dln, &dcl) != 0) { SetTextColor(s->dc, c_err); }
+          else { SetTextColor(s->dc, c_fg); }
+          draw_buf(s->dc, 232, y, g_out + i, j - i);
+        }
+        i = j + 1;
+        y = y + 16;
+      }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：内置终端面板 =====
+//   从 main 抽出的第五块（2026-10-27）：面板底/标题/历史输出/命令行与光标。
+//   判据：整窗像素快照 diff 必须仍是 0。
+int paint_terminal(struct Surf *s, struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 内置终端面板（Ctrl+`）：底部 200px；上面是输出，最下一行是命令输入 ——
+    if (g_termon != 0) {
+      int ty0 = sb_top - 200;
+      int p = 0;
+      int q2 = 0;
+      int yy = 0;
+      int total = 0;
+      int fit = 0;
+      int start = 0;
+      int li = 0;
+      fill_rect(s, g_sideW, ty0, W, ty0 + 1, c_line);
+      fill_rect(s, g_sideW, ty0 + 1, W, sb_top, 0x00181818);
+      use_font(s->dc, g_hf_ui);
+      SetTextColor(s->dc, 0x00BBBBBB);
+      draw_str(s->dc, 232, ty0 + 4, "终端");
+      SetTextColor(s->dc, c_dim);
+      draw_str(s->dc, 292, ty0 + 4, "持久 cmd（cd 保持）· ↑↓ 历史 · Esc 回编辑区");
+      p = 0;
+      while (p < g_termlen) { if (g_term[p] == 10) { total = total + 1; } p = p + 1; }
+      fit = (200 - 30 - 26) / 17;
+      if (fit < 3) { fit = 3; }
+      start = total - fit;
+      if (start < 0) { start = 0; }
+      p = 0;
+      li = 0;
+      while (li < start && p < g_termlen) {
+        if (g_term[p] == 10) { li = li + 1; }
+        p = p + 1;
+      }
+      use_font(s->dc, g_hf_small);
+      yy = ty0 + 26;
+      while (p < g_termlen && yy < sb_top - 26) {
+        q2 = p;
+        while (q2 < g_termlen && g_term[q2] != 10) { q2 = q2 + 1; }
+        if (q2 > p) {
+          SetTextColor(s->dc, 0x00C8C8C8);
+          draw_buf(s->dc, 232, yy, g_term + p, q2 - p);
+        }
+        p = q2 + 1;
+        yy = yy + 17;
+      }
+      fill_rect(s, g_sideW, sb_top - 24, W, sb_top, 0x00252526);
+      use_font(s->dc, g_hf);
+      SetTextColor(s->dc, 0x00E8E8E8);
+      draw_str(s->dc, 232, sb_top - 20, ">");
+      draw_buf(s->dc, 248, sb_top - 20, g_cmd, g_cmdlen);
+      if (g_termfocus != 0) {
+        int cw2 = px_cur(s, g_cmd, g_cmdlen);
+        fill_rect(s, 248 + cw2, sb_top - 20, 250 + cw2, sb_top - 8, c_accent);
+      }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：顶栏菜单（条 + 下拉）=====
+//   从 main 抽出的第六块（2026-10-27）：菜单条底色/hover、四个标题、下拉面板与快捷键列。
+//   ⚠️ 必须画在侧栏/树/面板之后（否则下拉会被侧栏盖住），所以调用点留在原顺序里。
+int paint_menu(struct Surf *s, struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 顶栏菜单条：文件 / 编辑 / 运行 / 视图（点标题开下拉，再点关闭；hover 行高亮）——
+    //   ⚠️ 必须画在**最后**（侧栏/树/面板之后）：画在标题栏那段会被侧栏盖住（实测下拉里能看见文件树）
+    {
+      int m = 1;
+      menu_band(s, W, tbh, tbh + MB, 0x00252526, 0x003C3C3C);
+      while (m <= 4) {
+        int mx0 = menu_x(s, m);
+        int mw = px_cur(s, menu_title(m), sl2(menu_title(m))) + 24;
+        int mhot = hit_box(in->mx, in->my, mx0, tbh, mx0 + mw, tbh + MB);
+        if (g_menu == m) { fill_rect(s, mx0, tbh, mx0 + mw, tbh + MB, 0x003C3C3C); }
+        else if (mhot != 0) { fill_rect(s, mx0, tbh, mx0 + mw, tbh + MB, 0x00303030); }   // hover 亮一档
+        use_font(s->dc, g_hf_ui);
+        if (g_menu == m) { SetTextColor(s->dc, 0x00FFFFFF); } else { SetTextColor(s->dc, 0x00CCCCCC); }
+        draw_str(s->dc, mx0 + 12, tbh + 5, menu_title(m));
+        m = m + 1;
+      }
+      if (g_menu != 0) {
+        int dx0 = menu_x(s, g_menu);
+        int dw = 250;
+        int i2 = 0;
+        int ry2 = tbh + MB + 3;
+        if (dx0 + dw > W - 8) { dx0 = W - 8 - dw; }
+        g_hover = 0 - 1;
+        while (i2 < menu_count(g_menu)) {
+          if (hit_box(in->mx, in->my, dx0 + 1, ry2, dx0 + dw - 1, ry2 + 24) != 0) { g_hover = i2; }
+          ry2 = ry2 + 24;
+          i2 = i2 + 1;
+        }
+        menu_drop(s, g_menu, dx0, tbh + MB, dw, 24, 0x00252526, 0x00CCCCCC, 0x00858585, 0x00094771);
+      }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：paint_scrollbar =====
+//   从 main 抽出（2026-10-27 工业级改造）。判据：整窗像素快照 diff 必须仍是 0。
+int paint_scrollbar(struct Surf *s, struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 垂直滚动条（编辑区右边缘 W-14..W，y = tbh..sb_top）——
+    //   ⚠️ 必须画在 tx_begin/tx_end **之外**：D2D 的 DC render target 会吞掉 BeginDraw 期间的 GDI 绘制
+    //      （见文件头交接注释）。这里在 tx_end 之后、且放在输出面板之后 ⇒ 面板展开时滚动条也压在最上层。
+    //   配色按深色主题：轨道比编辑区略亮一档（#232323），滑块 #424242，悬停 #4E4E4E（与 VS Code 同档）。
+    {
+      int svis = (edb - top) / lh;
+      int track = sb_top - tbh;
+      int th = sb_thumb_h(track, g_nrows, svis);
+      int ty = tbh + MB + sb_thumb_y(track, th, g_nrows, svis, g_scroll);
+      int c_sbtrack = 0x00232323;
+      int c_sbthumb = 0x00424242;
+      int c_sbhot = 0x004E4E4E;
+      fill_rect(s, W - 14, tbh + MB, W, sb_top, c_sbtrack);    // 轨道
+      if (hit_box(in->mx, in->my, W - 14, ty, W, ty + th) != 0) {
+        fill_rect(s, W - 12, ty + 2, W - 2, ty + th - 2, c_sbhot);      // 悬停：亮一档
+      } else {
+        fill_rect(s, W - 12, ty + 2, W - 2, ty + th - 2, c_sbthumb);    // 滑块（左右各留 2px 内边距）
+      }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：paint_status =====
+//   从 main 抽出（2026-10-27 工业级改造）。判据：整窗像素快照 diff 必须仍是 0。
+int paint_status(struct Surf *s) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 状态栏（#181818 底 + 顶部 1px 蓝线；左「品牌·端口·srv」/ 中「状态」/ 右「Ln,Col / 编码 / 行数」）——
+    //   真全屏（sbh=0）整条不画；右段从 W-12 往左排。
+    //   2026-10-27 改版：旧的整条 #007ACC 蓝底 + 20px 字把底部压得又重又"廉价"（VS Code Dark+
+    //   的经典蓝已经是十年前的样子了；现代主题是深底 + 一条强调线）。字也降一档到 14px。
+    if (sbh > 0) {
+    fill_rect(s, 0, sb_top, W, H, 0x00181818);          // #181818
+    fill_rect(s, 0, sb_top, W, sb_top + 1, c_accent);   // 顶部 1px 蓝线（状态栏靠它认"这是状态栏"）
+    {
+      int sx = 12;
+      int sy = sb_top + 6;
+      use_font(s->dc, g_hf_uisb);
+      SetTextColor(s->dc, 0x00E8E8E8);
+      draw_str(s->dc, sx, sy, "FLINT");
+      sx = sx + px_cur(s, "FLINT", 5) + 8;
+      use_font(s->dc, g_hf_uis);
+      SetTextColor(s->dc, 0x009A9A9A);
+      draw_str(s->dc, sx, sy, "· FLGUI · 8899 · srv");
+      sx = sx + px_cur(s, "· FLGUI · 8899 · srv", 23) + 5;
+      SetTextColor(s->dc, 0x009A9A9A);
+      draw_num(s->dc, sx, sy, g_srvpid);
+    }
+    use_font(s->dc, g_hf_uis);
+    SetTextColor(s->dc, 0x00C8C8C8);
+    draw_str(s->dc, 420, sb_top + 6, g_status);
+    {
+      char sb1[64];
+      char sb2[24];
+      char sb3[32];
+      int sp = 0;
+      int sr = W - 12;
+      int sy2 = sb_top + 6;
+      int dcol = 0;
+      int q9 = 0;
+      if (ln >= 0 && ln < g_nlines) {
+        q9 = g_lstart[ln];
+        while (q9 < g_cur) { if (is_cont(q9) == 0) { dcol = dcol + 1; } q9 = q9 + 1; }
+      }
+      sp = ap2(sb1, 0, "Ln ");
+      sp = num_ap(sb1, sp, ln + 1);
+      sp = ap2(sb1, sp, ", Col ");
+      sp = num_ap(sb1, sp, dcol + 1);
+      sb1[sp] = 0;
+      sp = ap2(sb2, 0, "UTF-8"); sb2[sp] = 0;
+      sp = num_ap(sb3, 0, g_nlines);
+      sp = ap2(sb3, sp, " 行"); sb3[sp] = 0;
+      use_font(s->dc, g_hf_uis);
+      SetTextColor(s->dc, 0x00C8C8C8);
+      sr = draw_right(s, sr, sy2, sb3) - 16;
+      sr = draw_right(s, sr, sy2, sb2) - 16;
+      sr = draw_right(s, sr, sy2, sb1);
+    }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：查找条（Ctrl+F）=====
+//   从 main 抽出（2026-10-27）：条底/描边、标签、输入串、光标、"Enter 下一个"提示。
+int paint_findbar(struct Surf *s, struct GuiInput *in) {
+    // —— 查找/替换条（Ctrl+F / Ctrl+H）：一行 26px，替换模式两行 52px；画在 tx_begin 之前（GDI 层）——
+    if (g_findon != 0) {
+      int hbar = 26;
+      if (g_findrep != 0) { hbar = 52; }
+      fill_rect(s, g_sideW, tbh + MB, W, tbh + MB + hbar, c_side);
+      fill_rect(s, g_sideW, tbh + MB + hbar - 1, W, tbh + MB + hbar, c_line);
+      use_font(s->dc, g_hf_ui);
+      // 先 dim 画两行的标签与提示，再 fg 画两个值、最后画光标 —— 颜色只切两次
+      SetTextColor(s->dc, c_dim);
+      draw_str(s->dc, 232, tbh + MB + 7, "查找:");
+      if (g_findrep != 0) {
+        draw_str(s->dc, 232, tbh + MB + 33, "替换:");
+        draw_clip(s, 420, tbh + MB + 33, 420, tbh, W - 20, tbh + MB + hbar, "Enter 替换 · Ctrl+Enter 全部 · Tab 切换 · Esc 关闭");
+      } else {
+        draw_clip(s, 420, tbh + MB + 7, 420, tbh, W - 20, tbh + MB + 26, "Enter 下一个 · Esc 关闭");
+      }
+      SetTextColor(s->dc, c_fg);
+      draw_buf(s->dc, 272, tbh + MB + 7, g_find, g_findlen);
+      if (g_findrep != 0) { draw_buf(s->dc, 272, tbh + MB + 33, g_rep, g_replen); }
+      {
+        int fw = px_cur(s, g_find, g_findlen);
+        if (g_repf == 0) {
+          if (g_findlen == 0) { fill_rect(s, 272, tbh + MB + 6, 273, tbh + MB + 21, c_caret); }
+          else { fill_rect(s, 272 + fw, tbh + MB + 6, 272 + fw + 2, tbh + MB + 21, c_caret); }
+        }
+      }
+      if (g_findrep != 0 && g_repf == 1) {
+        int rw = px_cur(s, g_rep, g_replen);
+        if (g_replen == 0) { fill_rect(s, 272, tbh + MB + 32, 273, tbh + MB + 47, c_caret); }
+        else { fill_rect(s, 272 + rw, tbh + MB + 32, 272 + rw + 2, tbh + MB + 47, c_caret); }
+      }
+    }
+  return 0;
+}
+
+// ===== 绘制分区：设置卡片 =====
+//   从 main 抽出（2026-10-27）：卡片底/头/六行设置项/值/‹›/页脚提示。
+//   卡片几何（520×410、行距 44）是探针的验收几何（probe-ide-settings / probe-ide-ws）。
+int paint_settings(struct Surf *s, struct GuiInput *in) {
+      int sw4 = 520;
+      int sh4 = 410;
+      int cx4 = (W - sw4) / 2;
+      int cy4 = (H - sh4) / 2;
+      int r4 = 0;
+      int ry4 = 0;
+      char vb[72];
+      int vp = 0;
+      fill_rect(s, cx4, cy4, cx4 + sw4, cy4 + sh4, 0x00303236);     // 卡片底：比编辑区亮一档
+      fill_rect(s, cx4, cy4, cx4 + sw4, cy4 + 46, c_title);         // 头
+      fill_rect(s, cx4, cy4 + 46, cx4 + sw4, cy4 + 47, c_line);
+      fill_rect(s, cx4, cy4, cx4 + sw4, cy4 + 1, c_line);
+      fill_rect(s, cx4, cy4 + sh4 - 1, cx4 + sw4, cy4 + sh4, c_line);
+      fill_rect(s, cx4, cy4, cx4 + 1, cy4 + sh4, c_line);
+      fill_rect(s, cx4 + sw4 - 1, cy4, cx4 + sw4, cy4 + sh4, c_line);
+      glyph_spark(s, cx4 + 20, cy4 + 23, 9, 0x004EB0FF);             // FLC 火花标记（品牌暖橙 #FFB04E）
+      use_font(s->dc, g_hf_uib);
+      SetTextColor(s->dc, c_fg);
+      draw_str(s->dc, cx4 + 36, cy4 + 14, "设置");
+      use_font(s->dc, g_hf_ui);
+      SetTextColor(s->dc, c_dim);
+      draw_str(s->dc, cx4 + 72, cy4 + 15, "Settings");
+      if (hit_box(in->mx, in->my, cx4 + sw4 - 34, cy4, cx4 + sw4, cy4 + 46) != 0) {
+        fill_rect(s, cx4 + sw4 - 34, cy4, cx4 + sw4, cy4 + 46, 0x002311E8);
+      }
+      SetTextColor(s->dc, 0x00FFFFFF);
+      draw_ico(s, cx4 + sw4 - 22, cy4 + 18, g_hf_ico10, 0xE8BB, 0x00FFFFFF);
+      r4 = 0;
+      while (r4 < 6) {
+        ry4 = cy4 + 58 + r4 * 44;
+        if (r4 == g_setrow) {
+          fill_rect(s, cx4, ry4, cx4 + sw4, ry4 + 42, 0x002A2D2E);
+          fill_rect(s, cx4, ry4, cx4 + 2, ry4 + 42, c_accent);
+        }
+        use_font(s->dc, g_hf_ui);
+        SetTextColor(s->dc, c_fg);
+        draw_str(s->dc, cx4 + 22, ry4 + 12, set_label(r4));
+        vp = 0;
+        if (r4 == 0) { vp = ap2(vb, 0, fface); }
+        else if (r4 == 1) { vp = num_ap(vb, 0, fsz); }
+        else if (r4 == 2) { vp = ap2(vb, 0, g_cjkface); }
+        else if (r4 == 3) {
+          if (g_cjkpx == 0) { vp = ap2(vb, 0, "自动"); } else { vp = num_ap(vb, 0, g_cjkpx); }
+        } else if (r4 == 4) {
+          if (g_wrapmode != 0) { vp = ap2(vb, 0, "开"); } else { vp = ap2(vb, 0, "关"); }
+        } else {
+          vp = num_ap(vb, 0, g_uipx);
+        }
+        vb[vp] = 0;
+        SetTextColor(s->dc, c_dim);
+        draw_ico(s, cx4 + sw4 - 99, ry4 + 15, g_hf_ico12, 0xE76B, 0x00858585);   // ‹
+        draw_ico(s, cx4 + sw4 - 45, ry4 + 15, g_hf_ico12, 0xE76C, 0x00858585);   // ›
+        // ⚠️ draw_ico 把 DC 的字体换成了图标字体 ⇒ 画值之前必须换回来，否则值是"图标字体里没有的
+        //    拉丁字母"，会退成替补字体、墨高只有 6px（probe-ide-ws 的 CLIP 项就是这么抓到的）。
+        use_font(s->dc, g_hf_ui);
+        SetTextColor(s->dc, 0x00C8D2E0);
+        // 值**左对齐**在固定列（长名字如 "Noto Sans SC Medium" 也不会压住 < >；溢出只在本段裁）
+        // ⚠️ 裁剪框上下各留 6px：文字画在 ry4+12、UI 字 16px ⇒ 墨迹到 ry4+28，框只到 ry4+22 会把
+        //    下半截字"切掉"（用户实测："设置页吞了几行的半边字"）。
+        draw_clip(s, cx4 + 210, ry4 + 12, cx4 + 206, ry4 - 6, cx4 + sw4 - 112, ry4 + 36, vb);
+        r4 = r4 + 1;
+      }
+      use_font(s->dc, g_hf_ui);
+      SetTextColor(s->dc, c_dim);
+      draw_str(s->dc, cx4 + 22, cy4 + sh4 - 34, "↑↓ 选择     ←→ 调整     Enter 切换     Esc 关闭");
+      draw_str(s->dc, cx4 + 22, cy4 + sh4 - 17, "改动即时生效，并写入 studio.cfg");
+  return 0;
+}
+
+// ===== 输入：滚轮 =====
+//   从 main 抽出（2026-10-27）：Ctrl+滚轮改字号、侧栏滚树、输出面板滚日志、编辑区滚正文。
+//   返回 1 = 有可见变化（main 用它强制重画，替代原来的 last_sig 直写）。
+int handle_wheel(struct GuiInput *in, int kctl) {
+  int touched = 0;
+    // —— 滚轮：一格 3 行；Ctrl+滚轮 = 字号缩放（与 Ctrl+=/- 同一条路径）——
+    //   ⚠️ `in->wheel` 的单位是**格**（泵层已经除过 120，见 lib\flgui_win32.fl 的 `in->wheel = in->wheel + d / 120`），
+    //      别再除一次 —— 第一版除 120 后恒为 0，落到 ±1 补偿分支，3 格只滚 1 格（实测 51px 而不是 153px）。
+    if (in->wheel != 0) {
+      int notch = in->wheel;
+      if (kctl != 0) {
+        fsz = set_font(fsz + notch, fface, g_cjkface, &lh);
+        save_cfg(fface, fsz);
+        touched = 1;
+      } else if (in->mx < g_sideW && g_seton == 0) {
+        // 侧栏滚轮 = 滚文件树（树比一屏长，没它只能一格一格点）
+        g_tscroll = g_tscroll - notch * 3;
+        if (g_tscroll < 0) { g_tscroll = 0; }
+        if (g_tscroll > g_tn - 1) { g_tscroll = g_tn - 1; }
+        if (g_tscroll < 0) { g_tscroll = 0; }
+        touched = 1;
+      } else if (g_outlen > 0 && in->my >= edb && g_seton == 0) {
+        // 输出面板滚轮 = 滚日志（长日志/批量编译时用）
+        g_oscroll = g_oscroll - notch * 2;
+        if (g_oscroll < 0) { g_oscroll = 0; }
+        touched = 1;
+      } else {
+        g_scroll = g_scroll - notch * 3;
+        if (g_scroll < 0) { g_scroll = 0; }
+      }
+    }
+  return touched;
+}
+
+// ===== 输入：键盘编辑 =====
+//   从 main 抽出（2026-10-27）：可打印字符插入、退格/删除、替换选区、自动缩进/配对、撤销入栈。
+//   Ctrl 按着时不当作字符（否则 Ctrl+S 会顺手插一个 s）—— 判据在 kctl 参数上。
+int handle_edit_keys(struct GuiInput *in, int kctl) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 键盘编辑（有选区时先删选区 = 替换，与 VS Code 一致；每次改完 push 一步撤销）——
+    if (in->key != 0) {
+      if (in->key == 8) {                       // 退格：删掉**整个码点**（只删 1 字节会留下半个 UTF-8 序列）
+        if (g_selon != 0) {
+          del_range(sel_a(), sel_b());
+          g_selon = 0;
+          undo_push();
+          rebuild(1);
+        } else if (g_cur > 0) {
+          {
+            int p0 = cp_prev(g_cur);
+            int k = g_cur - p0;
+            while (k > 0) { del_byte(g_cur - 1); g_cur = g_cur - 1; k = k - 1; }
+            undo_push();
+            rebuild(1);
+          }
+        }
+      } else if (in->key == 13) {               // 回车 → LF（保持文件是 LF）
+        // ⚠️ Ctrl+Enter = 编译快捷键（见下面 `edge(0x0D, ...)` 那段）⇒ Ctrl 按着时**不许插换行**。
+        //   实测（`tmp\probe-batch2.ps1 -Mode block`）：每按一次 Ctrl+Enter 编译，正文开头多 1 字节 0x0A。
+        if (kctl == 0) {
+          if (g_selon != 0) { del_range(sel_a(), sel_b()); g_selon = 0; }
+          // 自动缩进（2026-10-27）：新行沿用当前行的前导空白；光标正对着 `}` 时少缩进一档（2 空格）
+          {
+            int l0 = cur_line();
+            int ls = g_lstart[l0];
+            int ws = 0;
+            int ded = 0;
+            int k2 = 0;
+            while (ws < g_llen[l0]) {
+              int c2 = g_src[ls + ws] & 255;
+              if (c2 == 32 || c2 == 9) { ws = ws + 1; } else { break; }
+            }
+            if (g_cur >= ls + ws && g_cur < ls + g_llen[l0]) {
+              if ((g_src[g_cur] & 255) == 125 && ws >= 2) { ded = 2; }
+            }
+            ins_byte(g_cur, 10);
+            g_cur = g_cur + 1;
+            while (k2 < ws - ded) {
+              ins_byte(g_cur, 32);
+              g_cur = g_cur + 1;
+              k2 = k2 + 1;
+            }
+          }
+          undo_push();
+          rebuild(1);
+        }
+      } else if (in->key >= 32) {               // 可打印字符（含 UTF-8 多字节的每一段，逐字节插入）
+        if (kctl == 0) {                       // Ctrl 按着时别当字符（否则 Ctrl+S 会顺手插一个 's'）
+          if (g_selon != 0) { del_range(sel_a(), sel_b()); g_selon = 0; }
+          // 括号/引号自动配对（2026-10-27）：开符号成对插入、光标停在中间；
+          // 光标右边已经是同一个收尾符号时**直接跨过去**（避免 `}}` / `""` 越打越多）。
+          {
+            int ch2 = in->key & 255;
+            int close2 = 0;
+            // 收尾符号（) ] } " '）在光标右边已是同一个字符时**跨过去**，不重复插入
+            if (ch2 == 41 || ch2 == 93 || ch2 == 125 || ch2 == 34 || ch2 == 39) {
+              if (g_cur < g_srclen && (g_src[g_cur] & 255) == ch2) { ch2 = 0; g_cur = g_cur + 1; }
+            }
+            if (ch2 == 40) { close2 = 41; }
+            if (ch2 == 91) { close2 = 93; }
+            if (ch2 == 123) { close2 = 125; }
+            if (ch2 == 34) { close2 = 34; }
+            if (ch2 == 39) { close2 = 39; }
+            if (close2 != 0 && g_cur < g_srclen) {
+              if ((g_src[g_cur] & 255) == close2) {
+                g_cur = g_cur + 1;             // 跨过已有收尾
+                close2 = 0;
+                ch2 = 0;
+              }
+            }
+            if (ch2 != 0) {
+              ins_byte(g_cur, ch2);
+              g_cur = g_cur + 1;
+              if (close2 != 0) { ins_byte(g_cur, close2); }   // 收尾插在光标右边
+            }
+          }
+          undo_push();
+          rebuild(1);
+        }
+        // ★★ 必须"消费掉"这个待打印字符：泵层只要 `gui_key_pending > 0` 就每帧把它端过来，
+        //   这里不减 1 ⇒ 同一个字符被连续插进缓冲区（实测：一格 33ms ⇒ 一个字变十几个），
+        //   症状就是"输入不正常、光标乱跳"。Ctrl 分支也要减（字符已收到、只是没插）。
+        if (gui_key_pending > 0) { gui_key_pending = gui_key_pending - 1; }
+      }
+      in->key = 0;
+    }
+  return 0;
+}
+
+// ===== 输入：方向键 =====
+//   从 main 抽出（2026-10-27）：按**显示行**走（折行后上下键一格一格过）、Shift 扩选区、
+//   Ctrl+Left/Right 跳词、不按 Shift 的导航键取消选区（否则粘贴会变成"替换整个文件"）。
+int handle_arrow_keys(struct Surf *s, struct GuiInput *in, int kctl) {
+    // —— 方向键（按**显示行**走：折行后上下键一格一格过；Shift = 扩选区）——
+      int shf2 = 0;
+      int before = g_cur;
+      int naved = 0;          // 本帧有没有"没按 Shift 的导航键"⇒ 要取消选区
+      if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { shf2 = 1; }
+      if (rep(0x25, &g_kleft) != 0) {                                      // 左：一个码点
+        naved = 1;
+        if (shf2 == 0 && g_selon != 0) { g_cur = sel_a(); g_selon = 0; }
+        else { if (g_cur > 0) { g_cur = cp_prev(g_cur); } }
+      }
+      if (rep(0x27, &g_kright) != 0) {                                     // 右：一个码点
+        naved = 1;
+        if (shf2 == 0 && g_selon != 0) { g_cur = sel_b(); g_selon = 0; }
+        else { if (g_cur < g_srclen) { g_cur = cp_next(g_cur); } }
+      }
+      if (rep(0x26, &g_kup) != 0) {                                        // 上：上一个显示行，保持像素列
+        naved = 1;
+        int cr = row_of_pos(g_cur);
+        if (cr > 0) {
+          goalx = px_range(s, g_lstart[row_line(cr)] + g_vb[cr], g_cur);
+          g_cur = pos_in_row(s, cr - 1, goalx);
+        }
+      }
+      if (rep(0x28, &g_kdown) != 0) {                                      // 下：下一个显示行
+        naved = 1;
+        int cr2 = row_of_pos(g_cur);
+        if (cr2 < g_nrows - 1) {
+          goalx = px_range(s, g_lstart[row_line(cr2)] + g_vb[cr2], g_cur);
+          g_cur = pos_in_row(s, cr2 + 1, goalx);
+        }
+      }
+      if (edge(0x24, &g_khome) != 0) {                                     // Home（Ctrl = 文件头）
+        naved = 1;
+        if (kctl != 0) { g_cur = 0; }
+        else { int cr3 = row_of_pos(g_cur); g_cur = g_lstart[row_line(cr3)] + g_vb[cr3]; }
+      }
+      if (edge(0x23, &g_kend) != 0) {                                      // End（Ctrl = 文件尾）
+        naved = 1;
+        if (kctl != 0) { g_cur = g_srclen; }
+        else { int cr4 = row_of_pos(g_cur); g_cur = g_lstart[row_line(cr4)] + g_ve[cr4]; }
+      }
+      if (rep(0x2E, &g_kdel) != 0) {                                       // Delete：删光标后一个码点（有选区删选区）
+        if (g_selon != 0) {
+          del_range(sel_a(), sel_b());
+          g_selon = 0;
+          undo_push();
+          rebuild(1);
+        } else if (g_cur < g_srclen) {
+          int q8 = cp_next(g_cur);
+          while (g_cur < q8) { del_byte(g_cur); q8 = q8 - 1; }
+          undo_push();
+          rebuild(1);
+        }
+      }
+      if (edge(0x09, &g_ktab) != 0) {                                      // Tab：插两个空格（本编辑器不用 Tab 导航焦点）
+        if (g_selon != 0) { del_range(sel_a(), sel_b()); g_selon = 0; }
+        ins_byte(g_cur, 32);
+        g_cur = g_cur + 1;
+        ins_byte(g_cur, 32);
+        g_cur = g_cur + 1;
+        undo_push();
+        rebuild(1);
+      }
+      // Shift 扩选区：锚点取"按下这一下之前"的位置（不能取移动之后的，否则永远选不出东西）。
+      //   ⚠️ 不按 Shift 的导航键**必须取消选区** —— 否则"选了一片、Ctrl+End 跳到文件尾、Ctrl+V 粘贴"
+      //   会变成"用剪贴板替换整个文件"（实测：36674 字节的文件被粘成 119 字节，正好等于选区长度）。
+      if (shf2 != 0 && g_cur != before) {
+        if (g_selon == 0) { g_sel = before; }
+        g_selon = 1;
+      } else if (shf2 == 0 && naved != 0) {
+        g_selon = 0;
+      }
+  return 0;
+}
+
+// ===== 输入：快捷键（编辑类）=====
+//   从 main 抽出（2026-10-27）：撤销/重做/全选/复制/剪切/粘贴/查找/打开/自动换行/F5 运行。
+//   返回要执行的菜单动作码（0 = 无）；main 统一把它交给"菜单动作执行"那段。
+int handle_shortcuts(struct Surf *s, struct GuiInput *in, int kctl, struct GuiWin *g) {
+  int act = 0;
+    // —— 撤销 / 重做 / 全选 / 复制 / 剪切 / 粘贴 / 查找 / 打开 / 换行开关 ——
+    if (edge(0x5A, &g_kz) != 0) {                                          // Z
+      if (kctl != 0) {
+        drop_char(0x7A);
+        if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { redo_do(); } else { undo_do(); }
+        last_sig = 0 - 1;
+      }
+    }
+    if (edge(0x5A, &g_kaz) != 0) {                                         // Alt+Z：软换行开关
+      if ((GetAsyncKeyState(0x12) & 0x8000) != 0) {
+        if (g_wrapmode != 0) { g_wrapmode = 0; } else { g_wrapmode = 1; }
+        save_cfg(fface, fsz);
+        rebuild(0);
+        last_sig = 0 - 1;
+        if (g_wrapmode != 0) { ap2(g_status, 0, "wrap ON"); } else { ap2(g_status, 0, "wrap OFF"); }
+      }
+    }
+    if (edge(0x59, &g_ky) != 0) {                                          // Y
+      if (kctl != 0) { drop_char(0x79); redo_do(); last_sig = 0 - 1; }
+    }
+    if (edge(0x41, &g_ka) != 0) {                                          // A：全选
+      if (kctl != 0) { drop_char(0x61); g_sel = 0; g_cur = g_srclen; g_selon = 1; }
+    }
+    if (edge(0x43, &g_kc) != 0) { if (kctl != 0) { drop_char(0x63); do_copy(); last_sig = 0 - 1; } }
+    if (edge(0x58, &g_kx) != 0) { if (kctl != 0) { drop_char(0x78); do_cut(); last_sig = 0 - 1; } }
+    if (edge(0x56, &g_kv) != 0) { if (kctl != 0) { drop_char(0x76); do_paste(); last_sig = 0 - 1; } }
+    if (edge(0x46, &g_kf) != 0) {                                          // F：查找
+      if (kctl != 0) { drop_char(0x66); find_open(); last_sig = 0 - 1; }
+    }
+    if (edge(0x48, &g_kh) != 0) { if (kctl != 0) { drop_char(0x68); find_open_rep(); last_sig = 0 - 1; } }
+    if (edge(0x74, &g_kf5) != 0) {                                         // F5 / Shift+F5：两种运行途径
+      if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { act = 24; } else { act = 23; }
+    }
+    if (edge(0x4E, &g_kn) != 0) {                                          // N：新建文件
+      if (kctl != 0) { drop_char(0x6E); act = 1; }
+    }
+    if (edge(0xC0, &g_kbq) != 0) {                                         // `：内置终端开关
+      if (kctl != 0) { drop_char(0x60); act = 10; }
+    }
+    if (edge(0x4F, &g_ko) != 0) {                                          // O：Ctrl+O 打开文件 / Ctrl+Shift+O 打开文件夹
+      if (kctl != 0) {
+        drop_char(0x6F);
+        if ((GetAsyncKeyState(0x10) & 0x8000) != 0) {
+          do_open_folder(g->hwnd);
+          save_cfg(fface, fsz);
+        } else {
+          do_open_dlg(g->hwnd);
+        }
+        last_sig = 0 - 1;
+      }
+    }
+    if (edge(0x72, &g_kf3) != 0) {                                         // F3：下一个（Shift+F3 = 上一个暂不做）
+      if (g_findlen > 0) { find_next(); last_sig = 0 - 1; }
+    }
+    if (edge(0x53, &g_ks) != 0) {            // S
+      if ((GetAsyncKeyState(0x11) & 0x8000) != 0) {
+        drop_char(0x73);
+        if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { do_save_as(g->hwnd); } else { do_save(); }
+      }
+    }
+    if (edge(0x0D, &g_kenter) != 0) { handle_enter_key(kctl); }
+    if (rep(0x21, &g_kpgup) != 0) { if (g_scroll > 20) { g_scroll = g_scroll - 20; } else { g_scroll = 0; } }
+    if (rep(0x22, &g_kpgdn) != 0) {
+      if (g_scroll + 20 < g_nrows) { g_scroll = g_scroll + 20; }
+      if (g_scroll > g_nrows - 1) { g_scroll = g_nrows - 1; }
+    }
+  return act;
+}
+
+// ===== 输入：IME 上屏结果 =====
+//   从 main 抽出（2026-10-27）：终端有焦点 ⇒ 进命令行；否则按字节插到光标处。
+//   ⚠️ 这块**绕过 in.key**（库层把上屏结果放在 gui_ime_res 里），只拦 in.key 会把字母漏进正文。
+int handle_ime_commit(struct GuiInput *in) {
+  int ik2 = 0;
+  int ik = 0;
+    // —— IME 上屏结果：终端有焦点 ⇒ 进命令行；否则按字节插到光标处 ——
+    //   （实测坑：这块**绕过 in->key**，只拦 in->key 的终端输入会把字母漏进正文，顺序还会乱）
+    if (g_termon != 0 && g_termfocus != 0 && gui_ime_rlen > 0) {
+      int ik2 = 0;
+      while (ik2 < gui_ime_rlen) {
+        int ac2 = gui_ime_res[ik2] & 255;
+        if (ac2 >= 32 && g_cmdlen < 240) {
+          g_cmd[g_cmdlen] = ac2;
+          g_cmdlen = g_cmdlen + 1;
+          g_cmd[g_cmdlen] = 0;
+        }
+        ik2 = ik2 + 1;
+      }
+      gui_ime_rlen = 0;
+      last_sig = 0 - 1;
+    }
+    if (g_findon == 0 && g_termfocus == 0 && gui_ime_rlen > 0) {
+      {
+        int ik = 0;
+        while (ik < gui_ime_rlen) {
+          ins_byte(g_cur, gui_ime_res[ik] & 255);
+          g_cur = g_cur + 1;
+          ik = ik + 1;
+        }
+        gui_ime_rlen = 0;        // 取走即清（库层靠这个 0 判断"还没被消费"）
+        undo_push();
+        rebuild(1);
+      }
+    }
+  return 0;
+}
+
+// ===== 输入：IME auto 档撤回 =====
+//   从 main 抽出（2026-10-27）：上屏结果到手之前，先删掉本次合成会话插进正文的字母。
+int handle_ime_recall(struct GuiInput *in, struct GuiWin *g) {
+    // —— auto 档 · 撤回：上屏结果到手前，先删掉"本次合成会话插进去的字母" ——
+    //   库层已经把"该删几个、内容是什么"算好（`gui_ime_auto_rn` / `gui_ime_auto_rbuf`）。
+    //   删字节在这里做，因为只有 app 看得见正文缓冲。**两条判据缺一不可**（绝不误删用户原文）：
+    //     ① 够长且**紧贴光标**：这 rn 个字节必须是光标左边那一段（`g_cur - rn` 起）；
+    //     ② 逐字节对得上库层记的按键内容 —— 对不上（用户中途点过别处 / 改过字）就**不删**，宁可留重复也不毁原文。
+    if (g_findon == 0 && gui_ime_auto_rn > 0) {
+      int rk = gui_ime_auto_rn;
+      int ok2 = 1;
+      gui_ime_auto_rn = 0;
+      if (rk > g_cur) { ok2 = 0; }
+      if (ok2 != 0) {
+        int q3 = 0;
+        while (q3 < rk) {
+          if ((g_src[g_cur - rk + q3] & 255) != (g->imebuf[64 + q3] & 255)) { ok2 = 0; }
+          q3 = q3 + 1;
+        }
+      }
+      if (ok2 != 0) {
+        // ⚠️ 删法必须能删到**下标 0**：`del_byte(pos)` 有 `pos <= 0` 的守卫（删数组首字节会被它拒掉），
+        //   用它逐字节删会让最前面那个字母留下来（实测：撤回 5 个只剩 1 个，正文成 `你好n`）。
+        //   ⇒ 固定起点 `g_cur - rk` 反复删（后一字节左移进同一格），自己维护 srclen/cur。
+        int q4 = 0;
+        int p5 = g_cur - rk;
+        while (q4 < rk) {
+          int i5 = p5;
+          while (i5 < g_srclen - 1) { g_src[i5] = g_src[i5 + 1]; i5 = i5 + 1; }
+          g_srclen = g_srclen - 1;
+          g_cur = g_cur - 1;
+          q4 = q4 + 1;
+        }
+        rebuild(1);
+      }
+    }
+  return 0;
+}
+
+// ===== 输入：Ctrl+字母的副作用字符清理 =====
+//   从 main 抽出（2026-10-27）：Ctrl+S 之类按下去时，泵层会把 ')s' 当字符排进队列；
+//   这里在**所有键盘处理之前**把它吃掉（300ms 窗口内同字母才算）。
+int handle_dropchar(struct GuiInput *in) {
+    // —— Ctrl+字母的"副作用字符"清理（必须在所有键盘处理之前，见 g_dropch 注释）——
+    if (g_dropch != 0) {
+      if (GetTickCount() - g_dropms > 300) {
+        g_dropch = 0;
+      } else if (in->key != 0 && (in->key & 255) >= 32 && ((in->key & 255) | 32) == (g_dropch & 255)) {
+        g_dropch = 0;
+        in->key = 0;
+        if (gui_key_pending > 0) { gui_key_pending = gui_key_pending - 1; }
+      }
+    }
+  return 0;
+}
+
+// ===== 输入：设置面板按键 =====
+//   从 main 抽出（2026-10-28）：↑↓ 选行、←→ 调值、Enter 切换、Esc 关；
+//   ⚠️ 面板开着时**一个字都不许进正文**（in->key 清零 + IME 待上屏丢弃），否则"选字体却把字符打进代码"。
+int handle_settings_keys(struct GuiInput *in) {
+    // —— 设置面板打开时：键盘/IME 全部走面板，正文与光标一个字都不许动 ——
+    //   为什么整段包起来而不是逐个加条件：编辑区有 20 多条独立按键路径（方向键/Enter/退格/Home/End/
+    //   Ctrl+字母/F9/Ctrl+1..9…），漏一条就会在面板底下偷偷改正文（"选字体却把字符打进代码"）。
+    //   ⇒ 面板开着时整块跳过；面板自己的键在这里处理。
+      if (edge(0x26, &g_kup) != 0) { g_setrow = g_setrow - 1; if (g_setrow < 0) { g_setrow = 4; } last_sig = 0 - 1; }
+      if (edge(0x28, &g_kdown) != 0) { g_setrow = g_setrow + 1; if (g_setrow > 5) { g_setrow = 0; } last_sig = 0 - 1; }
+      if (edge(0x25, &g_kleft) != 0) { set_adjust(g_setrow, 0 - 1, fface, &fsz, &lh, &fidx, &cjidx, fmask, cjmask); last_sig = 0 - 1; }
+      if (edge(0x27, &g_kright) != 0) { set_adjust(g_setrow, 1, fface, &fsz, &lh, &fidx, &cjidx, fmask, cjmask); last_sig = 0 - 1; }
+      if (edge(0x0D, &g_kenter) != 0) {
+        if (g_setrow == 4) { set_adjust(4, 1, fface, &fsz, &lh, &fidx, &cjidx, fmask, cjmask); last_sig = 0 - 1; }
+      }
+      if (edge(0x1B, &g_kesc) != 0) { g_seton = 0; last_sig = 0 - 1; }
+      in->key = 0;                                   // 面板开着时一个字符都不许进正文
+      if (gui_key_pending > 0) { gui_key_pending = 0; }
+      gui_ime_auto_p = gui_ime_auto_n;              // IME 待上屏的字母直接丢弃（不然会落到正文里）
+      if (gui_ime_auto_rn > 0) { gui_ime_auto_rn = 0; }
+  return 0;
+}
+
+// ===== handle_enter_key =====
+//   Enter：查找条开着 ⇒ 下一个命中 / 替换一个 / Ctrl+Enter 全部；否则 Ctrl+Enter = 编译。
+//   ⚠️ 必须用物理轮询 edge（见调用处）：IME 合成中时泵层拿不到 13，两条路只能靠 edge 统一。
+int handle_enter_key(int kctl) {
+  int a = 0;
+    if (g_findon != 0) {
+      if (gui_ime_clen == 0) {
+        if (g_findrep != 0 && kctl != 0) { a = replace_all(); }
+        else if (g_findrep != 0 && g_repf == 1) { a = replace_one(); }
+        else { a = find_next(); }
+        last_sig = 0 - 1;
+      }
+    } else if (kctl != 0) {
+      a = do_compile();
+    }
+  return a;
+}
+
+// ===== handle_find_keys =====
+//   查找/替换条键盘：输入/退格/Enter 下一个（替换模式下 Enter 替换、Ctrl+Enter 全部）/Tab 切换焦点/Esc 关闭
+int handle_find_keys(struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 查找条打开时：键盘全部进查找框（不进正文）——
+    if (in->key != 0 && g_findon != 0) {
+      if (in->key == 27) {
+        g_findon = 0;
+        g_findrep = 0;
+      } else if (in->key == 9) {
+        if (g_findrep != 0) { g_repf = 1 - g_repf; }
+      } else if (in->key == 8) {
+        if (g_findrep != 0 && g_repf == 1) {
+          if (g_replen > 0) { g_replen = g_replen - 1; g_rep[g_replen] = 0; }
+        } else if (g_findlen > 0) {
+          g_findlen = g_findlen - 1;
+          g_find[g_findlen] = 0;
+        }
+      } else if (in->key == 13) {
+        // Enter 不在这里查找：IME 合成中时泵层拿不到 13（被当"上屏"吃掉），统一由下面的 edge(0x0D) 负责
+      } else if (in->key >= 32) {
+        if (g_findrep != 0 && g_repf == 1) {
+          if (g_replen < g_fmax) {
+            g_rep[g_replen] = in->key & 255;
+            g_replen = g_replen + 1;
+            g_rep[g_replen] = 0;
+          }
+        } else if (g_findlen < g_fmax) {
+          g_find[g_findlen] = in->key & 255;
+          g_findlen = g_findlen + 1;
+          g_find[g_findlen] = 0;
+        }
+        if (gui_key_pending > 0) { gui_key_pending = gui_key_pending - 1; }
+      }
+      in->key = 0;
+      last_sig = 0 - 1;
+    }
+  return 0;
+}
+
+// ===== handle_drag_select =====
+//   拖选：按住左键期间光标跟鼠标走（折行处也能选）
+int handle_drag_select(struct Surf *s, struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 拖选：按住左键期间光标跟着鼠标走（整个显示行体系，折行处也能选）——
+    if (g_dragsel != 0) {
+      if ((GetAsyncKeyState(1) & 0x8000) == 0) {
+        g_dragsel = 0;
+      } else {
+        int tr2 = g_scroll + (in->my - top) / lh;
+        if (tr2 < 0) { tr2 = 0; }
+        if (tr2 > g_nrows - 1) { tr2 = g_nrows - 1; }
+        if (tr2 < 0) { tr2 = 0; }
+        g_cur = pos_in_row(s, tr2, in->mx - tx);
+        if (g_cur != g_sel) { g_selon = 1; }
+      }
+    }
+  return 0;
+}
+
+// ===== handle_scrollbar_drag =====
+//   滚动条拖动：按 in->my 反算 g_scroll
+int handle_scrollbar_drag(struct GuiInput *in) {
+  int y = 0;
+  int i = 0;
+  int j = 0;
+    // —— 滚动条拖动：按 in->my 反算 g_scroll（用 GetAsyncKeyState 兜底结束，快甩出窗也不"粘手"）——
+    //   ⚠️ maxs / span 全按**显示行数 g_nrows**，否则软换行后滑块位置和正文对不上。
+    if (sbdrag != 0) {
+      if (in->released == 1 || (GetAsyncKeyState(1) & 0x8000) == 0) {
+        sbdrag = 0;
+      } else {
+        int svis = (edb - top) / lh;
+        int track = sb_top - tbh;
+        int th = sb_thumb_h(track, g_nrows, svis);
+        int span = track - th;
+        int maxs = g_nrows - svis;
+        if (span > 0 && maxs > 0) {
+          int want = in->my - sbgrab - (tbh + MB);   // 目标滑块顶（相对轨道顶）
+          if (want < 0) { want = 0; }
+          if (want > span) { want = span; }
+          g_scroll = (want * maxs) / span;      // 反算首行（+0.5 取舍无所谓：一行一两像素）
+        }
+      }
+    }
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct Surf sf;
+  // ===== VS Code Dark+ 色表（COLORREF = 0x00BBGGRR：低字节 R、第三字节 B）=====
+  //   全 app **只有这一处**定义颜色；绘制处一律 fill_rect(..., c_xxx) / SetTextColor(c_xxx)。
+  // fface / fsz 已提到文件作用域（paint_settings 要读当前字体/字号）
+  // fidx / fmask / cjidx / cjmask 已提到文件作用域（设置面板键盘要用）
+  int cw = 9;
+  int y = 0;
+  int i = 0;
+  int j = 0;
+  int line = 0;
+  // —— 行号列宽自适应：gx = 行号右边界 / tx = 正文起点（gutter_x() 按 g_nlines 位数算，见该函数）——
+  // —— 垂直滚动条拖动状态（放 main 的局部量：全局变量很贵，这里只在循环内用）——
+  // sbdrag / sbgrab 已提到文件作用域（滚动条拖拽跨帧状态）
+  // —— 窗口模式（全屏）——：绘制一律用 W/H，别写字面量 1000/700
+  int act = 0;           // 本帧要执行的菜单动作（菜单点击与快捷键都只设它，统一在此执行）
+  int minreq = 0;        // 本帧刚请求最小化 ⇒ 这一帧不上屏（ULW 会按最小化后的矩形重新定位窗口）
+  int sig = 0;           // 本帧"可见状态"签名（脏判据用）
+  // last_sig 已提到文件作用域（输入处理也要强制重画）
+  int drew = 0;          // 本帧是否真的画过（= 才需要上屏）
+  int firstdone = 0;     // 0 = 启动编译还没跑（第一帧上屏之后才跑，避免"空白窗先出现"）
+  // ime_sx / ime_sy / ime_onwas 已提到文件作用域（paint_caret 要用，跨帧缓存）
+  struct DragSt dg;      // 顶栏拖窗状态（局部 struct 不会清零 ⇒ 进循环前必须显式 dg.on = 0）
+  // —— 软换行 / 选区 / 查找（本轮新增）——
+  int wrapw = 700;       // 正文可用宽度（折行判据；每帧按 tx 与滚动条左边算）
+  int kctl = 0;          // 本帧 Ctrl 是否按着（读一次，别到处 GetAsyncKeyState）
+  // crow 已提到文件作用域（paint_caret 要用）
+  // goalx 已提到文件作用域（方向键上下移动要保持的像素列）
+  int curprev = 0 - 1;   // 上一帧的光标位置（变了才做"滚进可视区"）
+  // —— 边框拖拽缩放状态（自己实现：本窗是无边框 WS_POPUP，系统不给 resize 边框）——
+  int rszon = 0;         // 1 = 正在拖边框
+  int rszl = 0;          // 左边缘参与
+  int rszr = 0;          // 右
+  int rszt = 0;          // 上
+  int rszb = 0;          // 下
+  int rmx0 = 0;          // 按下时的鼠标（屏幕坐标）
+  int rmy0 = 0;
+  int rwx0 = 0;          // 按下时的窗口矩形
+  int rhy0 = 0;
+  int rww0 = 0;
+  int rhh0 = 0;
+  struct PT mpt;         // 边框缩放取鼠标屏幕坐标用（局部 struct 不清零，用前逐字段赋 0）
+  struct RECT wrk;       // 边框缩放取窗口矩形用
+
+  g_src = VirtualAlloc(0, 262144, 0x3000, 4);
+  g_wbuf = VirtualAlloc(0, 8192, 0x3000, 4);
+  g_out = VirtualAlloc(0, 32768, 0x3000, 4);
+  g_term = VirtualAlloc(0, 32768, 0x3000, 4);
+  if (g_term != 0) { g_term[0] = 0; }
+  g_shbuf = VirtualAlloc(0, 8192, 0x3000, 4);   // 持久 shell 的读缓冲（每帧非阻塞读）
+  g_hwnd = g.hwnd;                     // do_save 弹"另存为"要用
+  if (g_src == 0) { return 90; }
+  ap2(g_file, 0, "apps/studio_native/main.fl");
+  // ===== cfg 先读（2026-10-27）：字体/工作区/窗口几何/上次文件/视图记忆 =====
+  //   为什么提前到建窗之前：窗口的 x/y/w/h 要用 cfg 里的值，原来 load_cfg 在 30 行之后才跑，
+  //   那时窗口已经按写死的 1000×700 建好了。cfg 文件很小（≤ 4 KB），读一次就够，不必分两趟。
+  ap2(fface, 0, font_at_idx(0));
+  ap2(g_cjkface, 0, "Noto Sans SC Medium");
+  fsz = 14;
+  load_cfg(fface, &fsz);
+  if (fsz < 10) { fsz = 10; }
+  if (fsz > 26) { fsz = 26; }
+  if (g_fweight < 100) { g_fweight = 400; }
+  if (g_fweight > 900) { g_fweight = 900; }
+  // 上次开的文件还在就接着开它（文件被删/移走 ⇒ 退回默认 main.fl，不许开一个空标题）
+  if (g_lastfile[0] != 0 && std::file_exists(g_lastfile) != 0) { ap2(g_file, 0, g_lastfile); }
+  g_srclen = std::file_read(g_file, g_src, 250000);
+  if (g_srclen < 0) { g_srclen = 0; }
+
+  gui_init(&c);
+  FreeConsole();         // 先扔掉控制台窗：否则双击后屏幕上多一个黑窗（CONSOLE 子系统），还会盖住编辑器
+  gui_frame_set(&c, 30);
+  g.cls = "FLINTSTUDIO";
+  // 窗口几何：恢复上次的位置/大小；越界（换显示器、分辨率变了、上次在副屏）夹回屏幕内，
+  //   否则窗口会开在屏幕外 —— 用户看到的现象就是"IDE 启动没反应"（进程在、窗口看不见）。
+  g.x = g_winx;
+  g.y = g_winy;
+  g.w = g_winw;
+  g.h = g_winh;
+  {
+    int sw2 = GetSystemMetrics(0);
+    int sh2 = GetSystemMetrics(1);
+    if (g.w < 620) { g.w = 620; }
+    if (g.h < 420) { g.h = 420; }
+    if (g.w > sw2) { g.w = sw2; }
+    if (g.h > sh2) { g.h = sh2; }
+    if (g.x < 0 - g.w + 200) { g.x = 0; }
+    if (g.x > sw2 - 200) { g.x = sw2 - 200; }
+    if (g.y < 0) { g.y = 0; }
+    if (g.y > sh2 - 80) { g.y = 0; }
+  }
+  g.alpha = 255;
+  if (!gui_win_make_kbd(&g)) { return 91; }
+  // 边框 5px 内换成缩放光标：本窗是无边框 WS_POPUP，自己的 wndproc 见 WM_SETCURSOR 一律给箭头
+  //   （lib 的行为，见 flgui_win32.fl），所以让垫片子类化一份、只在边框区返回缩放光标。
+  //   返回 1 = 挂钩成功；垫片缺失/失败就只是没有光标提示，拖边框功能照样能用。
+  tx_edge_hook(g.hwnd, 5);
+  // M4s：打开 **auto 档**（中文态下字母立刻可见 / 上屏时撤回，见 lib\flgui_win32.fl 的 auto 段）。
+  //   默认 0 ⇒ 不打开时行为与老版本一字不差（样本、demo 都不受影响）。
+  //   ⚠️ 台账**必须**由 app 给一块堆内存、挂到 `g.imebuf`（库里刻意不放全局数组/全局指针：
+  //     这台编译器全局数据区余量极窄，加 128 B 全局就从仓库根启动崩；而 boot 编译器不支持指针全局）。
+  gui_ime_auto = 1;
+  g.imebuf = VirtualAlloc(0, 256, 0x3000, 4);
+  if (!gui_win_surf(&sf, &g, 0)) { return 92; }
+  // 窗口层级 **auto**：不常驻置顶（否则它一直压着别的窗口；实测"拖别的窗口时 IDE 跟着动"也有它的一份）
+  //   HWND_NOTOPMOST = -2，SWP_NOMOVE|SWP_NOSIZE = 0x0003
+  SetWindowPos(g.hwnd, 0 - 2, 0, 0, 0, 0, 3);
+  gui_win_dpi_apply(&c);
+  // gui_win_surf 默认 fill_a=200（浮窗档的半透明面板）⇒ 编辑器窗口必须改成完全不透明，
+  //   否则整窗 22% 透出桌面（实测症状：窗口里能看到背后聊天窗口的文字）。
+  sf.fill_a = 255;
+  sf.ring_a = 255;
+  // 逻辑宽高跟窗口实际尺寸走（原来只初始化成 1000×700，恢复成别的尺寸后绘制会按错的宽高裁）
+  W = g.w;
+  H = g.h;
+  // 上次是"窗口全屏"档就还原（真全屏 fs=2 不记：它不是一种"常用状态"）
+  if (g_winmax != 0) {
+    fs = 1;
+    set_winmode(&g, 1, &W, &H);
+    g_fsmode = 1;
+  }
+
+  g_txok = 0;
+  if (tx_init() == 0) { g_txok = 1; }
+  if (g_txok != 0) { tx_aa(g_aa); }   // 抗锯齿档要在建字体之前定（GDI 质量写死在句柄里）
+  g_txdy = 2;            // 15px 字 / 21px 行 ⇒ 居中偏移 2（set_font 里同步）
+  if (font_ok(g_cjkface) == 0) { ap2(g_cjkface, 0, "Noto Sans SC Medium"); }   // CJK 字体没装就回默认
+  // 哪些候选真的装了：F9 只在装了的中轮（不装的不进列表 ⇒ 不会静默回退成宋体、也不会卡）
+  {
+    int mi = 0;
+    while (mi < 6) {
+      if (font_ok(font_at_idx(mi)) != 0) { fmask = fmask | (1 << mi); }
+      mi = mi + 1;
+    }
+    if (fmask == 0) { fmask = 1; }
+  }
+  // 汉字段候选同理（Ctrl+F9 只轮装了的）
+  {
+    int ci2 = 0;
+    while (ci2 < 5) {
+      if (font_ok(cjk_at_idx(ci2)) != 0) { cjmask = cjmask | (1 << ci2); }
+      ci2 = ci2 + 1;
+    }
+    if (cjmask == 0) { cjmask = 1; }
+  }
+  // cfg 里的 cjk= 命中候选某档 ⇒ Ctrl+F9 从那接着轮
+  {
+    int cj2 = 0;
+    while (cj2 < 5) {
+      if (t_is(g_cjkface, sl2(g_cjkface), cjk_at_idx(cj2)) != 0) { cjidx = cj2; }
+      cj2 = cj2 + 1;
+    }
+  }
+  // cfg 里写了"没装的字体"⇒ 回默认（否则 GDI 静默变宋体，用户以为换了字体没反应）
+  if (font_ok(fface) == 0) { ap2(fface, 0, font_at_idx(0)); }
+  // cfg 指定的是候选里的某一档 ⇒ 让 F9 从它接着轮
+  {
+    int ci = 0;
+    while (ci < 6) {
+      if (t_is(fface, sl2(fface), font_at_idx(ci)) != 0) { fidx = ci; }
+      ci = ci + 1;
+    }
+  }
+  fsz = set_font(fsz, fface, g_cjkface, &lh);
+  set_ui(g_uipx);                                             // 界面字体（cfg 的 ui=，默认 16）
+  // 唯一填充画刷 = DC_BRUSH（18）。**别写 0** —— GetStockObject(0) 是 WHITE_BRUSH，整片纯白就是它。
+  //   颜色由 gwb_rect_fill 的 SetDCBrushColor(color) 决定 ⇒ 调色板只有字面量一个作者，不会再"改了不生效"。
+  g_br = GetStockObject(18);
+
+  // GDI 画字/画矩形不会写 alpha 字节 ⇒ 未显式覆盖的像素 alpha=0 → ULW 窗口透出桌面。
+  //   一次性把整块 DIB 的 alpha 铺成 255（之后 GDI 只动 RGB，不会再破坏它）。
+  {
+    char *px = sf.bits;
+    int np = (sf.bw * sf.bh) / 4;
+    int i = 0;
+    while (i < np) { px[i * 4 + 3] = 255; i = i + 1; }
+  }
+
+  build_lines();
+  {
+    int wi = 0;
+    while (wi < 2400) { g_lw[wi] = 0 - 1; wi = wi + 1; }
+  }
+  // 撤销 arena：24 槽 × 256KB = 6MB（VirtualAlloc 按需提交）＋ 历史起点 = 打开时的内容
+  g_undo = VirtualAlloc(0, 24 * 262144, 0x3000, 4);
+  if (g_undo != 0) {
+    g_un = 0;
+    g_ui = 0;
+    undo_store(0);
+    g_un = 1;
+    g_ums = 0;
+  }
+  g_cbuf = VirtualAlloc(0, 262144, 0x3000, 4);
+  ap2(g_status, 0, "ready");
+  view_apply(g_file);                                  // 恢复上次的光标/首行（首行由 main 在 wrap 建好后套）
+  tree_open_parents(g_file);                           // 当前文件的父目录先展开（否则树里看不到它）
+  tree_build();                                        // 文件树：扫 CWD（跳过 tmp/.git，只列目录 + .fl）
+  {
+    // 文件树滚回上次的位置 —— 但**当前文件必须看得见**：如果恢复的滚动位置会把当前文件顶出可视区，
+    //   就保留 tree_reveal 给出的位置（VS Code 也是"reveal 优先"）。
+    int ti = tree_reveal(g_file);
+    if (g_treesc > 0) {
+      if (ti < 0 || (ti >= g_treesc && ti < g_treesc + 18)) {
+        g_tscroll = g_treesc;
+        if (g_tscroll > g_tn - 1) { g_tscroll = g_tn - 1; }
+        if (g_tscroll < 0) { g_tscroll = 0; }
+      }
+    }
+  }
+
+  // 拉起 HTTP 服务端子进程：窗口与服务端同生共死（IDE 用一个 exe 启动，后台自带 AI 通道）
+  {
+    char scmd[512];
+    int spi[6];
+    int p2 = 0;
+    int q = 0;
+    p2 = ap2(scmd, 0, "apps\\studio_native\\studio_server.exe");
+    scmd[p2] = 0;
+    q = 0;
+    while (q < 6) { spi[q] = 0; q = q + 1; }
+    if (spawn_new(scmd, spi) != 0) {
+      g_srv = spi[0];
+      g_srvpid = spi[2];
+    }
+  }
+  // 启动即编译一次（输出面板里能直接看到结果）—— 但**挪到第一帧上屏之后**跑，见循环末尾 firstdone
+  dg.on = 0;
+  while (1) {
+    if (gui_win_pump(&g, &in) == 0) {
+      // 正常退出（Alt+F4 / 系统关窗 / WM_QUIT）：先把"看到哪儿、窗口在哪"写回 studio.cfg，
+      //   否则下次启动一切归零（强杀进程走不到这里，这是有意为之：探针 Stop-Process 不污染 cfg）
+      save_cfg(fface, fsz);
+      if (g_shon != 0) { tx_sh_stop(); g_shon = 0; }
+      if (g_srv != 0) { TerminateProcess(g_srv, 0); CloseHandle(g_srv); }
+      return 0;
+    }
+    // 最小化期间：只泵消息、不取输入、不上屏（原理见 main 里 minreq 那行注释）
+    if (IsIconic(g.hwnd) != 0) {
+      last_sig = 0 - 1;        // 还原后强制重画一次（最小化期间没上屏）
+      gui_win_wait(40);
+    } else {
+    gui_win_input(&g, &in);
+    // 持久 shell：每帧非阻塞收一次输出（没在跑就立刻返回；面板关着也照收，重开能看到之前的结果）
+    term_poll();
+    // 本帧 Ctrl 状态（一次读取：后面的快捷键全看它，别每处都去 GetAsyncKeyState）
+    kctl = 0;
+    if ((GetAsyncKeyState(0x11) & 0x8000) != 0) { kctl = 1; }
+    // 行号列宽：输入命中（点击正文/滚动条）也要用**本帧**的 g_nlines 算，否则打开大文件那一帧会按旧列宽落点
+    gx = gutter_x(g_nlines);
+    tx = gx + g_gutterGap;
+    // —— 边框缩放：四边各 5px 内按下就开拖 ——
+    //   为什么自己做：本窗是无边框 WS_POPUP（铺满自绘），系统不给 resize 边框；加 WS_THICKFRAME 会多出
+    //   一圈非客户区、把"客户区坐标 == 绘制坐标"这条前提打破（全 app 的命中判定都依赖它）。
+    //   ⚠️ 必须排在**所有按钮之前**：否则贴边按下的标题栏按钮/滚动条会被当成拖边框。
+    if (in.pressed == 1 && rszon == 0 && fs == 0 && gui_win_click != 0
+        && in.mx >= 0 && in.my >= 0 && in.mx < W && in.my < H) {
+      rszl = 0; rszr = 0; rszt = 0; rszb = 0;
+      if (in.mx < 5) { rszl = 1; }
+      if (in.mx >= W - 5) { rszr = 1; }
+      if (in.my < 5) { rszt = 1; }
+      if (in.my >= H - 5) { rszb = 1; }
+      if (rszl != 0 || rszr != 0 || rszt != 0 || rszb != 0) {
+        mpt.x = 0; mpt.y = 0;
+        wrk.l = 0; wrk.t = 0; wrk.r = 0; wrk.b = 0;
+        GetCursorPos(&mpt);
+        GetWindowRect(g.hwnd, &wrk);
+        rszon = 1;
+        gui_win_click = 0;
+        rmx0 = mpt.x;
+        rmy0 = mpt.y;
+        rwx0 = wrk.l;
+        rhy0 = wrk.t;
+        rww0 = wrk.r - wrk.l;
+        rhh0 = wrk.b - wrk.t;
+        sbdrag = 0;
+        g_dragsel = 0;
+        dg.on = 0;
+      }
+    }
+    // 点菜单外面 = 关菜单（不吞点击，后面的分支照常处理）
+    if (in.pressed == 1 && g_menu != 0) {
+      int inbar = 0;
+      if (in.my >= tbh && in.my < tbh + MB) { inbar = 1; }
+      if (in.my >= tbh + MB && in.my < tbh + MB + 6 + menu_count(g_menu) * 24) { inbar = 1; }
+      if (inbar == 0) { g_menu = 0; last_sig = 0 - 1; }
+    }
+    // —— 设置面板：点它的时候只认面板内部（外面的编辑区/侧栏/滚动条一概不响应）——
+    if (in.pressed == 1 && rszon == 0 && g_seton != 0) {
+      int sw3 = 520;
+      int sh3 = 410;
+      int cx3 = (W - sw3) / 2;
+      int cy3 = (H - sh3) / 2;
+      if (in.mx >= cx3 && in.mx < cx3 + sw3 && in.my >= cy3 && in.my < cy3 + sh3) {
+        if (hit_box(in.mx, in.my, cx3 + sw3 - 34, cy3, cx3 + sw3, cy3 + 46) != 0) {
+          g_seton = 0;                                        // × 关闭
+        } else if (in.my >= cy3 + 58 && in.my < cy3 + 58 + 6 * 44) {
+          int row3 = (in.my - (cy3 + 58)) / 44;
+          if (row3 < 0) { row3 = 0; }
+          if (row3 > 5) { row3 = 5; }
+          g_setrow = row3;
+          if (in.mx >= cx3 + sw3 - 104 && in.mx < cx3 + sw3 - 72) {
+            set_adjust(row3, 0 - 1, fface, &fsz, &lh, &fidx, &cjidx, fmask, cjmask);
+          } else if (in.mx >= cx3 + sw3 - 52 && in.mx < cx3 + sw3 - 20) {
+            set_adjust(row3, 1, fface, &fsz, &lh, &fidx, &cjidx, fmask, cjmask);
+          }
+        }
+        last_sig = 0 - 1;
+      }
+    } else if (in.pressed == 1 && rszon == 0) {
+      if (in.my >= tbh && in.my < tbh + MB) {
+        // 顶栏菜单条：点标题 = 开/切/关（再点同一个关闭）
+        int m2 = 1;
+        int hitm = 0;
+        while (m2 <= 4) {
+          int mx2 = menu_x(&sf, m2);
+          int mw2 = px_cur(&sf, menu_title(m2), sl2(menu_title(m2))) + 24;
+          if (in.mx >= mx2 && in.mx < mx2 + mw2) { hitm = m2; }
+          m2 = m2 + 1;
+        }
+        if (hitm != 0) {
+          if (g_menu == hitm) { g_menu = 0; } else { g_menu = hitm; }
+        } else {
+          g_menu = 0;
+        }
+        last_sig = 0 - 1;
+      } else if (g_menu != 0 && in.my >= tbh + MB && in.my < tbh + MB + 6 + menu_count(g_menu) * 24) {
+        // 下拉项：命中就记动作码（统一在下面执行）
+        int dx3 = menu_x(&sf, g_menu);
+        int dw3 = 250;
+        int r3 = (in.my - (tbh + MB + 3)) / 24;
+        if (dx3 + dw3 > W - 8) { dx3 = W - 8 - dw3; }
+        if (in.mx >= dx3 && in.mx < dx3 + dw3 && r3 >= 0 && r3 < menu_count(g_menu)) {
+          act = menu_act(g_menu, r3);
+        }
+        g_menu = 0;
+        last_sig = 0 - 1;
+      } else if (hit_box(in.mx, in.my, W - 34, 0, W, tbh) != 0) {
+        // 关闭：先存盘（未保存的改动不许因为点 × 就没了），再把视图状态写回 cfg，最后收掉服务端子进程
+        if (g_dirty != 0) { do_save(); }
+        save_cfg(fface, fsz);
+        if (g_shon != 0) { tx_sh_stop(); g_shon = 0; }     // 持久 shell 跟着窗口一起收
+        if (g_srv != 0) { TerminateProcess(g_srv, 0); CloseHandle(g_srv); }
+        return 0;
+      } else if (hit_box(in.mx, in.my, W - 68, 0, W - 34, tbh) != 0) {
+        ShowWindow(g.hwnd, 6);           // SW_MINIMIZE
+        minreq = 1;
+      } else if (hit_box(in.mx, in.my, W - 102, 0, W - 68, tbh) != 0) {
+        // 最大化：在"窗口全屏（工作区）"和"普通"之间切（真全屏走 F11 / Ctrl+F11）
+        if (fs == 1) { fs = 0; } else { fs = 1; }
+        set_winmode(&g, fs, &W, &H);
+        g_fsmode = fs;                  // ⚠️ 必须**在 set_winmode 之后**：它靠 g_fsmode==0 判"要不要记普通档矩形"
+        last_sig = 0 - 1;
+      } else if (hit_box(in.mx, in.my, W - 170, 0, W - 136, tbh) != 0) {
+        // ▶ 运行：编译当前缓冲并开 cmd 窗口执行
+        act = 23;
+        last_sig = 0 - 1;
+      } else if (hit_box(in.mx, in.my, W - 136, 0, W - 102, tbh) != 0) {
+        // 设置：开/关设置面板（标题栏那个齿轮图标，见 draw_ico 的 E713）
+        if (g_seton != 0) { g_seton = 0; } else { g_seton = 1; g_setrow = 0; }
+        last_sig = 0 - 1;
+      } else if (in.mx < g_sideW && in.my >= tbh + MB && in.my < tbh + MB + 28) {
+        // 侧栏头：文件夹图标/工作区名 —— 点它选工作区（等价 Ctrl+Shift+O）
+        do_open_folder(g.hwnd);
+        save_cfg(fface, fsz);
+        last_sig = 0 - 1;
+      } else if (in.mx < g_sideW && in.my >= tbh + MB + 30 && in.my < sb_top - 4) {
+        // 侧栏文件树：点目录 = 展开/折叠；点文件 = 打开（并把它滚进可视区）
+        {
+          int row = g_tscroll + (in.my - (tbh + MB + 30)) / 26;   // 行高 26（与绘制一致）
+          if (row >= 0 && row < g_tn) {
+            char *pp = g_tpath + row * 160;
+            if (g_tdir[row] != 0) {
+              if (dopen_find(pp) >= 0) { dopen_del(pp); } else { dopen_add(pp); }
+              tree_build();
+              if (g_tscroll > g_tn - 1) { g_tscroll = g_tn - 1; }
+              if (g_tscroll < 0) { g_tscroll = 0; }
+            } else {
+              tree_open(pp);
+              tree_reveal(pp);
+            }
+            last_sig = 0 - 1;
+          }
+        }
+      } else if (tbh > 0 && in.my >= 0 && in.my < tbh) {
+        // ⚠️ 只认"鼠标下确实是我们这个窗口"的按下：本库的按下是**全局轮询**（GetAsyncKeyState），
+        //   不判归属的话，按在别的窗口的标题条上、而那一点恰好落进我们顶栏的客户区坐标 ⇒ 两边一起开拖
+        //   （用户实测："两个拖动区重合时，拖别的窗口，IDE 跟着一起动"）。
+        {
+          // 只认"这一下真的落在我们窗口上"（WM_LBUTTONDOWN 由 wndproc 记到 gui_win_click）。
+          //   不做句柄比较：本库的按下是全局轮询，不判归属的话，按在别的窗口标题条上、那点又恰好
+          //   落进我们顶栏的客户区坐标 ⇒ 两个窗口一起被拖（用户实测）。
+          if (gui_win_click != 0) {
+            gui_win_click = 0;
+            dg.h = g.hwnd; dg.w = g.w; dg.ht = g.h;
+            ui_drag_begin(&dg);            // SetCapture ＋ 记锚点
+          }
+        }
+      } else if (in.mx >= W - 14 && in.my >= tbh + MB && in.my < sb_top) {
+        // —— 垂直滚动条（编辑区右边缘 14px）：**必须先于"点击编辑区定位光标"判** ——
+        //   否则点滚动条会顺带把光标挪到那一行（用户会看到"点滚动条光标乱跳"）。
+        //   命中滑块 ⇒ 开始拖动（记住抓点，拖的时候滑块不会跳一下）；命中轨道空白 ⇒ 翻一屏。
+        //   ⚠️ 这里的 n 是**显示行数 g_nrows**（软换行后一行源码可能占好几格）。
+        {
+          int svis = (edb - top) / lh;
+          int track = sb_top - tbh;
+          int th = sb_thumb_h(track, g_nrows, svis);
+          int ty = tbh + MB + sb_thumb_y(track, th, g_nrows, svis, g_scroll);
+          if (in.my >= ty && in.my < ty + th) {
+            sbdrag = 1;
+            sbgrab = in.my - ty;
+          } else {
+            if (in.my < ty) { g_scroll = g_scroll - svis; } else { g_scroll = g_scroll + svis; }
+            if (g_scroll < 0) { g_scroll = 0; }
+            // 翻页上界用"最后一屏的顶行"（n - vis）而不是 n-1：否则翻到底会露出半屏空白，
+            //   而滑块已被 sb_thumb_y 夹在底部 ⇒ 视觉上"滑块到底了、正文却还有空行"。
+            if (g_nrows - svis > 0) { if (g_scroll > g_nrows - svis) { g_scroll = g_nrows - svis; } }
+          }
+        }
+      } else if (g_outlen > 0 && in.mx >= g_sideW && in.my >= edb + 26 && in.my < sb_top - 4) {
+        // —— 输出面板：点诊断行 ⇒ 光标跳到源码对应行列 ——
+        //   面板几何与绘制同源：正文首行 y = edb + 26，行高 16（绘制循环里 y = y + 16）
+        //   ⚠️ 只认「诊断行」：点到说明行/源码回显行不动光标（VS Code 也不动）
+        {
+          int ol = (in.my - (edb + 26)) / 16;
+          int i4 = 0;
+          int j4 = 0;
+          int n4 = 0;
+          int ff = 0;
+          int fl = 0;
+          int ll = 0;
+          int cc = 0;
+          while (i4 < g_outlen) {
+            j4 = i4;
+            while (j4 < g_outlen && g_out[j4] != 10) { j4 = j4 + 1; }
+            if (n4 == ol) {
+              if (j4 > i4) {
+                if (diag_at(g_out + i4, j4 - i4, &ff, &fl, &ll, &cc) != 0) {
+                  diag_jump(g_out + ff, fl, ll, cc);
+                }
+              }
+              break;
+            }
+            i4 = j4 + 1;
+            n4 = n4 + 1;
+          }
+          last_sig = 0 - 1;      // 状态栏可能刚变（jumped to diag）⇒ 必须重画
+        }
+      } else if (g_termon != 0 && in.mx >= g_sideW && in.my >= sb_top - 200 && in.my < sb_top) {
+        g_termfocus = 1;
+        last_sig = 0 - 1;
+      } else if (in.my >= top && in.my < edb) {
+        // 点击编辑区 ⇒ 光标落到该**显示行**该列（此前点哪儿都不动，观感就是"光标不动"）
+        //   Shift+点 = 扩选区；普通点 = 落光标并开始拖选（按住拖出选区，松开结束）
+        {
+          int tr = g_scroll + (in.my - top) / lh;
+          int np2 = 0;
+          int shf = 0;
+          if (tr < 0) { tr = 0; }
+          if (tr > g_nrows - 1) { tr = g_nrows - 1; }
+          if (tr < 0) { tr = 0; }
+          np2 = pos_in_row(&sf, tr, in.mx - tx);   // 点哪儿落哪儿（按像素反查，不按字节整除）
+          if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { shf = 1; }
+          if (shf != 0 && g_selon != 0) {
+            g_cur = np2;
+          } else {
+            g_cur = np2;
+            g_sel = np2;
+            g_selon = 0;
+            g_dragsel = 1;            g_termfocus = 0;
+
+          }
+        }
+      }
+    }
+    handle_scrollbar_drag(&in);
+    handle_drag_select(&sf, &in);
+    // —— 边框缩放：按住左键期间按鼠标位移改窗口矩形（左/上边还要同时挪原点）——
+    if (rszon != 0) {
+      if ((GetAsyncKeyState(1) & 0x8000) == 0) {
+        rszon = 0;
+      } else {
+        int dx = 0;
+        int dy = 0;
+        int nx = 0;
+        int ny = 0;
+        int nw = 0;
+        int nh = 0;
+        mpt.x = 0; mpt.y = 0;
+        GetCursorPos(&mpt);
+        dx = mpt.x - rmx0;
+        dy = mpt.y - rmy0;
+        nx = rwx0; ny = rhy0; nw = rww0; nh = rhh0;
+        if (rszr != 0) { nw = rww0 + dx; }
+        if (rszb != 0) { nh = rhh0 + dy; }
+        if (rszl != 0) { nw = rww0 - dx; nx = rwx0 + dx; }
+        if (rszt != 0) { nh = rhh0 - dy; ny = rhy0 + dy; }
+        if (nw < 620) {
+          if (rszl != 0) { nx = rwx0 + rww0 - 620; }
+          nw = 620;
+        }
+        if (nh < 420) {
+          if (rszt != 0) { ny = rhy0 + rhh0 - 420; }
+          nh = 420;
+        }
+        SetWindowPos(g.hwnd, 0, nx, ny, nw, nh, 0x0014);   // SWP_NOZORDER|SWP_NOACTIVATE
+        W = nw;
+        H = nh;
+        g.w = nw;
+        g.h = nh;
+        last_sig = 0 - 1;            // 尺寸变了：下一帧必须重画
+      }
+    }
+    // —— 滚轮 ——
+    if (handle_wheel(&in, kctl) != 0) { last_sig = 0 - 1; }
+    if (dg.on == 1) {
+      if (in.released == 1) { ui_drag_end(&dg); }
+      else if ((GetAsyncKeyState(1) & 0x8000) == 0) { ui_drag_end(&dg); }   // 轮询兜底：快拖出窗也不"粘手"
+      else { ui_drag_frame(&dg); }
+    }
+
+    // —— Ctrl+字母副作用字符清理 ——
+    handle_dropchar(&in);
+    // —— 设置面板按键 ——
+    if (g_seton != 0) { handle_settings_keys(&in); }
+    // —— 内置终端：键盘进命令行（Esc 回编辑区；Ctrl+` 由快捷键层负责开关）——
+    if (g_termon != 0 && g_termfocus != 0 && g_seton == 0) {
+      if (in.key != 0) {
+        if (in.key == 27) { g_termfocus = 0; }
+        else if (in.key == 8) { if (g_cmdlen > 0) { g_cmdlen = g_cmdlen - 1; g_cmd[g_cmdlen] = 0; } }
+        else if (in.key == 13) {
+          g_cmd[g_cmdlen] = 0;
+          if (g_cmdlen > 0) { term_run(&g_cmd[0]); g_cmdlen = 0; g_cmd[0] = 0; }
+        }
+        else if ((in.key & 255) >= 32 && g_cmdlen < 240) {
+          g_cmd[g_cmdlen] = in.key & 255;
+          g_cmdlen = g_cmdlen + 1;
+          g_cmd[g_cmdlen] = 0;
+        }
+        in.key = 0;
+        if (gui_key_pending > 0) { gui_key_pending = gui_key_pending - 1; }
+        last_sig = 0 - 1;
+      }
+      // ↑↓ 翻命令历史（方向键不产生 WM_CHAR，只能走物理键边沿；终端有焦点时编辑器那段拿不到）
+      if (edge(0x26, &g_kup) != 0) {
+        if (g_histpos > 0) { g_histpos = g_histpos - 1; term_hist_pick(g_histn - 1 - g_histpos); }
+        last_sig = 0 - 1;
+      }
+      if (edge(0x28, &g_kdown) != 0) {
+        if (g_histpos < g_histn - 1) { g_histpos = g_histpos + 1; term_hist_pick(g_histn - 1 - g_histpos); }
+        else { g_histpos = g_histn; g_cmdlen = 0; g_cmd[0] = 0; }
+        last_sig = 0 - 1;
+      }
+      // ⚠️ 库里还有一条"英文直通"的 auto 档：字母不进 in.key，而是排在 gui_ime_auto_p..n，
+      //    由 g_seton==0 里的 IME 块插进正文（实测：终端里打字会有几个字母跑到代码里）。
+      //    ⇒ 面板里有焦点时把这段直接吃掉。
+
+      while (gui_ime_auto_p < gui_ime_auto_n) {
+        int ac = g.imebuf[gui_ime_auto_p] & 255;
+        gui_ime_auto_p = gui_ime_auto_p + 1;
+        if (ac == 8) { if (g_cmdlen > 0) { g_cmdlen = g_cmdlen - 1; g_cmd[g_cmdlen] = 0; } }
+        else if (ac >= 32 && g_cmdlen < 240) {
+          g_cmd[g_cmdlen] = ac;
+          g_cmdlen = g_cmdlen + 1;
+          g_cmd[g_cmdlen] = 0;
+        }
+      }
+      last_sig = 0 - 1;
+    }
+    if (g_seton == 0) {    // —— IME 输入：**查找条打开时进查找串，不进正文** ——
+    //   ⚠️ 这一条是实测补的：中文输入法在"英文直通"态下，字母走的是库层的 auto 档（`gui_ime_auto_buf`），
+    //      不经过 `in.key` ⇒ 只看 `in.key` 的查找框拦不住它们，实测在查找框里敲 `int` 会往正文插 3 个字节
+    //      （ai.state: srclen 36674→36677，cur 119→122，而查找框是空的）。
+    if (g_findon != 0) {
+      if (gui_ime_auto_p < gui_ime_auto_n) {
+  
+      while (gui_ime_auto_p < gui_ime_auto_n) {
+          int ac0 = g.imebuf[gui_ime_auto_p] & 255;
+          gui_ime_auto_p = gui_ime_auto_p + 1;
+          if (ac0 >= 32 && g_findlen < 60) {
+            g_find[g_findlen] = ac0;
+            g_findlen = g_findlen + 1;
+            g_find[g_findlen] = 0;
+          }
+        }
+        last_sig = 0 - 1;
+      }
+      if (gui_ime_auto_rn > 0) {
+        int rk0 = gui_ime_auto_rn;
+        int ok0 = 1;
+        int q7 = 0;
+        gui_ime_auto_rn = 0;
+        if (rk0 > g_findlen) { ok0 = 0; }
+        if (ok0 != 0) {
+          while (q7 < rk0) {
+            if ((g_find[g_findlen - rk0 + q7] & 255) != (g.imebuf[64 + q7] & 255)) { ok0 = 0; }
+            q7 = q7 + 1;
+          }
+        }
+        if (ok0 != 0) { g_findlen = g_findlen - rk0; g_find[g_findlen] = 0; last_sig = 0 - 1; }
+      }
+      if (gui_ime_rlen > 0) {          // 上屏结果（中文）也进查找串
+        int ik0 = 0;
+        while (ik0 < gui_ime_rlen) {
+          int ac1 = gui_ime_res[ik0] & 255;
+          if (ac1 >= 32 && g_findlen < 60) {
+            g_find[g_findlen] = ac1;
+            g_findlen = g_findlen + 1;
+            g_find[g_findlen] = 0;
+          }
+          ik0 = ik0 + 1;
+        }
+        gui_ime_rlen = 0;
+        last_sig = 0 - 1;
+      }
+    } else if (gui_ime_auto_p < gui_ime_auto_n) {
+      // —— auto 档：库层记下的"立刻可见"字母 ——
+      //   为什么要 app 取：库层只在泵里**记账**（`gui_ime_auto_buf`），插进正文必须在这里做。
+      //   每帧**一次取完**（不是一帧一个）：连打时泵一批会产出多个字母，取一个会丢后面的。
+      //   取走即把 `gui_ime_auto_p` 往前推 —— 它就是库层算撤回量时的"已落盘"下标。
+      int any2 = 0;
+
+      while (gui_ime_auto_p < gui_ime_auto_n) {
+        int ac = g.imebuf[gui_ime_auto_p] & 255;
+        gui_ime_auto_p = gui_ime_auto_p + 1;
+        ins_byte(g_cur, ac);
+        g_cur = g_cur + 1;
+        any2 = 1;
+      }
+      if (any2 != 0) { undo_push(); rebuild(1); }
+    }
+    handle_find_keys(&in);
+    // —— 键盘编辑 ——
+    handle_edit_keys(&in, kctl);
+    // —— IME auto 档撤回 ——
+    handle_ime_recall(&in, &g);
+    // —— IME 上屏结果 ——
+    handle_ime_commit(&in);
+    // —— 方向键 ——
+    handle_arrow_keys(&sf, &in, kctl);
+    // —— 快捷键（编辑类）——
+    {
+      int a2 = handle_shortcuts(&sf, &in, kctl, &g);
+      if (a2 != 0) { act = a2; }
+    }
+    // —— 全屏：F11 = 窗口全屏（铺工作区，留标题栏/状态栏）／Ctrl+F11 = 真全屏（整屏，藏标题栏/状态栏）／Esc 退出 ——
+    if (edge(0x7A, &g_kf11) != 0) {
+      int want = 1;
+      if ((GetAsyncKeyState(0x11) & 0x8000) != 0) { want = 2; }
+      if (fs == want) { want = 0; }
+      fs = want;
+      set_winmode(&g, fs, &W, &H);
+      g_fsmode = fs;           // 同上：先切窗口再记档位（set_winmode 靠它判"要不要留普通档矩形"）
+      last_sig = 0 - 1;        // 尺寸变了必须重画（sig 里没有 W/H）
+    }
+    if (edge(0x1B, &g_kesc) != 0) {
+      if (g_findon != 0) {                     // 先关查找条（别顺手退出全屏）
+        g_findon = 0; g_findrep = 0;
+        last_sig = 0 - 1;
+      } else if (fs != 0) {
+        fs = 0;
+        set_winmode(&g, fs, &W, &H);
+        g_fsmode = 0;
+        last_sig = 0 - 1;
+      }
+    }
+    // —— 自定义字体：Ctrl+= 放大 / Ctrl+- 缩小 / Ctrl+0 复位 15 / F9 换字体族（都写回 studio.cfg）——
+    if (edge(0xBB, &g_kplus) != 0) {
+      if ((GetAsyncKeyState(0x11) & 0x8000) != 0) {
+        fsz = set_font(fsz + 1, fface, g_cjkface, &lh);
+        save_cfg(fface, fsz);
+        last_sig = 0 - 1;
+      }
+    }
+    if (edge(0xBD, &g_kminus) != 0) {
+      if ((GetAsyncKeyState(0x11) & 0x8000) != 0) {
+        fsz = set_font(fsz - 1, fface, g_cjkface, &lh);
+        save_cfg(fface, fsz);
+        last_sig = 0 - 1;
+      }
+    }
+    if (edge(0x30, &g_kzero) != 0) {
+      if ((GetAsyncKeyState(0x11) & 0x8000) != 0) {
+        fsz = set_font(15, fface, g_cjkface, &lh);
+        save_cfg(fface, fsz);
+        last_sig = 0 - 1;
+      }
+    }
+    if (edge(0x78, &g_kf9) != 0) {
+      // 字体切换**已搬进设置页**（2026-10-26）：F9 不再"盲轮"一档一档试，改成直接开设置面板 ——
+      //   原来 F9/Ctrl+F9 看不到当前值、也不知道候选里有哪几档；现在五行设置一眼可见、←→ 直接挑。
+      //   （Ctrl+F9 的汉字段轮换同样并入面板第 2 行；g_kf9c 保留变量但不再驱动任何行为）
+      g_seton = 1;
+      g_setrow = 0;
+      ap2(g_status, 0, "settings");
+      last_sig = 0 - 1;
+    }
+    // Ctrl+1..9 打开左栏第 N 个文件
+    {
+      int d = 0;
+      while (d < 9) {
+        if (edge(0x31 + d, &g_kdig[d]) != 0) {
+          if ((GetAsyncKeyState(0x11) & 0x8000) != 0) {
+            if (d < g_tn && g_tdir[d] == 0) {
+              tree_open(g_tpath + d * 160);
+              tree_reveal(g_tpath + d * 160);
+              last_sig = 0 - 1;
+            }
+          }
+        }
+        d = d + 1;
+      }
+    }
+    }   // ← 关掉上面 `if (g_seton == 0) {`（设置面板开着时整段键盘处理跳过）
+
+    // ===== 菜单动作执行（鼠标点菜单 / 快捷键都只设 act，这里统一做）=====
+    if (act != 0) {
+      // 弹过对话框的动作结束后要清掉排队里的按键：否则 Ctrl+S 的 's' 会在大对话框关掉后才被处理、插进正文
+      if (act == 1) { do_new_file(); }
+      else if (act == 2) { do_open_dlg(g.hwnd); }
+      else if (act == 3) { do_open_folder(g.hwnd); save_cfg(fface, fsz); }
+      else if (act == 4) { do_save(); }
+      else if (act == 5) { do_save_as(g.hwnd); }
+      else if (act == 6) { undo_do(); }
+      else if (act == 7) { redo_do(); }
+      else if (act == 8) { find_open(); }
+      else if (act == 9) { do_compile(); }
+      else if (act == 10) {
+        if (g_termon != 0) { g_termon = 0; g_termfocus = 0; }
+        else { g_termon = 1; g_termfocus = 1; }
+      }
+      else if (act == 11) { term_spawn_cmd(); }
+      else if (act == 12) {
+        if (g_wrapmode != 0) { g_wrapmode = 0; } else { g_wrapmode = 1; }
+        g_needwrap = 1;
+        save_cfg(fface, fsz);
+      }
+      else if (act == 13) { if (g_seton != 0) { g_seton = 0; } else { g_seton = 1; g_setrow = 0; } }
+      else if (act == 20) {
+        if (g_dirty != 0) { do_save(); }
+        save_cfg(fface, fsz);          // 菜单「退出」也把视图状态落盘（与标题栏 × 同一条口径）
+        if (g_shon != 0) { tx_sh_stop(); g_shon = 0; }
+        if (g_srv != 0) { TerminateProcess(g_srv, 0); CloseHandle(g_srv); }
+        return 0;
+      }
+      else if (act == 21) { g_sel = 0; g_cur = g_srclen; g_selon = 1; }
+      else if (act == 22) { g_outlen = 0; g_nerr = 0; g_oscroll = 0; }
+      else if (act == 23) { do_run(0); }
+      else if (act == 24) { do_run(1); }
+      if (act == 2 || act == 3 || act == 4 || act == 5) {
+        in.key = 0;
+        if (gui_key_pending > 0) { gui_key_pending = 0; }
+      }
+      last_sig = 0 - 1;
+      act = 0;        // ⚠️ 必须每帧清掉：这是 main 的局部量（只初始化一次），不清就会**每帧重复执行**同一个动作
+    }
+
+    // ===== 布局几何：**必须在输入处理之后、绘制之前**推 =====
+    //   ⚠️ 上一版放在 gui_win_input 之前 ⇒ 按 F11/Ctrl+F11 那一帧的 tbh/sbh 还是旧值，
+    //      toggle 只把 last_sig 打成 -1 强制重画 ⇒ 画出来的仍是"带标题栏/状态栏"的帧，之后 sig 又不跳变
+    //      ⇒ 真全屏里标题栏/状态栏**永远不消失**（实测截图像素 y=5..33 = #3C3C3C、y=1025.. = #007ACC）。
+    //   代价：同一帧的点击命中用的是上一帧几何 —— 尺寸刚变的那一帧误差 ≤ 40px，人手不可感知。
+    tbh = g_titleH; sbh = g_statusH;
+    if (fs == 2) { tbh = 0; sbh = 0; }
+    top = tbh + MB + g_textGap;
+    sb_top = H - sbh;
+    if (g_termon != 0) { edb = sb_top - 200; }
+    else if (g_outlen > 0) { edb = sb_top - 168; }
+    else { edb = sb_top; }
+    // 行号列宽跟"本帧的行数"走（输入阶段可能刚打开大文件/刚插了换行）⇒ 绘制前重算一次，
+    //   保证行号右边界、正文起点、光标 x、IME 位置、滚动条反算全都是同一对 gx/tx。
+    gx = gutter_x(g_nlines);
+    tx = gx + g_gutterGap;
+    // 查找条占正文最上面 26px（打开时正文整体下移，避免压住第一行）
+    top = top + findbar_h();
+    // —— 软换行：可用宽度 = 正文左边界 .. 滚动条左边（-18 留出滚动条 14px + 4px 余量）——
+    //   只在"行表变了 / 宽度变了"时重建（g_needwrap），不是每帧都量。
+    wrapw = (W - 18) - tx;
+    if (wrapw < 80) { wrapw = 80; }
+    if (g_needwrap != 0 || wrapw != g_wrapw) {
+      wrap_build(&sf, wrapw);
+      g_wrapw = wrapw;
+      g_needwrap = 0;
+      last_sig = 0 - 1;
+    }
+    // 恢复"上次看到第几行"：显示行表刚建好，源码行号 → 显示行才能换算（cfg 的 vf= 记的是源码行）
+    //   ⚠️ 必须紧跟 wrap_build，且把 curprev 对齐到 g_cur：否则下面那段"保证光标可见"会把
+    //      恢复好的滚动位置再拽回光标所在行（等于滚动位置白记）。
+    if (g_pendline >= 0) {
+      int pl = g_pendline;
+      if (pl > g_nlines - 1) { pl = g_nlines - 1; }
+      if (pl < 0) { pl = 0; }
+      if (g_nlines > 0) { g_scroll = g_lrow[pl]; }
+      g_pendline = 0 - 1;
+      curprev = g_cur;
+    }
+    vis = (edb - top) / lh;
+    if (vis < 1) { vis = 1; }
+    // 光标移动过 ⇒ 保证它留在可视区（打字打到屏幕底下会自动滚一行；查找跳转也靠这条）
+    crow = row_of_pos(g_cur);
+    if (g_cur != curprev) {
+      if (crow < g_scroll) { g_scroll = crow; }
+      if (crow > g_scroll + vis - 1) { g_scroll = crow - vis + 1; }
+      curprev = g_cur;
+    }
+    if (g_scroll < 0) { g_scroll = 0; }
+    if (g_nrows > 0 && g_scroll > g_nrows - 1) { g_scroll = g_nrows - 1; }
+    if (g_scroll < 0) { g_scroll = 0; }
+    // 括号匹配：光标左边那个字节优先（刚打完的括号），否则看右边那个
+    g_bra = 0 - 1;
+    g_brb = 0 - 1;
+    if (g_cur > 0) {
+      if (br_match(g_cur - 1) == 0) {
+        if (g_cur < g_srclen) { br_match(g_cur); }
+      }
+    } else if (g_cur < g_srclen) {
+      br_match(g_cur);
+    }
+
+    // ⚠️ 整帧跳过绘制（拖动中）：`gwb_rect_fill` 的 a<255 会走**逐像素 blend**（1000×700 ≈ 70 万像素/帧，
+    //   FLINT 标量循环 ⇒ 单核 90%+ 全耗在这），这就是"拖动发粘 / 打字一顿一顿"的真正主项。
+    //   ⇒ 全部改成 a=255（走 GDI FillRect，一帧几毫秒；整幅不透明度另有 surf_alpha 负责，观感不变）。
+    // 脏判据：只有"看得见的东西变了"才重画（光标/长度/行数/滚动/输出/文件表/状态栏/鼠标位置/按键）
+    //   —— 之前是每帧无条件重画 1000×700（30fps ⇒ 空闲白烧 ~70% 单核，风扇响、打字顿）
+    sig = g_cur + g_srclen * 3 + g_nlines * 7 + g_scroll * 13 + g_outlen * 17 + g_tn * 19 + g_tscroll * 23 + g_oscroll * 29 + in.mx * 101 + in.my * 103;
+    sig = sig + g_termlen * 31 + g_shon * 37;        // 终端有新输出 / shell 启停 ⇒ 必须重画
+    sig = sig + g_nerr * 71;
+    sig = sig + g_seton * 89 + g_setrow * 97;            // 设置面板开关/选中行
+    sig = sig + g_status[0] + g_status[1] * 3 + g_status[4] * 5 + g_status[7] * 7 + g_status[10] * 11;
+    sig = sig + gui_ime_on * 5 + gui_ime_clen * 23;      // 合成串开始/结束也要重画
+    sig = sig + fs * 37 + W * 3 + H * 5;                 // 模式/尺寸变了也必须重画
+    sig = sig + g_selon * 41 + g_sel * 43 + g_findon * 47 + g_findlen * 53 + g_nrows * 59 + g_findrep * 61 + g_replen * 67 + g_repf * 71;
+    if (dg.on == 0) {
+    if (sig != last_sig) {
+    last_sig = sig;
+    drew = 1;
+    // ===== VS Code Dark+：配色 / 分层 / 多字体（COLORREF = 0x00BBGGRR）=====
+    //   所有填充都走 fill_rect(..., c_xxx)：它内部是 DC_BRUSH + SetDCBrushColor ⇒ 颜色**只由字面量决定**。
+    //   （上一版白底的坑：gwb_rect_fill 传实心画刷时忽略 color，真正上色的是 CreateSolidBrush 定死的句柄色
+    //     ⇒ 改字面量不生效、拿错/换错画刷就整片浅底。现在没有第二套画刷，这类事故从结构上消失。）
+    fill_rect(&sf, 0, 0, W, H, c_bg);                   // 整幅铺底（任何缝隙都不许透出桌面）
+    fill_rect(&sf, 0, 0, W, tbh, c_title);              // 标题栏
+    fill_rect(&sf, 0, tbh - 1, W, tbh, c_line);         // 标题栏下描边
+    fill_rect(&sf, 0, tbh + MB, g_sideW, sb_top, c_side);    // 侧栏（菜单条以下铺到状态栏）
+    fill_rect(&sf, g_sideW, tbh + MB, W, sb_top, c_bg);      // 编辑区
+    fill_rect(&sf, g_sideW - 1, tbh + MB, g_sideW, sb_top, c_line);  // 侧栏右描边
+
+    // —— 标题栏：品牌 + 当前文件 + 运行/设置 + 最小化/最大化/关闭 ——
+    if (tbh > 0) { paint_title(&sf, W, tbh, &in); }
+
+
+
+    // —— 侧栏：头部（打开文件夹）＋ 文件树 ——
+    paint_sidebar(&sf, tbh, MB, sb_top, &in);
+
+    // —— 查找条（Ctrl+F）——
+    paint_findbar(&sf, &in);
+
+    // —— 编辑区：底色 + 选区 + 行号 + 正文 + 光标 ——
+    paint_editor(&sf, &in, &g);
+
+    // —— 输出面板（有输出时占底部）——
+    paint_output(&sf, &in);
+
+    // —— 内置终端面板（Ctrl+`）——
+    paint_terminal(&sf, &in);
+
+    // —— 垂直滚动条 ——
+    paint_scrollbar(&sf, &in);
+
+    // —— 状态栏 ——
+    paint_status(&sf);
+
+    // —— 设置面板（标题栏滑杆图标开 / Esc 或 × 关）：卡片式，五行设置项 ——
+    //   为什么画在这里：它在最上层（覆盖编辑区/输出面板/状态栏），且走 GDI（不进 D2D 的 Begin/End）
+    // —— 设置面板（标题栏滑杆图标开 / Esc 或 × 关）——
+    if (g_seton != 0) { paint_settings(&sf, &in); }
+    }
+    }
+
+    // —— 顶栏菜单条：文件 / 编辑 / 运行 / 视图 ——
+    paint_menu(&sf, &in);
+    // 状态快照给探针当**判据通道**（ai.state 每行 "ST cur line col nlines srclen nrows selon"）：
+    //   软换行/选区都是屏幕上看不出精确值的量，有了这一行探针就能直接读数字，不用 OCR。
+    ai_state(g_cur, ln, col, g_nlines, g_srclen, g_nrows, g_selon);
+    // 滚动位置（另起一行 SC）：首行源码行号 / 首显示行 / 待恢复行 —— 只在变化时写
+    {
+      int tl = row_line(g_scroll);
+      if (tl != g_asc || g_pendline != g_ascpend) {
+        ai_scroll(tl, g_scroll, g_pendline);
+        g_asc = tl;
+        g_ascpend = g_pendline;
+      }
+    }
+    // 终端状态（同样只在变化时写）：shell 在跑 / 输出字节数 / 命令行长度
+    if (g_termlen != g_astm || g_shon != g_astm2) {
+      ai_term(g_shon, g_termlen, g_cmdlen);
+      g_astm = g_termlen;
+      g_astm2 = g_shon;
+    }
+    if (minreq != 0) {
+      minreq = 0;             // 最小化那一帧不许上屏，否则 ULW 按最小化矩形重定位窗口（还原后会跑到屏外）
+    } else if (dg.on != 0) {
+      // 拖动中整帧不上屏：跳过 alpha 合成 ＋ 2.8 MB ULW 上传（那才是"拖动发粘"的主项）；
+      //   窗口靠 MoveWindow 跟手，像素还是上一帧的（内容没变，肉眼看不出）
+    } else if (drew != 0) {
+      gui_win_show(&sf);      // 只有真画过才上屏（不画也上屏 = 每帧白做 70 万像素 alpha ＋ 2.8 MB 传输）
+    }
+    // 启动后的第一次编译挪到"第一帧画完"之后（2026-10-27）：原来它在进循环之前同步跑，
+    //   窗口已 CreateWindowEx 显示但一帧都没画 ⇒ 用户先看到 1~2 秒的空白窗口/行号，
+    //   然后才"刷新出文本"（用户报的"刚进入时文本栏不刷新"就是这个顺序问题）。
+    if (firstdone == 0) { firstdone = 1; do_compile(); last_sig = 0 - 1; }
+    drew = 0;
+    if (dg.on != 0) { last_sig = 0 - 1; gui_win_wait(1); } else { gui_win_frame_wait(&c); }
+    }
+  }
+  return 0;
+}

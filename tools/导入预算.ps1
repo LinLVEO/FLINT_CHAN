@@ -2,23 +2,25 @@
 #
 # 为什么有它（2026-10-12 · 可用性路线图 P1）：
 #   项目纪律写着「每加一批 API 前先 objdump -p <产物> 数条目」，但那是手工活；
-#   而 pe.c 的 MAX_IMPORTS=96 / MAX_GROUPS=8 是**硬上限** —— 顶爆时"最重的那个 app 先炸"。
-#   本脚本把这条纪律变成**可跑的仪器**，并把上限**从真值源读出来**（不写死）。
+#   而 pe.c 的 MAX_IMPORTS=96 / MAX_GROUPS=8 曾是**硬上限** —— 顶爆时"最重的那个 app 先炸"。
+#   本脚本把这条纪律变成**可跑的仪器**，并把预算**从真值源读出来**（不写死）。
+#   ⚠️ 2026-10-24（容量第二批）：导入表改成**按实际用量分配**后，96/8 **不再是硬上限**，
+#      超出照样编得过 —— 本脚本因此是**记账/预警**仪器，不是"会不会编不过"的判据。
 #
 # 真值源 = src\pe.c 的 MAX_IMPORTS / MAX_GROUPS（同族纪律：守卫阈值必须与真值源同源）。
 #
 # ⚠️ 两条诚实边界（2026-10-12 首次实跑发现）：
-#   ① **不是所有 .exe 都是 FLINT 产物**（例：PresentMon.exe 是 Intel 的、flint.exe 是 gcc 编的）
+#   ① **不是所有 .exe 都是 FLINT 产物**（例：PresentMon.exe 是 Intel 的、hlc.exe 是 gcc 编的）
 #      ⇒ 判据 = objdump 报的「There is an import table in <.节>」：**.text = FLINT 家族**，
 #        其余（.idata / .rdata）算外来，**只列不计限**。
-#   ② **boot 产物可能超过 96**（boot 侧上限与真 flint 不同；历史上实测 boot 产物 97 条 —— "boot 更宽"是纪律允许的方向）
-#      ⇒ 对 FLINT 家族里 ≥96 的，本脚本报 `AT/OVER-LIMIT?`（**带问号 = 需人归因**，不当场判违规）。
+#   ② **boot 产物与真 flint 的预算口径不同**（boot 侧 `cap_imps()=2048`；历史上实测 boot 产物 97 条 ——
+#      "boot 更宽"是纪律允许的方向）⇒ 对 ≥ 软预算的，本脚本报 `AT/OVER-BUDGET?`（**带问号 = 需人归因**）。
 #
 # 用法：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\导入预算.ps1
 #   powershell ... -File tools\导入预算.ps1 -Exe apps\winpanel\winpanel.exe
 #   powershell ... -File tools\导入预算.ps1 -Json
-# 退出码：FLINT 家族全部在上限内侧 = 0；有触顶/超限（需归因）= 1；仪器自身出问题 = 2。
+# 退出码：FLINT 家族全部在软预算内侧 = 0；超预算（需归因，**不是编译失败**）= 1；仪器自身出问题 = 2。
 
 param(
   [string[]]$Exe = @(),

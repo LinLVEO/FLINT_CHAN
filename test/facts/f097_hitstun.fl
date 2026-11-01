@@ -1,0 +1,46 @@
+// f097_hitstun.fl -- 受击反应（2026-11-01）：硬直帧数 + 击退方向 + 速度衰减
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  face=1 -> vx = +8*65536
+//   bit1  face=0 -> vx = -8*65536
+//   bit2  初始硬直 == 10
+//   bit3  tick 一帧 -> 硬直 9
+//   bit4  击退衰减：8 -> 6（×3/4）
+//   bit5  10 次 tick 后硬直归 0
+//   bit6  硬直期间 vx 仍非 0（还在被推）
+//   bit7  继续 tick 后 vx 趋近 0（< 1 像素/帧）
+include "../../lib/hitstun.fl"
+
+int main() {
+  struct HitStun a;
+  struct HitStun b;
+  int mask = 0;
+  int i = 0;
+
+  hitstun_start(&a, 1, 8);
+  if (a.vx == 8 * 65536) { mask = mask | 1; }
+  if (a.stun == 10) { mask = mask | 4; }
+
+  hitstun_start(&b, 0, 8);
+  if (b.vx == 0 - 8 * 65536) { mask = mask | 2; }
+
+  hitstun_tick(&a);
+  if (a.stun == 9) { mask = mask | 8; }
+  if (a.vx == 6 * 65536) { mask = mask | 16; }
+
+  i = 0;
+  while (i < 9) { hitstun_tick(&a); i = i + 1; }
+  if (a.stun == 0) { mask = mask | 32; }
+
+  i = 0;
+  while (i < 10) { hitstun_tick(&b); i = i + 1; }
+  if (b.vx != 0 && b.stun == 0) { mask = mask | 64; }
+
+  i = 0;
+  while (i < 12) { hitstun_tick(&b); i = i + 1; }
+  if (b.vx < 65536) { mask = mask | 128; }
+
+  print(["f097 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

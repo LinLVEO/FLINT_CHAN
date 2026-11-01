@@ -1,0 +1,26 @@
+// try1.fl -- v2.0.0 try 错误传播糖：三层函数，错误码一路 return
+// 成功路径 0，失败路径 -7；stdout 必须逐字节是 "ok=0 bad=-7\n"，exit 42
+int step3(int x) {
+  if (x < 0) { return 0 - 7; }
+  return 0;
+}
+
+int step2(int x) {
+  int e = 0;
+  try e = step3(x);
+  return 0;
+}
+
+int step1(int x) {
+  int e = 0;
+  try e = step2(x);
+  return 0;
+}
+
+int main() {
+  int ok = step1(5);
+  int bad = step1(0 - 5);
+  print(["ok=", ok, " bad=", bad, "\n"]);
+  if (ok == 0 && bad == 0 - 7) { return 42; }
+  return 1;
+}

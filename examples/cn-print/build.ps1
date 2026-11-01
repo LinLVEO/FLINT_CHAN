@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 $name    = 'cn-print'
 $here    = $PSScriptRoot
 $root    = Split-Path -Parent (Split-Path -Parent $here)
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $gen     = Join-Path $here 'gen-gbk.ps1'
 $txtSrc  = Join-Path $here 'text.txt'
 $genFl   = Join-Path $here 'cn_gen.fl'
@@ -26,8 +26,8 @@ $exe     = Join-Path $here "$name.exe"
 $outFile = Join-Path ([System.IO.Path]::GetTempPath()) ("${name}.stdout.bin")
 
 if (-not (Test-Path $flint)) {
-  Write-Host "FAIL: flint.exe not found at $flint"
-  Write-Host "      build it first: cmd /c `"gcc -O2 src\*.c -o flint.exe`"   (run from the repo root)"
+  Write-Host "FAIL: hlc.exe not found at $flint"
+  Write-Host "      build it first: cmd /c `"gcc -O2 src\*.c -o hlc.exe`"   (run from the repo root)"
   exit 1
 }
 
@@ -56,7 +56,7 @@ foreach ($f in @($genFl, $src)) {
 # ---- 3) compile + run --------------------------------------------------------------------
 # -o gives the product the example's own name; without it flint names the exe after the source (main.exe).
 & $flint $src -o $exe
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: flint.exe exit=$LASTEXITCODE"; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: hlc.exe exit=$LASTEXITCODE"; exit 1 }
 if (-not (Test-Path $exe)) { Write-Host "FAIL: no $exe produced"; exit 1 }
 
 $proc = Start-Process -FilePath $exe -NoNewWindow -RedirectStandardOutput $outFile -Wait -PassThru

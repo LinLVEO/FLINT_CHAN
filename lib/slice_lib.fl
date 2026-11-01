@@ -20,7 +20,7 @@
 //   std::str_init(&s, 0);
 //   std::str_addn(&s, doc + 3, 3);        // str_addn 的 n 就是给切片预留的入口
 //
-// 边界（本机实测口径：真编译器 flint.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
+// 边界（本机实测口径：真编译器 hlc.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
 // 或「未测」—— 探针 test\facts\f019_slice.fl 全程可复现，两端 stdout 逐字节相同）：
 //   * struct 字段不支持 char*：真 flint **实测**报错（dstr_lib/buf_lib 文件头记的是
 //     "char 指针字段暂不支持（v1.0.5）"，boot 端放行 —— 两端分叉）⇒ 本库的基址字段是 `int *p`；

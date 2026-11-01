@@ -1,0 +1,86 @@
+// f053_errprop.fl -- v2.0.0 try 错误传播糖探针（8 位掩码，全亮退 42）
+//   每一位一格，绝不写成一个总和（失败时打印 mask，红的位一眼可见）
+//   bit0 成功路径：try 之后同函数里的后续语句照常执行
+//   bit1 失败路径：错误从最内层一路 return，中间层的后续语句一条都不执行
+//   bit2 错误码原样传回（-9，不是被压成 -1）
+//   bit3 正数错误码也照样传（约定 = 非 0 即错，不是"负数才错"）
+//   bit4 循环里第一次失败就停（后面的迭代不再执行）
+//   bit5 连续两个 try：第一个成功、第二个失败 → 返回第二个的错误码
+//   bit6 连续两个 try 都成功 → 返回 0，且两次调用都真的发生了
+//   bit7 try 不影响同函数里的其它局部量（不会被莫名清 0）
+int g_deep = 0;   // deep 的调用次数（只数最内层，中间层副作用走 g_side）
+int g_side = 0;   // 中间层的副作用计数（失败时这些加号一条都不该执行）
+
+int deep(int x) {
+  g_deep = g_deep + 1;
+  if (x == 13) { return 0 - 9; }
+  if (x == 17) { return 5; }
+  return 0;
+}
+
+int mid(int x) {
+  int e = 0;
+  try e = deep(x);
+  g_side = g_side + 10;      // 失败时这行不该执行
+  return 0;
+}
+
+int top(int x) {
+  int e = 0;
+  try e = mid(x);
+  g_side = g_side + 100;     // 失败时这行不该执行
+  return 0;
+}
+
+int two(int x, int y) {
+  int e = 0;
+  try e = deep(x);
+  try e = deep(y);
+  return 0;
+}
+
+int main() {
+  int mask = 0;
+  int r = 0;
+  int keep = 1234;
+
+  g_deep = 0;
+  g_side = 0;
+  r = top(1);
+  if (r == 0 && g_deep == 1 && g_side == 110) { mask = mask + 1; }
+
+  g_deep = 0;
+  g_side = 0;
+  r = top(13);
+  if (r == 0 - 9 && g_deep == 1 && g_side == 0) { mask = mask + 2; }
+
+  if (r == 0 - 9) { mask = mask + 4; }
+
+  r = top(17);
+  if (r == 5) { mask = mask + 8; }
+
+  g_deep = 0;
+  int i = 0;
+  int hits = 0;
+  while (i < 5) {
+    int q = top(i + 11);
+    if (q != 0) { hits = hits + 1; i = 99; }
+    i = i + 1;
+  }
+  if (hits == 1 && g_deep == 3) { mask = mask + 16; }
+
+  g_deep = 0;
+  r = two(1, 13);
+  if (r == 0 - 9 && g_deep == 2) { mask = mask + 32; }
+
+  g_deep = 0;
+  r = two(1, 2);
+  if (r == 0 && g_deep == 2) { mask = mask + 64; }
+
+  try r = deep(1);
+  if (keep == 1234 && r == 0) { mask = mask + 128; }
+
+  print(["mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

@@ -1,0 +1,47 @@
+// mapload.fl -- 从 ASCII 文本读 tile 地图（M1 文件管线）
+//
+// 用法：include "mapload.fl"（它会带进 grid.fl 与 io_lib.fl）
+// 格式：每行 w 个字符；'0'..'9' => tile 0..9，'.' => 0；'\r' 跳过，'\n' 行尾；
+//       超出 w/h 的字符直接丢弃（不越界写）。返回 1=成功，0=读不到/参数非法。
+//
+// 为什么单独一层：grid.fl 保持"纯几何"（无文件 API），只会在真被用到时把
+//   io_lib 的 kernel32 导入拖进 exe；无头探针 f071 仍然只 include grid.fl。
+include "grid.fl"
+include "io_lib.fl"
+
+int mapload_ascii(char *path, int *buf, int w, int h) {
+  char data[8192];
+  int n = 0;
+  int i = 0;
+  int x = 0;
+  int y = 0;
+  int v = 0;
+  char ch = 0;
+  if (buf == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  n = std::file_read(path, data, 8191);
+  if (n < 0) { return 0; }
+  data[n] = 0;
+  i = 0;
+  while (i < n) {
+    ch = data[i];
+    i = i + 1;
+    if (ch != 13) {
+      if (ch == 10) {
+        x = 0;
+        y = y + 1;
+      } else {
+        v = 0;
+        if (ch >= 48) {
+          if (ch <= 57) { v = ch - 48; }
+        }
+        if (y < h) {
+          if (x < w) { buf[y * w + x] = v; }
+        }
+        x = x + 1;
+      }
+    }
+  }
+  return 1;
+}

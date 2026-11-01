@@ -1,6 +1,6 @@
 // main.fl — FLGUI demo（M2）：真窗（label / button / checkbox / 分隔线 / 滑块 / 进度条 / 只读文本域）＋ dump.on 无头 dump 模式
 //
-// 编译：真 flint `flint.exe main.fl -o flgui_demo.exe` ｜ boot `b1_emit.exe main.fl`（产物落在源旁）
+// 编译：真 flint `hlc.exe main.fl -o flgui_demo.exe` ｜ boot `b1_emit.exe main.fl`（产物落在源旁）
 // 开关（沿用 m2_float 惯例：文件不存在 = 开关不生效，不需要预先建目录）：
 //   E:\FLINT-lab\tmp\flgui\dump.on 存在 ⇒ **不建窗、不占屏**，合成 9 帧（点按钮 / 点勾选框 / 拖滑块）
 //     把每帧状态 dump 成文本走 stdout，最后 exit 42 —— 供 test\flgui-verify.ps1 双端逐字节对账

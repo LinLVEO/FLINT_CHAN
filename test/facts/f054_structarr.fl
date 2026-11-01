@@ -1,0 +1,89 @@
+// f054_structarr.fl -- v2.1.0 局部 struct 数组探针（8 位掩码，全亮退 42）
+//   每一位一格，绝不写成一个总和（失败时打印 mask，红的位一眼可见）
+// bit0 单元字段写读：a[2].n 写 7 → 读回 7，且左右邻元素仍是 0
+// bit1 循环填 0..4 再循环读回求和 = 30（相邻元素互不覆盖）
+// bit2 元素步长 = 8*ceil(size/8) 精确钉死：&t[1].n0 == &t[0].n1 + 12
+//      （Three = 3 个 int = 12 字节 ⇒ 2 槽 ⇒ 步长 16；n1 在 +4，故差 12）
+// bit3 含指针字段的元素各自独立：两个元素的 p 指向不同对象，穿透写只改各自目标
+// bit4 &a[i] 作 struct S * 实参：形参里写 p->n，调用方 a[i].n 可见
+// bit5 数组名作实参（退化成 struct S * = 首元素地址）：形参写 p->n 落在 a[0]
+// bit6 char 字段按字节读写（含 >127 的 200 按 0..255 读回），且不踩本元素 int 字段
+// bit7 元素内的定长数组字段 a[i].buf[j] 双下标：相邻元素的 buf / tag 互不串
+struct Pair  { int n; int m; }
+struct Three { int n0; int n1; int n2; }
+struct Hold  { int *p; int v; }
+struct Tiny  { char c; int n; }
+struct Buf   { int tag; int buf[3]; }
+
+void setn(struct Pair *p, int v) { p->n = v; }
+
+int main() {
+  int mask = 0;
+  int i = 0;
+  int sum = 0;
+
+  // —— bit0：单元写读 + 元素字段作左值（复合赋值 / ++）——
+  struct Pair a[4];
+  a[0].n = 0;
+  a[1].n = 0;
+  a[2].n = 0;
+  a[3].n = 0;
+  a[2].n = 7;
+  a[2].n += 1;      // 复合赋值：间接目标（元素字段）走 ND_ADD_ASSIGN 的 deref 路径
+  a[1].n++;         // ++：同一条间接目标路径
+  if (a[2].n == 8 && a[1].n == 1 && a[3].n == 0) { mask = mask + 1; }
+
+  // —— bit1：循环填 / 循环读（0+1+4+9+16 = 30）——
+  struct Pair b[5];
+  while (i < 5) { b[i].n = i * i; i = i + 1; }
+  i = 0;
+  while (i < 5) { sum = sum + b[i].n; i = i + 1; }
+  if (sum == 30) { mask = mask + 2; }
+
+  // —— bit2：元素步长精确钉死 ——
+  struct Three t[3];
+  t[0].n0 = 11; t[0].n1 = 12; t[0].n2 = 13;
+  t[1].n0 = 21; t[1].n1 = 22; t[1].n2 = 23;
+  t[2].n0 = 31; t[2].n1 = 32; t[2].n2 = 33;
+  char *q0;
+  char *q1;
+  q0 = (char *)&t[0].n1;
+  q1 = (char *)&t[1].n0;
+  if (t[0].n2 == 13 && t[1].n0 == 21 && t[2].n2 == 33 && q1 == q0 + 12) { mask = mask + 4; }
+
+  // —— bit3：含指针字段的元素 ——
+  int x = 111;
+  int y = 222;
+  struct Hold h[2];
+  h[0].p = &x; h[0].v = 1;
+  h[1].p = &y; h[1].v = 2;
+  *(h[1].p) = 444;
+  if (h[0].v == 1 && h[1].v == 2 && *(h[0].p) == 111 && y == 444) { mask = mask + 8; }
+
+  // —— bit4 + bit5：&a[i] / 数组名 作 struct S * 实参 ——
+  setn(&a[3], 77);
+  setn(a, 55);
+  if (a[3].n == 77 && a[0].n == 55) { mask = mask + 16 + 32; }
+
+  // —— bit6：char 字段字节读写 ——
+  struct Tiny c[3];
+  c[0].c = 1;   c[0].n = 1000;
+  c[1].c = 2;   c[1].n = 2000;
+  c[2].c = 200; c[2].n = 3000;
+  if (c[0].c == 1 && c[1].c == 2 && c[2].c == 200
+      && c[0].n == 1000 && c[1].n == 2000 && c[2].n == 3000) { mask = mask + 64; }
+
+  // —— bit7：元素内定长数组字段 ——
+  struct Buf g[2];
+  g[0].tag = 9;
+  g[1].tag = 10;
+  i = 0;
+  while (i < 3) { g[0].buf[i] = i + 1; g[1].buf[i] = (i + 1) * 10; i = i + 1; }
+  if (g[0].tag == 9 && g[1].tag == 10
+      && g[0].buf[0] == 1 && g[0].buf[2] == 3
+      && g[1].buf[0] == 10 && g[1].buf[2] == 30) { mask = mask + 128; }
+
+  print(["mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

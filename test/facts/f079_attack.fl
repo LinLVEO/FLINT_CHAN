@@ -1,0 +1,71 @@
+// f079_attack.fl -- M4 第二刀：攻击判定盒 + 三段连击 + 输入缓冲
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  attack_hit 朝右命中：角色 (0,0,10,10)、敌人 (12,0,10,10)
+//   bit1  朝右不命中：敌人 (40,0,10,10)（攻击盒只到 x=26）
+//   bit2  attack_hit 朝左命中：角色 (30,0,10,10)、敌人 (10,0,10,10)
+//   bit3  一段：press + tick -> step=1、timer=10
+//   bit4  三段：再 press+tick 两次 -> step=3
+//   bit5  窗口过期：从 step=3 连走 11 tick -> step=0
+//   bit6  超三段不再加：step=3 时 press+tick -> step 仍 3
+//   bit7  确定性：同一 press/tick 序列跑两次，step 与 timer 逐位相同
+include "../../lib/attack.fl"
+
+int combo_run() {
+  struct Combo c;
+  int i = 0;
+  int s = 0;
+  combo_start(&c);
+  i = 0;
+  while (i < 7) {
+    combo_press(&c);
+    combo_tick(&c);
+    s = s * 10 + c.step;
+    i = i + 1;
+  }
+  return s;
+}
+
+int main() {
+  int mask = 0;
+  struct Combo c;
+  int i = 0;
+
+  if (attack_hit(0, 0, 10, 10, 1, 12, 0, 10, 10) == 1) { mask = mask | 1; }
+  if (attack_hit(0, 0, 10, 10, 1, 40, 0, 10, 10) == 0) { mask = mask | 2; }
+  if (attack_hit(30, 0, 10, 10, 0, 10, 0, 10, 10) == 1) { mask = mask | 4; }
+
+  combo_start(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  if (c.step == 1) {
+    if (c.timer == 10) { mask = mask | 8; }
+  }
+
+  combo_press(&c);
+  combo_tick(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  if (c.step == 3) { mask = mask | 16; }
+
+  i = 0;
+  while (i < 11) { combo_tick(&c); i = i + 1; }
+  if (c.step == 0) { mask = mask | 32; }
+
+  combo_start(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  combo_press(&c);
+  combo_tick(&c);
+  if (c.step == 3) { mask = mask | 64; }
+
+  if (combo_run() == combo_run()) { mask = mask | 128; }
+
+  print(["f079 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

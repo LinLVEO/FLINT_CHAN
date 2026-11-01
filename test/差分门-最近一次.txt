@@ -1,6 +1,6 @@
 ﻿align_probe	OK	exit=0
 align2_probe	OK	exit=0
-api1	OK	exit=0
+api1	HANG	flint产物 超过 5s
 api2	OK	exit=1
 api3	OK	exit=0
 apiarg16	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.exe' parse err=-176 token=37 pos=658 text='as' line 7: api msvcrt int pf16(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int) as "printf"; compile FAIL err=2
@@ -71,6 +71,7 @@ ctrl7	OK	exit=1
 ctrl8	OK	exit=1
 ctrl9	OK	exit=7
 dbgcond	OK	exit=6
+dbgvar	OK	exit=42
 dblcmp1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcmp1.exe' parse err=-183 token=0 pos=903 text='double' line 10: double half(double x) { return x / 2.0; } compile FAIL err=2
 dblcompound1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblcompound1.exe' parse err=-183 token=447 pos=4042 text='double' line 85: double half(double x) { return x / 2.0; } compile FAIL err=2
 dblconst1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\dblconst1.exe' parse err=-183 token=662 pos=5101 text='double' line 122: double half() { return 0.5; } compile FAIL err=2
@@ -97,6 +98,7 @@ flgui15	OK	exit=42
 flgui16	OK	exit=42
 flgui17	OK	exit=42
 flgui18	OK	exit=42
+flgui19	OK	exit=42
 flgui2	OK	exit=42
 flgui3	OK	exit=42
 flgui4	OK	exit=42
@@ -209,6 +211,7 @@ st6	OK	exit=1118
 st7	OK	exit=5
 stack1	SKIP	排除清单
 stack2	SKIP	排除清单
+starr1	OK	exit=42
 str1	OK	exit=3
 str2	OK	exit=52
 str3	OK	exit=4
@@ -222,11 +225,14 @@ swap	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\swap.fl' 
 sys_probe	OK	exit 不判（非确定样本）
 temp_probe	OK	exit=2
 tern1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\tern1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\tern1.exe' parse err=-50 token=15 pos=395 text='?' line 7: return c ? a : b; // ① 三元当返回值（函数返回路径） compile FAIL err=2
+try1	OK	exit=42
 ui_seg	SKIP	排除清单
 ui_text	SKIP	排除清单
 ui_widgets	SKIP	排除清单
 ui1	OK	exit=7
 ui2	OK	exit=7
+uint1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\uint1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\uint1.exe' parse err=-53 token=452 pos=3878 text='uint_32' line 86: uint_32 a = 0; compile FAIL err=2
+uintprint	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\uintprint.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\uintprint.exe' parse err=-53 token=810 pos=7590 text='uint_32' line 164: uint_32 a = 0; compile FAIL err=2
 var1	OK	exit=12
 var2	OK	exit=20
 var3	OK	exit=13

@@ -1,0 +1,68 @@
+// f089_sprite_scale.fl -- M2 第四刀：精灵整数放大绘制
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 数据 2x2：1,0 / 0,1；scale=2 画到 (2,2)。
+//   bit0  scale=1 下 sprite_blit_scale 与 sprite_blit 写入像素数相同
+//   bit1  scale=2 写入 8 像素（2 个实心像素 × 4）
+//   bit2  (2,2)(3,2)(2,3)(3,3) 都是 pal[1]（放大块）
+//   bit3  (6,2) 是背景（透明像素没放大）
+//   bit4  scale=0 返回 0
+//   bit5  kaguya 加载成功
+//   bit6  kaguya 尺寸 16x16
+//   bit7  kaguya 帧数 3
+include "../../lib/sprite.fl"
+include "../../games/huiye/sprite_data.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int data[4];
+  int pal[7];
+  int mask = 0;
+  int n = 0;
+  int g = 0;
+  int kbuf[768];
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 32; s.bh = 32; s.cw = 32; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 32, 32) == 0) { return 2; }
+  if (sprite_pal_fill(pal) != 7) { return 3; }
+
+  data[0] = 1; data[1] = 0; data[2] = 0; data[3] = 1;
+
+  gfx_clear(&b, 0x00ABCDEF);
+  g = sprite_blit(&b, 2, 2, data, 2, 2, 0, pal, 7);
+  gfx_clear(&b, 0x00ABCDEF);
+  n = sprite_blit_scale(&b, 2, 2, data, 2, 2, 0, pal, 7, 1);
+  if (n == g) { mask = mask | 1; }
+
+  gfx_clear(&b, 0x00ABCDEF);
+  n = sprite_blit_scale(&b, 2, 2, data, 2, 2, 0, pal, 7, 2);
+  if (n == 8) { mask = mask | 2; }
+
+  if (gfx_get(&b, 2, 2) == pal[1]) {
+    if (gfx_get(&b, 3, 2) == pal[1]) {
+      if (gfx_get(&b, 2, 3) == pal[1]) {
+        if (gfx_get(&b, 3, 3) == pal[1]) { mask = mask | 4; }
+      }
+    }
+  }
+
+  if (gfx_get(&b, 6, 2) == 0x00ABCDEF) { mask = mask | 8; }
+
+  gfx_clear(&b, 0x00ABCDEF);
+  if (sprite_blit_scale(&b, 2, 2, data, 2, 2, 0, pal, 7, 0) == 0) { mask = mask | 16; }
+
+  if (sprite_kaguya_load(kbuf) == 1) { mask = mask | 32; }
+  if (sprite_kaguya_w() == 16) {
+    if (sprite_kaguya_h() == 16) { mask = mask | 64; }
+  }
+  if (sprite_kaguya_frames() == 3) { mask = mask | 128; }
+
+  print(["f089 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

@@ -19,7 +19,7 @@
 //   std::str_clear(&s);                       // 长度归 0、**保留容量**
 //   std::str_free(&s);                        // 幂等：再调一次仍返回 0
 //
-// 边界（本机实测口径：真编译器 flint.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
+// 边界（本机实测口径：真编译器 hlc.exe ＋ 自举 boot\b1_emit.exe，两条腿都跑；每条标「实测」
 // 或「推断」，**两端分叉**的单独标出来 —— 探针 test\facts\f017_str_core.fl 全程可复现）：
 //   * struct 字段不支持 char*：真 flint **实测**报"char 指针字段暂不支持（v1.0.5）"，
 //     而 boot 端**实测放行**（同一份源码 boot 编过、flint 编不过 —— 两端分叉）⇒ 本库内部指针

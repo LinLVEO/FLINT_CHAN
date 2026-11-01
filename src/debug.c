@@ -2,10 +2,15 @@
 //
 // 为什么要它（价值论证见 `开工简报-可审计发射层.md`）：
 //   FLINT 为了「零垫层 + 逐字节」主动交出了链接器这张安全网，产物因此没有任何"可被现成工具读懂的"
-//   元信息；调试只能靠 objdump 反汇编 + 人肉对照。本文件把内部那张表**同时**输出成两份：
+//   元信息；调试只能靠 objdump 反汇编 + 人肉对照。本文件把内部那张表**同时**输出成三份：
 //     ① **标准腿（DWARF5）** —— `objdump --dwarf=decodedline` / `addr2line` / `gdb` 直接能读（外部可核）；
-//     ② **私有腿（TSV）** —— 补标准**不提供**的三个维度：字节区间 / 文件偏移 / 所属节。
-//   两腿同源（同一张 DebugRow 表）⇒ 不存在两套真值。
+//     ② **私有腿（TSV）** —— 补标准**不提供**的三个维度：字节区间 / 文件偏移 / 所属节；
+//     ③ **变量/帧腿（`<输出>.dbg.json`，v5 D-1 + D-3）** —— 标准腿同样不提供的两件事：
+//        帧布局（本仓 PE **没有 .pdata** ⇒ StackWalk64 不认，栈回溯只能手写）和
+//        局部变量/形参的帧内地址（DWARF 腿只发行表，没有任何变量 DIE）。
+//        格式 = 人/机都能读的 JSON，version 1；字段口径见 debug_build_map 的头注释与
+//        `interface\调试器控制接口.md` §二（D-1/D-3）。
+//   三腿同源（同一张 DebugRow / DebugFuncSpan 表）⇒ 不存在两套真值。
 //
 // 最小集是**实测定的**，不是猜的（`调研②-DWARF最小集实测.md`，7 个受控删改变体）：
 //   · `.debug_line` + `.debug_info`(最小 CU) + `.debug_abbrev` 三节**缺一不可**（缺 info/abbrev 时
@@ -185,7 +190,7 @@ void debug_build_info(GenResult *gen, uint32_t text_rva, uint32_t line_sec_off, 
   uleb(out, 1);                       // 缩写码
   cstr(out, base);                    // DW_AT_name
   cstr(out, adir);                    // DW_AT_comp_dir（绝对路径，与 GCC 口径一致）
-  cstr(out, "FLINT (self-hosted, no assembler/linker)");   // DW_AT_producer
+  cstr(out, "hlc (self-hosted, no assembler/linker)");   // DW_AT_producer
   u8_(out, DW_LANG_C99);              // DW_AT_language
   // DW_AT_low_pc / high_pc —— **gdb 认路的必要条件**（实测：没有地址区间时 gdb 报
   //   "No line number information available for address …"，而 objdump/addr2line 仍能解行表）。
@@ -336,4 +341,177 @@ void debug_build_tsv(GenResult *gen, uint32_t text_rva, uint32_t text_raw_ptr, c
                      r->len);
     if (n > 0) buf_bytes(out, (const uint8_t *)line, (size_t)n);
   }
+}
+
+// ========== ⑤ 第三份调试信息：帧表（D-3）+ 变量位置表（D-1）→ `<输出>.dbg.json` ==========
+// 为什么必须是编译器出、且必须是 JSON：
+//   · **帧表**：我们的 PE 没有 `.pdata`（`test\wx-verify.ps1` 守着产物 W^X、无 unwind 信息），
+//     Windows 的 `StackWalk64` 只能吃 `.pdata`/FPO ⇒ 对它无效。栈回溯只能由调试器按
+//     「帧大小 + 返回地址偏移 + 保存寄存器 + 序言/尾声区间」自己走 ⇒ 这些数只有发射现场知道。
+//   · **变量位置**：DWARF 腿只发 `.debug_line`（最小 CU，无子 DIE），标准工具能回答"地址是哪一行"，
+//     回答不了"变量在第几字节"。让调试器去源码里猜类型/槽位必然与编译器分叉 ⇒ 必须编译器出。
+//   · JSON：本仓没有链接器/符号表机制可挂，JSON 人和机器都能读，也不需要两边版本对齐 DWARF 的
+//     生产者/消费者规则（一旦对不上就是静默错位）。
+// 字段口径（调试器**直接**拿去做地址运算，改一个就是破坏契约）：
+//   start / end       函数在镜像里的绝对地址（= 0x140000000 + text.rva + 函数内偏移；与 .tsv 同坐标系，end 不含）
+//   frame.size        序言 `sub rsp, imm` 的 imm（大帧多段 sub 时 = 各段之和；没有 sub = 0）
+//   frame.pushBytes   被调者保存寄存器 push 的总字节数
+//   frame.retAddrOff  返回地址相对 rbp 的偏移（本仓 8；取自序言 `push rbp` 的字节数）
+//   frame.savedRegs   按 **push 顺序** 的寄存器名（rbx/r12/r13/r14/r15）
+//   frame.prologue    序言字节区间（start = 函数起点；调试器判"PC 是否还在序言里"）
+//   frame.epilogue    尾声字节区间（写回首条指令 → leave/ret 或 call ExitProcess）
+//   vars[].slot       rbp 相对偏移 = -LVar.offset（数组/结构体 = **首槽**）
+//   vars[].type       FLINT 写法（`int` / `int_64` / `char*` / `uint_32` / `int[5]` / `struct Point`）
+//   vars[].kind       local / param / aggregate（数组、结构体值变量）
+//   vars[].line       声明所在源码行（1 起）
+// 同源：全部来自 GenResult.dbg_funcs —— 帧字段是 codegen_func 在**发射现场**记的，变量表是 parse 的
+//   LVar 链（与分槽同一张表）。本函数**只排版**，不重算、不反汇编、不再解析源码。
+// 确定性：函数按 (start) 升序；变量按 (slot, name) 升序；不写时间戳、不写绝对路径（exe 字段是调用方
+//   给的原样输出路径）⇒ 同输入两次编译逐字节相同（`debug` 门 [8] 用 SHA256 守）。
+static void jstr(Buf *b, const char *s) {
+  buf_byte(b, '"');
+  const unsigned char *p = (const unsigned char *)(s ? s : "");
+  for (; *p; p++) {
+    switch (*p) {
+      case '"':  buf_bytes(b, (const uint8_t *)"\\\"", 2); break;
+      case '\\': buf_bytes(b, (const uint8_t *)"\\\\", 2); break;
+      case '\n': buf_bytes(b, (const uint8_t *)"\\n", 2); break;
+      case '\r': buf_bytes(b, (const uint8_t *)"\\r", 2); break;
+      case '\t': buf_bytes(b, (const uint8_t *)"\\t", 2); break;
+      default:
+        if (*p < 0x20 || *p >= 0x80) {
+          // 控制符与**非 ASCII 字节**一律 \u00XX 转义：保证输出文件**永远是合法 UTF-8/JSON**。
+          // 为什么不做编码转换：`-o` 路径来自 argv（中文 Windows 上是 ANSI/GBK 字节，UTF-8 控制台上是
+          //   UTF-8 字节），纯 C 无法判断它是哪种编码；照原样写出会让 JSON 在非 ASCII 路径下**非法**
+          //   （实测：GBK 路径写出 4 个非法字节，严格解析器直接拒收）。所以这里只保证"可解析"，
+          //   需要真实路径时请用「产物路径 + .dbg.json」定位（调试器本来就拿得到产物路径）。
+          //   ASCII 路径（门与日常用法）输出与本转义无关 ⇒ 逐字节不受影响。
+          char esc[8];
+          snprintf(esc, sizeof(esc), "\\u%04X", (unsigned)*p);
+          buf_bytes(b, (const uint8_t *)esc, 6);
+        } else {
+          buf_byte(b, *p);   // ASCII 原样（本仓标识符/结构体名都是 ASCII）
+        }
+    }
+  }
+  buf_byte(b, '"');
+}
+static void jraw(Buf *b, const char *s) { buf_bytes(b, (const uint8_t *)s, strlen(s)); }
+static void jint(Buf *b, long long v) {
+  char t[32];
+  int n = snprintf(t, sizeof(t), "%lld", v);
+  if (n > 0) buf_bytes(b, (const uint8_t *)t, (size_t)n);
+}
+
+static const char *saved_reg_name(int r) {
+  switch (r) {
+    case 0: return "rbx";
+    case 1: return "r12";
+    case 2: return "r13";
+    case 3: return "r14";
+    case 4: return "r15";
+    default: return "?";
+  }
+}
+static const char *var_kind_name(int k) {
+  return k == 1 ? "param" : k == 2 ? "aggregate" : "local";
+}
+
+static int cmp_span_ptr(const void *a, const void *b) {
+  const DebugFuncSpan *x = *(const DebugFuncSpan *const *)a;
+  const DebugFuncSpan *y = *(const DebugFuncSpan *const *)b;
+  if (x->off != y->off) return x->off < y->off ? -1 : 1;
+  return 0;   // 偏移唯一（函数不重叠）⇒ 不需要二级键
+}
+static int cmp_var_ptr(const void *a, const void *b) {
+  const DebugVar *x = *(const DebugVar *const *)a;
+  const DebugVar *y = *(const DebugVar *const *)b;
+  if (x->slot != y->slot) return x->slot < y->slot ? -1 : 1;
+  int c = strcmp(x->name ? x->name : "", y->name ? y->name : "");
+  return c;
+}
+
+void debug_build_map(GenResult *gen, uint32_t text_rva, uint32_t text_raw_ptr,
+                     const char *exe_name, Buf *out) {
+  buf_init(out);
+  int nf = gen->ndbg_funcs;
+  DebugFuncSpan **fs = NULL;
+  if (nf > 0) {
+    fs = (DebugFuncSpan **)malloc((size_t)nf * sizeof(DebugFuncSpan *));
+    if (!fs) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
+    for (int i = 0; i < nf; i++) fs[i] = &gen->dbg_funcs[i];
+    qsort(fs, (size_t)nf, sizeof(DebugFuncSpan *), cmp_span_ptr);
+  }
+
+  jraw(out, "{\n  \"version\": 1,\n  \"exe\": ");
+  jstr(out, exe_name ? exe_name : "?");
+  jraw(out, ",\n  \"text\": { \"rva\": ");
+  jint(out, (long long)text_rva);
+  jraw(out, ", \"rawPtr\": ");
+  jint(out, (long long)text_raw_ptr);
+  jraw(out, " },\n  \"functions\": [");
+
+  for (int f = 0; f < nf; f++) {
+    DebugFuncSpan *sp = fs[f];
+    unsigned long long fstart = (unsigned long long)0x140000000ULL + text_rva + sp->off;
+    unsigned long long fend   = fstart + sp->len;
+    jraw(out, f ? ",\n    {\n" : "\n    {\n");
+    jraw(out, "      \"name\": ");
+    jstr(out, sp->name ? sp->name : "?");
+    jraw(out, ",\n      \"start\": ");
+    jint(out, (long long)fstart);
+    jraw(out, ", \"end\": ");
+    jint(out, (long long)fend);
+    jraw(out, ",\n      \"frame\": { \"size\": ");
+    jint(out, (long long)sp->frame_size);
+    jraw(out, ", \"pushBytes\": ");
+    jint(out, (long long)sp->push_bytes);
+    jraw(out, ", \"retAddrOff\": ");
+    jint(out, (long long)sp->ret_addr_off);
+    jraw(out, ", \"savedRegs\": [");
+    for (int k = 0; k < sp->nsaved && k < 8; k++) {
+      if (k) jraw(out, ",");
+      jraw(out, "\"");
+      jraw(out, saved_reg_name(sp->saved_regs[k]));
+      jraw(out, "\"");
+    }
+    jraw(out, "],\n                 \"prologue\": { \"start\": ");
+    jint(out, (long long)fstart);                    // 序言恒从函数首字节开始
+    jraw(out, ", \"len\": ");
+    jint(out, (long long)sp->prolog_len);
+    jraw(out, " },\n                 \"epilogue\": { \"start\": ");
+    jint(out, (long long)(fstart + sp->epilog_off));
+    jraw(out, ", \"len\": ");
+    jint(out, (long long)sp->epilog_len);
+    jraw(out, " } },\n      \"vars\": [");
+
+    // 变量：**副本排序**（不动 parse 建的那张表：它是唯一真值，别在这里改顺序）
+    int nv = sp->nvars;
+    if (nv > 0 && sp->vars) {
+      DebugVar **vs = (DebugVar **)malloc((size_t)nv * sizeof(DebugVar *));
+      if (!vs) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
+      for (int i = 0; i < nv; i++) vs[i] = &sp->vars[i];
+      qsort(vs, (size_t)nv, sizeof(DebugVar *), cmp_var_ptr);
+      for (int i = 0; i < nv; i++) {
+        DebugVar *v = vs[i];
+        jraw(out, i ? ",\n        { \"name\": " : "\n        { \"name\": ");
+        jstr(out, v->name ? v->name : "?");
+        jraw(out, ", \"type\": ");
+        jstr(out, v->type);
+        jraw(out, ", \"kind\": ");
+        jstr(out, var_kind_name(v->kind));
+        jraw(out, ", \"slot\": ");
+        jint(out, (long long)v->slot);
+        jraw(out, ", \"line\": ");
+        jint(out, (long long)v->line);
+        jraw(out, " }");
+      }
+      free(vs);
+      jraw(out, "\n      ]\n    }");
+    } else {
+      jraw(out, "]\n    }");
+    }
+  }
+  jraw(out, nf ? "\n  ]\n}\n" : "]\n}\n");
+  free(fs);
 }

@@ -1,0 +1,31 @@
+// hitstun.fl -- 受击反应（2026-11-01，NERO 引擎层，完全脱手）
+//
+// 现代动作游戏里"打中"不只是扣血：敌人要被**打断 + 推开 + 硬直**，否则像在砍空气。
+// 口径：全确定性（不取时间、不用随机），同输入同序列。
+//   - 硬直 10 帧：期间调用方应跳过该实体的 AI（它被打断了）；
+//   - 水平击退：16.16 速度，每帧 ×3/4 衰减（8 → 6 → 4 → 3 → 2 → 1 …），推开约 12px；
+//   - 轻微上浮：给击退一点"挑起来"的感觉，重力由 body_step 接管。
+//
+// 用法：
+//   struct HitStun hs;  hitstun_start(&hs, face, 8);   // 命中瞬间
+//   每帧：if (hitstun_tick(&hs) > 0) { body.vx = hs.vx; body.vy = hs.vy; }  // 硬直中不受 AI 控制
+struct HitStun { int stun; int vx; int vy; }
+
+// face = 攻击方朝向（1 右 / 0 左）：敌人被往同一侧推。
+int hitstun_start(struct HitStun *h, int face, int power) {
+  if (h == 0) { return 0; }
+  h->stun = 10;
+  h->vx = power * 65536;
+  if (face == 0) { h->vx = 0 - power * 65536; }
+  h->vy = -2 * 65536;
+  return 1;
+}
+
+// 每帧：硬直 -1，击退速度 ×3/4。返回剩余硬直帧数（>0 = 仍被打断）。
+int hitstun_tick(struct HitStun *h) {
+  if (h == 0) { return 0; }
+  if (h->stun > 0) { h->stun = h->stun - 1; }
+  h->vx = h->vx * 3 / 4;
+  h->vy = h->vy * 3 / 4;
+  return h->stun;
+}

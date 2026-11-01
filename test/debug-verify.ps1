@@ -12,6 +12,16 @@
 #       (v1.4.14 ASLR round: baseline 0x0100 -> new 0x0160). Use a baseline from the round BEFORE this
 #       one (flint_before_aslr.exe), otherwise the dllchars delta check fails by design.
 #
+#   [7] v5 (2026-10-21, D-2): with -debug the slot->register residency must be OFF (a debugger would
+#       otherwise read stale frame slots). Judge = `-debug -stats` reports 0 register slots.
+#   [8] v5 (2026-10-21, D-1 + D-3): the THIRD debug artifact <out>.dbg.json -- frame table + variable
+#       location table. Nine assertions per sample: (1) version 1 + parseable; (2) every function
+#       range inside .text and ascending; (3) frame.size == objdump's `sub $imm,%rsp`; (4) savedRegs /
+#       pushBytes == objdump's callee-saved push sequence; (5) var count + name set == the declarations
+#       counted from the SOURCE by regex (independent judge); (6) slots inside the frame and unique;
+#       (7) type/kind/line well-formed (whitelist regex); (8) recompiling reproduces the file (SHA256);
+#       (9) no .dbg.json when the switch is OFF.
+#
 # and once, on a dedicated sample:
 #   [6] v1.4.16 (task card T-20260918-012105): control-statement CONDITION bytes carry their OWN
 #       source line. DWARF rows mean "from this address on, line = X", so before this round the
@@ -23,16 +33,21 @@
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File test\debug-verify.ps1
-#   powershell ... -File test\debug-verify.ps1 -BaselineExe .\flint_before_aslr.exe
+#   powershell ... -File test\debug-verify.ps1 -BaselineExe .\archive\exe\flint_before_aslr.exe
+# 2026-10-20: the run-behaviour sample is api2.fl (kernel32 GetTickCount), NOT api1.fl.
+#   api1 pops a MessageBoxA: the window steals the foreground from whatever the user is doing, and
+#   it blocks until the 8 s timeout, so the plain/debug exit codes depended on which dialog got
+#   dismissed first (intermittent false red). api1 keeps its compile + import-table checks in
+#   test\run-tests.js; gate the RUN path on a non-UI sample.
 param(
-  [string[]]$Samples = @('ctrl1.fl','comp1.fl','st1.fl','arr1.fl','api1.fl','dbgcond.fl'),
+  [string[]]$Samples = @('ctrl1.fl','comp1.fl','st1.fl','arr1.fl','api2.fl','dbgcond.fl'),
   [string]$BaselineExe = '',
   [string]$Objdump = 'E:\mingw64\bin\objdump.exe',
   [string]$Addr2line = 'E:\mingw64\bin\addr2line.exe'
 )
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $tmp = Join-Path $root 'tmp\debug-gate'
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
@@ -109,6 +124,85 @@ function Parse-Instructions($exe) {
   return $ins
 }
 
+# ===== v5 (2026-10-21) D-1 + D-3: `-debug` writes a THIRD debug artifact, <out>.dbg.json =====
+# It carries what neither DWARF leg has: the FRAME layout (this repo's PE has no .pdata, so Windows'
+# StackWalk64 cannot be used -- a debugger has to walk frames by hand) and the frame SLOT of every
+# local/parameter (the DWARF leg is a line table only: no variable DIEs). Format = JSON, version 1.
+# The checks below compare it against INDEPENDENT judges only:
+#   * objdump -h / -d  (section range, `sub $imm,%rsp`, the callee-saved push sequence)
+#   * the sample source (declaration count/name set, recomputed by regex, never hardcoded)
+#   * recompiling the same file (SHA256 determinism) and compiling WITHOUT -debug (no side file)
+
+# .text range straight from the disassembler's section table
+function Get-TextSection($exe) {
+  foreach ($l in (& $Objdump -h $exe 2>$null)) {
+    if ($l -match '^\s*\d+\s+\.text\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s') {
+      return [pscustomobject]@{
+        Size = [Convert]::ToUInt64($matches[1], 16)
+        VMA  = [Convert]::ToUInt64($matches[2], 16)
+      }
+    }
+  }
+  return $null
+}
+
+# instruction stream with mnemonic + operands (the frame checks need the operands, not just lengths)
+function Parse-Disasm($exe) {
+  $rows = @()
+  foreach ($l in (& $Objdump -d $exe 2>$null)) {
+    if ($l -match '^\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F]{2} )+)\s+([a-z][a-z0-9.]*)\s*(.*)$') {
+      $rows += [pscustomobject]@{
+        addr = [Convert]::ToUInt64($matches[1], 16)
+        op   = $matches[3]
+        arg  = $matches[4].Trim()
+      }
+    }
+  }
+  return $rows
+}
+
+# Independent judge: every "type name" declaration inside one function, counted from the SOURCE.
+# Params come from the signature parens, locals from the body text (brace-matched, so a top-level
+# `struct Point { int x; ... }` definition is never mistaken for a local declaration).
+function Get-SourceDecls($path, $func) {
+  $txt = [IO.File]::ReadAllText($path)
+  $typeRe = '(?:int_32|int_64|uint_8|uint_32|uint_64|int|char|double|struct\s+[A-Za-z_]\w*)'
+  $sig = [regex]::Match($txt, '(?m)^\s*' + $typeRe + '\s*\*?\s*' + [regex]::Escape($func) + '\s*\(([^)]*)\)\s*\{')
+  if (-not $sig.Success) { return $null }
+  $bodyStart = $sig.Index + $sig.Length - 1
+  $depth = 0; $end = -1
+  for ($i = $bodyStart; $i -lt $txt.Length; $i++) {
+    $ch = $txt[$i]
+    if ($ch -eq '{') { $depth++ }
+    elseif ($ch -eq '}') { $depth--; if ($depth -eq 0) { $end = $i; break } }
+  }
+  if ($end -lt 0) { return $null }
+  $body = $txt.Substring($bodyStart, $end - $bodyStart + 1)
+  $names = @()
+  $params = $sig.Groups[1].Value
+  if (-not [string]::IsNullOrWhiteSpace($params)) {
+    foreach ($pdec in ($params -split ',')) {
+      $pm = [regex]::Match($pdec, $typeRe + '\s*\*{0,2}\s*([A-Za-z_]\w*)')
+      if ($pm.Success) { $names += $pm.Groups[1].Value }
+    }
+  }
+  foreach ($m in [regex]::Matches($body, '(?m)(?:^|[({;,])\s*' + $typeRe + '\s*(\*{0,2})\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=|;|,|\))')) {
+    $names += $m.Groups[2].Value
+  }
+  return @($names)
+}
+
+# function names DEFINED in the source (top level): type, optional '*', name, '(' ... ')' '{'
+function Get-SourceFuncNames($path) {
+  $txt = [IO.File]::ReadAllText($path)
+  $typeRe = '(?:void|int_32|int_64|uint_8|uint_32|uint_64|int|char|double|struct\s+[A-Za-z_]\w*)'
+  $out = @()
+  foreach ($m in [regex]::Matches($txt, '(?m)^\s*' + $typeRe + '\s*\*?\s*([A-Za-z_]\w*)\s*\([^)]*\)\s*\{')) {
+    $out += $m.Groups[1].Value
+  }
+  return @($out)
+}
+
 Push-Location $root
 foreach ($s in $Samples) {
   $src = Join-Path $root "test\samples\$s"
@@ -116,7 +210,8 @@ foreach ($s in $Samples) {
   $plain = Join-Path $tmp "p_$s.exe"
   $dbg   = Join-Path $tmp "d_$s.exe"
   $tsv   = "$dbg.tsv"
-  Remove-Item $plain, $dbg, $tsv -ErrorAction SilentlyContinue
+  $map   = "$dbg.dbg.json"
+  Remove-Item $plain, $dbg, $tsv, $map, "$plain.dbg.json" -ErrorAction SilentlyContinue
 
   & $flint $src -o $plain *>$null
   & $flint -debug $src -o $dbg *>$null
@@ -174,6 +269,16 @@ foreach ($s in $Samples) {
   if ("$e1" -eq "$e2") { Ok "$s : exit code unchanged with -debug (both $e2)" }
   else { Bad "$s : exit differs plain=$e1 debug=$e2" }
 
+  # [7] v5（2026-10-21，D-2）：-debug 必须关掉寄存器驻留。否则帧槽在函数中段是旧值，
+  #     调试器读变量会系统性读错（比没有接口更危险）。判据 = -stats 里"寄存器槽 0"。
+  $stExe = Join-Path $tmp "s_$s.exe"
+  Remove-Item $stExe -ErrorAction SilentlyContinue
+  $stOut = (& $flint -debug -stats $src -o $stExe 2>&1) | Out-String
+  $mrg = [regex]::Match($stOut, '寄存器槽\s*(\d+)')
+  if (-not $mrg.Success) { Bad "$s : -debug -stats did not print the register-slot count" }
+  elseif ([int]$mrg.Groups[1].Value -ne 0) { Bad "$s : -debug still keeps $($mrg.Groups[1].Value) register slot(s) (a debugger would read stale frame slots)" }
+  else { Ok "$s : -debug disables register residency (0 register slots)" }
+  Remove-Item $stExe -ErrorAction SilentlyContinue
   # [4] switch OFF must not change the product's *shape* versus the baseline compiler.
   #     v1.4.13: the old "byte-identical" wording was retired ON PURPOSE -- that round moved the IAT into
   #     its own `.idata` section, i.e. it intentionally rewrote every product. The duty "every difference
@@ -227,6 +332,169 @@ foreach ($s in $Samples) {
       else { Bad "$s : baseline exit differs base=$eb plain=$e1" }
     }
   }
+
+  # ================= [8] v5 (2026-10-21) D-1 + D-3: <out>.dbg.json =================
+  # Nine assertions per sample. Every expected value comes from an independent judge
+  # (objdump / the sample source / a second compile), never from the JSON itself.
+  $j = $null
+  $mapOk = $false
+  if (-not (Test-Path $map)) {
+    Bad "$s : [8.1] -debug wrote no .dbg.json beside the product"
+  } else {
+    try {
+      $j = (Get-Content $map -Raw -Encoding UTF8) | ConvertFrom-Json
+      $mapOk = $true
+    } catch {
+      Bad "$s : [8.1] .dbg.json is not valid JSON -- $($_.Exception.Message)"
+    }
+  }
+
+  if ($mapOk) {
+    $funcs = @($j.functions)
+
+    # [8.1] readable: version 1 + at least one function
+    if ($j.version -eq 1 -and $funcs.Count -gt 0) {
+      Ok "$s : dbg.json v1, $($funcs.Count) function(s)"
+    } else {
+      Bad "$s : [8.1] dbg.json version=$($j.version) functions=$($funcs.Count)"
+    }
+
+    # [8.2] address coordinate: start < end, inside .text (objdump -h), ascending, and the JSON's
+    #       text.rva agrees with the section table (same coordinate system as the TSV)
+    $ts = Get-TextSection $dbg
+    $addrBad = 0
+    if (-not $ts) { $addrBad++ }
+    else {
+      if ([uint64]$j.text.rva -ne [uint64]($ts.VMA - 0x140000000)) { $addrBad++ }
+      $prev = [uint64]0
+      foreach ($f in $funcs) {
+        $st = [uint64]$f.start; $en = [uint64]$f.end
+        if ($st -ge $en) { $addrBad++ }
+        if ($st -lt $ts.VMA -or $en -gt ($ts.VMA + $ts.Size)) { $addrBad++ }
+        if ($st -lt $prev) { $addrBad++ }
+        $prev = $st
+        # the frame windows must sit inside the function they describe
+        if ([uint64]$f.frame.prologue.start -ne $st -or [int]$f.frame.prologue.len -le 0) { $addrBad++ }
+        if ([uint64]$f.frame.epilogue.start -lt $st -or
+            ([uint64]$f.frame.epilogue.start + [uint64]$f.frame.epilogue.len) -gt $en) { $addrBad++ }
+      }
+    }
+    if ($addrBad -eq 0) {
+      Ok "$s : every function range lies inside .text and ascends (vs objdump -h); prologue/epilogue inside"
+    } else {
+      Bad "$s : [8.2] $addrBad address/window problem(s) (text VMA=0x$('{0:X}' -f $ts.VMA) size=0x$('{0:X}' -f $ts.Size))"
+    }
+
+    # [8.3] frame.size == the `sub $imm,%rsp` immediate the disassembler sees in the prologue.
+    #       Big frames are emitted as several `sub $0x1000` + probe pairs (page-by-page commit), so the
+    #       window is 64 bytes and the immediates are summed; no sub at all => frame.size must be 0.
+    $dis = Parse-Disasm $dbg
+    $frameBad = 0
+    foreach ($f in $funcs) {
+      $st = [uint64]$f.start
+      # window = the prologue the JSON declares (the immediates themselves always come from objdump).
+      # Bounding the window this way keeps a body-level `sub rsp,32` (shadow space around a call) out
+      # of the sum, while still catching every page-probe segment of a big frame.
+      $win = $st + [uint64]$f.frame.prologue.len
+      $sum = [uint64]0; $found = 0
+      foreach ($i in $dis) {
+        if ($i.addr -lt $st -or $i.addr -ge $win) { continue }
+        if ($i.op -eq 'sub' -and $i.arg -match '^\$0x([0-9a-fA-F]+),%rsp$') {
+          $sum += [Convert]::ToUInt64($matches[1], 16); $found++
+        }
+      }
+      if ($found -eq 0) {
+        if ([int]$f.frame.size -ne 0) { $frameBad++ }
+      } elseif ([uint64]$sum -ne [uint64]$f.frame.size) {
+        $frameBad++
+      }
+    }
+    if ($frameBad -eq 0) { Ok "$s : frame.size matches objdump's sub rsp immediate (sum over multi-page prologues)" }
+    else { Bad "$s : [8.3] $frameBad function(s) disagree with objdump on the stack-allocation immediate" }
+
+    # [8.4] savedRegs == the callee-saved push sequence objdump shows, in the same order
+    $regBad = 0
+    foreach ($f in $funcs) {
+      $st = [uint64]$f.start
+      $win = $st + [uint64]$f.frame.prologue.len
+      $seen = @()
+      foreach ($i in $dis) {
+        if ($i.addr -lt $st -or $i.addr -ge $win) { continue }
+        if ($i.op -eq 'push' -and $i.arg -match '^%(rbx|r12|r13|r14|r15)$') { $seen += $matches[1] }
+      }
+      $declared = @($f.frame.savedRegs | ForEach-Object { "$_" })
+      if (($seen -join ',') -ne ($declared -join ',')) { $regBad++ }
+      if ([int]$f.frame.pushBytes -ne 8 * $seen.Count) { $regBad++ }
+    }
+    if ($regBad -eq 0) { Ok "$s : frame.savedRegs + pushBytes match objdump's callee-saved push sequence" }
+    else { Bad "$s : [8.4] $regBad saved-register mismatch(es) vs objdump" }
+
+    # [8.5] variable count + name set == the declarations counted from the SOURCE (independent judge)
+    $srcFuncs = Get-SourceFuncNames $src
+    $declBad = 0
+    if ($srcFuncs.Count -eq 0) { $declBad++ }
+    foreach ($fn in $srcFuncs) {
+      $jf = @($funcs | Where-Object { $_.name -eq $fn })
+      if ($jf.Count -ne 1) { $declBad++; continue }
+      $decl = Get-SourceDecls $src $fn
+      if ($null -eq $decl) { $declBad++; continue }
+      $jnames = @($jf[0].vars | ForEach-Object { "$($_.name)" })
+      if ($decl.Count -ne $jnames.Count) { $declBad++; continue }
+      $a = (($decl | Sort-Object -Unique) -join ',')
+      $b = (($jnames | Sort-Object -Unique) -join ',')
+      if ($a -ne $b) { $declBad++ }
+    }
+    if ($declBad -eq 0) {
+      $tot = 0
+      foreach ($fn in $srcFuncs) { $tot += @(@($funcs | Where-Object { $_.name -eq $fn })[0].vars).Count }
+      Ok "$s : var count + name set match the source scan ($($srcFuncs.Count) function(s), $tot var(s))"
+    } else {
+      Bad "$s : [8.5] $declBad function(s) disagree with the source declaration scan"
+    }
+
+    # [8.6] every slot inside the frame and unique within its function
+    $slotBad = 0
+    foreach ($f in $funcs) {
+      $seen = @{}
+      foreach ($v in @($f.vars)) {
+        $sl = [int]$v.slot
+        if ($sl -lt (-[int]$f.frame.size) -or $sl -gt -8) { $slotBad++ }
+        if ($seen.ContainsKey($sl)) { $slotBad++ } else { $seen[$sl] = 1 }
+      }
+    }
+    if ($slotBad -eq 0) { Ok "$s : every slot is inside the frame (-size..-8) and unique per function" }
+    else { Bad "$s : [8.6] $slotBad slot problem(s) (out of frame or duplicated)" }
+
+    # [8.7] type spelling whitelist (no garbage accepted; arrays/pointers/struct names allowed)
+    $tyBad = 0
+    $tyRe = '^(?:struct\s+[A-Za-z_]\w*|int_32|int_64|uint_8|uint_32|uint_64|int|char|double)(?:\[[0-9]+\]|\*)?$'
+    foreach ($f in $funcs) {
+      foreach ($v in @($f.vars)) {
+        if ("$($v.type)" -notmatch $tyRe) { $tyBad++ }
+        if (@('local', 'param', 'aggregate') -notcontains "$($v.kind)") { $tyBad++ }
+        if ([int]$v.line -lt 1) { $tyBad++ }
+      }
+    }
+    if ($tyBad -eq 0) { Ok "$s : every variable type/kind/line is well-formed" }
+    else { Bad "$s : [8.7] $tyBad malformed type/kind/line field(s)" }
+
+    # [8.8] determinism: recompiling the SAME source to the SAME output must reproduce the file
+    $h1 = (Get-FileHash -Algorithm SHA256 -Path $map).Hash
+    & $flint -debug $src -o $dbg *>$null
+    $h2 = (Get-FileHash -Algorithm SHA256 -Path $map).Hash
+    if ($h1 -eq $h2 -and (Test-Path $map)) {
+      Ok "$s : dbg.json is deterministic (SHA256 $($h1.Substring(0, 16))...)"
+    } else {
+      Bad "$s : [8.8] recompiling produced a different dbg.json ($h1 vs $h2)"
+    }
+
+    # [8.9] no side file when the switch is OFF (ordinary products stay untouched)
+    if (Test-Path "$plain.dbg.json") {
+      Bad "$s : [8.9] -debug OFF still wrote a .dbg.json"
+    } else {
+      Ok "$s : -debug OFF writes no .dbg.json"
+    }
+  }
 }
 Pop-Location
 
@@ -253,7 +521,9 @@ if (-not (Test-Path $condSrc)) {
     # actual set: the line every comparison instruction resolves to, via addr2line (external oracle)
     $got = @()
     foreach ($l in (& $Objdump -d $d6 2>$null)) {
-      if ($l -match '^\s*([0-9a-fA-F]+):\s+(?:[0-9a-fA-F]{2} )+\s*cmp\s') {
+      # v5（2026-10-21，D-2）：-debug 关掉驻留后，立即数比内存的条件会打印成 `cmpl`（带尺寸后缀），
+      #   老正则只认裸 `cmp`，会把 while/for 的条件**漏读**（假红）。语义上 cmpl/cmpq 都是比较指令，一并收。
+      if ($l -match '^\s*([0-9a-fA-F]+):\s+(?:[0-9a-fA-F]{2} )+\s*cmp[lwq]?\s') {
         $a = [Convert]::ToUInt64($matches[1], 16)
         $loc = (& $Addr2line -f -C -e $d6 ('0x{0:X}' -f $a) 2>$null | Select-Object -Last 1)
         if ($loc -match ':(\d+)$') { $got += [int]$matches[1] }

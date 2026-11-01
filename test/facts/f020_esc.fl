@@ -47,7 +47,7 @@
 // host compiler's string-literal escape parser can change the test data.  No raw pointer value is
 // ever printed (ASLR would make the two ends differ).  Pure ASCII on purpose.
 //
-// NOTE ON STRING LITERALS IN THIS FILE: real flint.exe REJECTS "\b" and "\f" as source-level escape
+// NOTE ON STRING LITERALS IN THIS FILE: real hlc.exe REJECTS "\b" and "\f" as source-level escape
 // sequences ("unknown escape"), while boot accepts them and keeps them raw.  Therefore this probe
 // uses "\x08" / "\x0C" for those two bytes -- both ends accept \xNN.  See the report's "honest
 // boundaries" section.

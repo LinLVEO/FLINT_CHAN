@@ -1,0 +1,197 @@
+// gfx.fl — 像素层（M0）：把 FLGUI 表面（32bpp DIB）当**帧缓冲直写**
+//
+// 用法：include "gfx.fl"（与本文件同目录；也可 include "../../lib/gfx.fl"）
+// 依赖：ui_lib.fl 的 `struct Surf`（bits = BGRA 字节指针，行宽 = bw，顶朝下）
+//
+// 设计三条（2026-10-30 M0 立）：
+//   ① **零新增 api**：不建 DIB、不建窗口，只借 Surf 已有的 DIB 直写通道
+//      （导入预算 96/96 已满格，见 flgui_win32.fl 的 api 段注释）；
+//   ② **指针不进全局**：帧缓冲句柄走局部 `struct GfxBuf` 传参（T1 红线：地址不许装进全局 int）；
+//   ③ 颜色一律 **0x00RRGGBB**（与 FLGUI 主题同口径），写进 DIB 时补 A=0xFF（不透明）。
+//
+// 像素布局（照 ui_lib.fl 的 surf_alpha 抄，别自己推）：
+//   char *px = surf.bits;   i = (y * stride + x) * 4;
+//   px[i]=B  px[i+1]=G  px[i+2]=R  px[i+3]=A
+//   ⚠️ 不能用 `int *p; p[i]` —— 本编译器 p[i] 的**元素步长是 8 字节槽**，
+//      对 4 字节/像素的 DIB 是错的（见 SKILL「int 宽度四处分岔」）。
+include "ui_lib.fl"
+
+// 帧缓冲视图（局部变量，跟着调用栈走）
+struct GfxBuf { int *bits; int w; int h; int stride; }   // bits 用 int*：本编译器 struct 字段不支持 char*，用时转 char*
+
+// 绑定：把表面 s 的 DIB 当 w×h 帧缓冲用。1=成功，0=参数越界/表面没建好。
+int gfx_attach(struct GfxBuf *b, struct Surf *s, int w, int h) {
+  if (s == 0) { return 0; }
+  if (s->bits == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  if (w > s->bw) { return 0; }
+  if (h > s->bh) { return 0; }
+  b->bits = s->bits;
+  b->w = w;
+  b->h = h;
+  b->stride = s->bw;          // 行宽 = DIB 位图宽（不是逻辑宽）——写像素必须按它跳行
+  return 1;
+}
+
+// 整屏填充：**按 stride 逐行**，只清 w×h 逻辑区（不碰 DIB 右侧留白）。
+// ⚠️ 曾经写成一个连续 n = w*h*4 的循环 —— 当 stride（DIB 位图宽）> w 时
+//    它只清了前 n 个字节，屏幕下半截没清到，表现为"上一帧残影"（2026-10-31 被用户抓到）。
+int gfx_clear(struct GfxBuf *b, int color) {
+  char *px = b->bits;
+  int bl = color & 255;
+  int gr = (color >> 8) & 255;
+  int rd = (color >> 16) & 255;
+  int y = 0;
+  int x = 0;
+  int i = 0;
+  while (y < b->h) {
+    i = y * b->stride * 4;
+    x = 0;
+    while (x < b->w) {
+      px[i] = bl;
+      px[i + 1] = gr;
+      px[i + 2] = rd;
+      px[i + 3] = 255;
+      i = i + 4;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 0;
+}
+
+// 写一个像素（越界静默丢弃）。1=写了，0=越界。
+int gfx_px(struct GfxBuf *b, int x, int y, int color) {
+  char *px = b->bits;
+  int i = 0;
+  if (x < 0) { return 0; }
+  if (y < 0) { return 0; }
+  if (x >= b->w) { return 0; }
+  if (y >= b->h) { return 0; }
+  i = (y * b->stride + x) * 4;
+  px[i] = color & 255;
+  px[i + 1] = (color >> 8) & 255;
+  px[i + 2] = (color >> 16) & 255;
+  px[i + 3] = 255;
+  return 1;
+}
+
+// 读一个像素（调试/判据用）：返回 0x00RRGGBB；越界返回 -1。
+int gfx_get(struct GfxBuf *b, int x, int y) {
+  char *px = b->bits;
+  int i = 0;
+  int c = 0;
+  if (x < 0) { return -1; }
+  if (y < 0) { return -1; }
+  if (x >= b->w) { return -1; }
+  if (y >= b->h) { return -1; }
+  i = (y * b->stride + x) * 4;
+  c = (px[i + 2] & 255) << 16;
+  c = c | ((px[i + 1] & 255) << 8);
+  c = c | (px[i] & 255);
+  return c;
+}
+
+// 实心矩形 [x0,x1) × [y0,y1)，自动裁剪。返回写入的像素数（=0 表示整块在屏外）。
+int gfx_rect(struct GfxBuf *b, int x0, int y0, int x1, int y1, int color) {
+  char *px = b->bits;
+  int bl = 0;
+  int gr = 0;
+  int rd = 0;
+  int y = 0;
+  int x = 0;
+  int i = 0;
+  int n = 0;
+  if (x0 < 0) { x0 = 0; }
+  if (y0 < 0) { y0 = 0; }
+  if (x1 > b->w) { x1 = b->w; }
+  if (y1 > b->h) { y1 = b->h; }
+  if (x0 >= x1) { return 0; }
+  if (y0 >= y1) { return 0; }
+  bl = color & 255;
+  gr = (color >> 8) & 255;
+  rd = (color >> 16) & 255;
+  y = y0;
+  while (y < y1) {
+    i = (y * b->stride + x0) * 4;
+    x = x0;
+    while (x < x1) {
+      px[i] = bl; px[i + 1] = gr; px[i + 2] = rd; px[i + 3] = 255;
+      i = i + 4;
+      x = x + 1;
+    }
+    n = n + (x1 - x0);
+    y = y + 1;
+  }
+  return n;
+}
+
+// 1px 矩形框（内空）
+int gfx_box(struct GfxBuf *b, int x0, int y0, int x1, int y1, int color) {
+  int n = 0;
+  n = n + gfx_rect(b, x0, y0, x1, y0 + 1, color);           // 上
+  n = n + gfx_rect(b, x0, y1 - 1, x1, y1, color);           // 下
+  n = n + gfx_rect(b, x0, y0 + 1, x0 + 1, y1 - 1, color);   // 左
+  n = n + gfx_rect(b, x1 - 1, y0 + 1, x1, y1 - 1, color);   // 右
+  return n;
+}
+
+// 推上屏：ULW（UpdateLayeredWindow）。**不调 surf_alpha** —— 那是面板档的圆角/贴纸 alpha，
+// 会改写我们写的像素；游戏画面要 1:1 原样上屏。
+// 返回 surf_flush 的结果（1=成功）。
+int gfx_present(struct Surf *s) {
+  struct RECT wr;
+  int gw = 0;
+  int gh = 0;
+  // 2026-10-31 崩溃修复：wr 必须**先清零**再 GetWindowRect。
+  //   句柄无效/窗口瞬时不可读时 GetWindowRect 不写 wr，留的是脏栈值 ⇒ gw/gh 变垃圾
+  //   ⇒ surf_flush 的 ULW 拿垃圾尺寸推屏 ⇒ 崩溃。gui_win_show 早有这一行，这里漏了。
+  wr.l = 0;
+  wr.t = 0;
+  wr.r = 0;
+  wr.b = 0;
+  GetWindowRect(s->h, &wr);
+  gw = wr.r - wr.l;
+  gh = wr.b - wr.t;
+  if (gw <= 0) { return 0; }
+  if (gh <= 0) { return 0; }
+  if (gw > s->bw) { gw = s->bw; }     // 夹到 DIB 上限（与 gui_win_show 同口径）
+  if (gh > s->bh) { gh = s->bh; }
+  s->cw = gw;
+  s->ch = gh;
+  return surf_flush(s);
+}
+
+// 叠白（打击感闪白）：按 alpha 把每个像素往白推，**不抹掉原画面**。
+// v = v + (255 - v) * alpha / 255；alpha<=0 原样返回 0，alpha>255 夹到 255。
+// 和 gfx_clear 一样**按 stride 逐行**（只处理 w×h 逻辑区）。
+int gfx_flash(struct GfxBuf *b, int alpha) {
+  char *px = 0;
+  int y = 0;
+  int x = 0;
+  int i = 0;
+  int d = 0;
+  if (b == 0) { return 0; }
+  if (b->bits == 0) { return 0; }
+  if (alpha <= 0) { return 0; }
+  if (alpha > 255) { alpha = 255; }
+  px = b->bits;
+  y = 0;
+  while (y < b->h) {
+    i = y * b->stride * 4;
+    x = 0;
+    while (x < b->w) {
+      d = (255 - (px[i] & 255)) * alpha / 255;
+      px[i] = (px[i] & 255) + d;
+      d = (255 - (px[i + 1] & 255)) * alpha / 255;
+      px[i + 1] = (px[i + 1] & 255) + d;
+      d = (255 - (px[i + 2] & 255)) * alpha / 255;
+      px[i + 2] = (px[i + 2] & 255) + d;
+      i = i + 4;
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  return 1;
+}

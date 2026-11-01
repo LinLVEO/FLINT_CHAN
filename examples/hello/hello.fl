@@ -1,6 +1,6 @@
 // hello.fl -- the smallest FLINT program.
 //
-// Build:  flint.exe examples\hello\hello.fl        (writes hello.exe next to the source)
+// Build:  hlc.exe examples\hello\hello.fl        (writes hello.exe next to the source)
 // Run:    examples\hello\hello.exe
 //
 // Two things that surprise everyone at first:

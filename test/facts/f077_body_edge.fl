@@ -1,0 +1,88 @@
+// f077_body_edge.fl -- M3 第三刀：像素级贴边 + 跳跃
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 地图 4x4 tile（16x16）：左列 tx=0、右列 tx=3、底行 ty=3 全实心，其余空。
+//   bit0  贴左墙：初始 x=32、vx=-1 格/tick、gravity=0 -> 跑 100 步后 x == 16（墙右边界）
+//   bit1  贴右墙：初始 x=24、vx=+1 格/tick -> x == 48（右墙左边界 48）
+//   bit2  贴地：从 (32,0) 下落 200 步 -> y == 40（底行顶 48 - 身高 8）
+//   bit3  跳跃上升：vy=-2 格/tick -> 10 步后 y < 起始 y
+//   bit4  跳跃后落地：继续跑 200 步 -> onground=1 且 y == 40
+//   bit5  空中 onground=0：起跳后第一步 onground 为 0
+//   bit6  单向：vx=0 时水平不动（x 不变）
+//   bit7  确定性：同一"跳-落"序列跑两次，落点逐位相同
+include "../../lib/body.fl"
+
+int jump_land_y(struct Grid *gp) {
+  struct Body b;
+  int i = 0;
+  body_init(&b, 32, 0, 8, 8);
+  i = 0;
+  while (i < 30) { body_step(gp, &b, 32768); i = i + 1; }
+  b.vy = -2 * 65536;
+  i = 0;
+  while (i < 200) { body_step(gp, &b, 32768); i = i + 1; }
+  return b.y * 4 + b.onground;
+}
+
+int main() {
+  struct Grid g;
+  int map[16];
+  int mask = 0;
+  struct Body b;
+  int i = 0;
+  int y0 = 0;
+  int x0 = 0;
+
+  map[0] = 1; map[1] = 0; map[2] = 0; map[3] = 1;
+  map[4] = 1; map[5] = 0; map[6] = 0; map[7] = 1;
+  map[8] = 1; map[9] = 0; map[10] = 0; map[11] = 1;
+  map[12] = 1; map[13] = 1; map[14] = 1; map[15] = 1;
+  if (grid_init(&g, map, 4, 4, 16, 16) == 0) { return 1; }
+
+  // bit0 贴左墙
+  if (body_init(&b, 32, 32, 8, 8) == 0) { return 2; }
+  b.vx = -65536;
+  i = 0;
+  while (i < 100) { body_step(&g, &b, 0); i = i + 1; }
+  if (b.x == 16 * 65536) { mask = mask | 1; }
+
+  // bit1 贴右墙（角色右边缘贴墙左边界 48 -> x = 40）
+  if (body_init(&b, 24, 32, 8, 8) == 0) { return 3; }
+  b.vx = 65536;
+  i = 0;
+  while (i < 100) { body_step(&g, &b, 0); i = i + 1; }
+  if (b.x == 40 * 65536) { mask = mask | 2; }
+
+  // bit2 贴地
+  if (body_init(&b, 32, 0, 8, 8) == 0) { return 4; }
+  i = 0;
+  while (i < 200) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y == 40 * 65536) { mask = mask | 4; }
+
+  // bit3 + bit4 + bit5 跳跃
+  if (body_init(&b, 32, 0, 8, 8) == 0) { return 5; }
+  i = 0;
+  while (i < 100) { body_step(&g, &b, 32768); i = i + 1; }
+  y0 = b.y;
+  b.vy = -2 * 65536;
+  body_step(&g, &b, 32768);
+  if (b.onground == 0) { mask = mask | 32; }
+  if (b.y < y0) { mask = mask | 8; }
+  i = 0;
+  while (i < 200) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.onground == 1) {
+    if (b.y == 40 * 65536) { mask = mask | 16; }
+  }
+
+  // bit6 vx=0 水平不动
+  x0 = b.x;
+  body_step(&g, &b, 32768);
+  if (b.x == x0) { mask = mask | 64; }
+
+  // bit7 确定性
+  if (jump_land_y(&g) == jump_land_y(&g)) { mask = mask | 128; }
+
+  print(["f077 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

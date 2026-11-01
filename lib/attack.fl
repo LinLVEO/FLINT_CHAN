@@ -1,0 +1,48 @@
+// attack.fl -- 攻击判定盒 + 三段连击 + 输入缓冲（M4 第二刀）
+//
+// 用法：include "attack.fl"（带进 phys.fl）
+// 口径：
+//   - 攻击盒 = 角色前方 16px、高度同角色（朝右在右边缘外，朝左对称）；
+//   - 连击窗口 10 帧：窗口内按下的键进缓冲（buffered），下一次 tick 消费一段；
+//   - 超过 3 段不再加；窗口过期 step 归 0。
+include "phys.fl"
+
+// 攻击盒命中？face_right 非 0 = 朝右。返回 1=命中。
+int attack_hit(int x, int y, int w, int h, int face_right, int ex, int ey, int ew, int eh) {
+  if (face_right != 0) {
+    return phys_aabb(x + w, y, 16, h, ex, ey, ew, eh);
+  }
+  return phys_aabb(x - 16, y, 16, h, ex, ey, ew, eh);
+}
+
+struct Combo { int step; int timer; int buffered; }
+
+int combo_start(struct Combo *c) {
+  if (c == 0) { return 0; }
+  c->step = 0;
+  c->timer = 0;
+  c->buffered = 0;
+  return 1;
+}
+
+// 记一次按键：无条件进缓冲，由 tick 决定能不能消费（窗口规则在 tick 里）
+int combo_press(struct Combo *c) {
+  if (c == 0) { return 0; }
+  c->buffered = 1;
+  return 1;
+}
+
+// 每帧 tick：timer 递减 -> 消费缓冲（step+1、开新窗口）-> 窗口到 0 则归零
+int combo_tick(struct Combo *c) {
+  if (c == 0) { return 0; }
+  if (c->timer > 0) { c->timer = c->timer - 1; }
+  if (c->buffered == 1) {
+    c->buffered = 0;
+    if (c->step < 3) {
+      c->step = c->step + 1;
+      c->timer = 10;
+    }
+  }
+  if (c->timer == 0) { c->step = 0; }
+  return 0;
+}

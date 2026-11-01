@@ -1,0 +1,35 @@
+// f048_uint32_ops.fl -- v1.9.0 unsigned 32-bit: wrap-around, unsigned div/mod, logical shift,
+// unsigned comparison, bitwise ops. 真 flint only (boot has no uint_*: same known gap as double/int_64).
+//
+// WHY THIS PROBE EXISTS: every row below is a place where a naive implementation silently
+// produces the signed answer: `cdq; idiv` instead of `xor edx,edx; div` gives -1/2 == 0 for
+// 4294967295/2; `sar` instead of `shr` gives -1 for 4294967295>>1; `setl` instead of `setb`
+// makes `u > 1` false. All of them compile fine, so only a value judge catches them.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\uint-exp.js        (section "== f048"; BigInt mod 2^32 + floor div + >>)
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 4095 (all twelve bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  uint_32 a = 0;
+  a = a - 1;                      // 2^32-1 by mod-2^32 wrap (no saturation)
+
+  int m = 0;
+  if (a == 4294967295) { m = m + 1; }
+  if (a + 1 == 0) { m = m + 2; }                 // + wraps back to 0
+  if (a * 2 == 4294967294) { m = m + 4; }        // * wraps, high half stays clean
+  if (a / 2 == 2147483647) { m = m + 8; }        // **unsigned** division
+  if (a / 3 == 1431655765) { m = m + 16; }
+  if (a % 10 == 5) { m = m + 32; }               // **unsigned** modulo
+  if (a >> 1 == 2147483647) { m = m + 64; }      // **logical** shift
+  if (a > 1) { m = m + 128; }                    // **unsigned** comparison
+  if (!(a < 1)) { m = m + 256; }
+  if ((a & 255) == 255) { m = m + 512; }
+  if (~a == 0) { m = m + 1024; }                 // ~ wraps inside the type
+  if (a == a) { m = m + 2048; }
+
+  print(["a=", a, " mask=", m, " expect=4095\n"]);
+  if (m == 4095) { return 42; }
+  return 7;
+}

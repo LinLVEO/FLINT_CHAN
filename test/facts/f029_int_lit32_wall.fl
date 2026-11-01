@@ -38,7 +38,7 @@
 //   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f029_int_lit32_wall -Compiler boot
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f029_int_lit32_wall.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl
 //
 // ASCII only, no BOM. The only out-of-range literal in this file is the one under test.

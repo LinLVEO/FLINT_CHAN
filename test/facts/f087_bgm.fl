@@ -1,0 +1,53 @@
+// f087_bgm.fl -- M6 第二刀：BGM 循环（PlaySoundA 的 SND_LOOP）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  audio_play_loop("apps/beep.wav") == 1
+//   bit1  循环播放调用耗时 < 100 ms（异步）
+//   bit2  audio_stop() != 0（能停）
+//   bit3  audio_play_loop(0) == 0
+//   bit4  不存在的文件循环提交不崩
+//   bit5  连播两次不崩
+//   bit6  停掉循环后普通 audio_play == 1
+//   bit7  两次循环+停止序列结果一致（确定性）
+include "../../lib/audio.fl"
+
+int loop_once() {
+  int r = 0;
+  r = audio_play_loop("apps/beep.wav");
+  r = r * 10 + audio_stop();
+  return r;
+}
+
+int main() {
+  int mask = 0;
+  int t0 = 0;
+  int dt = 0;
+
+  if (audio_play_loop("apps/beep.wav") == 1) { mask = mask | 1; }
+
+  t0 = GetTickCount();
+  audio_play_loop("apps/beep.wav");
+  dt = GetTickCount() - t0;
+  if (dt < 100) { mask = mask | 2; }
+
+  if (audio_stop() != 0) { mask = mask | 4; }
+
+  if (audio_play_loop(0) == 0) { mask = mask | 8; }
+
+  audio_play_loop("test/tmp/f087_none.wav");
+  audio_stop();
+  if (audio_stop() != 0) { mask = mask | 16; }
+
+  audio_play_loop("apps/beep.wav");
+  audio_play_loop("apps/beep.wav");
+  if (audio_stop() != 0) { mask = mask | 32; }
+
+  if (audio_play("apps/beep.wav") == 1) { mask = mask | 64; }
+  audio_stop();
+
+  if (loop_once() == loop_once()) { mask = mask | 128; }
+
+  print(["f087 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

@@ -1,0 +1,57 @@
+// f080_pool.fl -- M5 第一刀：定长对象池（一次分配 + 空闲栈）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  init 后 top == n（8）
+//   bit1  首次 alloc 返回 0
+//   bit2  第二次 alloc 返回 1
+//   bit3  再取 6 个用尽后 alloc 返回 -1
+//   bit4  free(3) 后 alloc 返回 3（LIFO 回收）
+//   bit5  连续 1000 轮 alloc/free 后 top == n（无泄漏）
+//   bit6  pool_set / pool_get 字段写读（idx=5, field=2 -> 777）
+//   bit7  越界 free(99) 返回 0
+include "../../lib/pool.fl"
+
+int main() {
+  struct Pool p;
+  int data[32];
+  int freebuf[8];
+  int mask = 0;
+  int i = 0;
+  int idx = 0;
+
+  if (pool_init(&p, data, freebuf, 8, 4) == 0) { return 1; }
+  if (p.top == 8) { mask = mask | 1; }
+
+  if (pool_alloc(&p) == 0) { mask = mask | 2; }
+  if (pool_alloc(&p) == 1) { mask = mask | 4; }
+
+  i = 0;
+  while (i < 6) {
+    idx = pool_alloc(&p);
+    i = i + 1;
+  }
+  if (pool_alloc(&p) == -1) { mask = mask | 8; }
+
+  if (pool_free(&p, 3) == 1) {
+    if (pool_alloc(&p) == 3) { mask = mask | 16; }
+  }
+
+  if (pool_init(&p, data, freebuf, 8, 4) == 0) { return 2; }
+  i = 0;
+  while (i < 1000) {
+    idx = pool_alloc(&p);
+    pool_free(&p, idx);
+    i = i + 1;
+  }
+  if (p.top == 8) { mask = mask | 32; }
+
+  if (pool_set(&p, 5, 2, 777) == 1) {
+    if (pool_get(&p, 5, 2) == 777) { mask = mask | 64; }
+  }
+
+  if (pool_free(&p, 99) == 0) { mask = mask | 128; }
+
+  print(["f080 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

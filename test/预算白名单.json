@@ -1,0 +1,16 @@
+﻿{
+  "Schema": 1,
+  "Tool": "budget-gate",
+  "Note": "超软预算的显式例外台账。每条必须写 Why（为什么允许超）/ Owner（谁负责还）/ Due（什么时候还），缺一项门就红。格式与规则见 tools\\预算门.ps1 文件头；归因写在这里而不是 JSON 注释里，因为它们要被机器核。",
+  "Entries": [
+    {
+      "Artifact": "apps\\studio_native\\studio_win.exe",
+      "Imports": 103,
+      "Modules": 6,
+      "Why": "FLINT Studio 原生版（GUI 门面）。103 条 = 软预算 96 + 7；模块 6/8 正常（kernel32/user32/gdi32/dwmapi + studio_text.dll 本 app 自带文本 DLL + imm32 输入法）。超出的 7 条不是本 app 调用出来的：FLINT 的导入表由 include 闭包里的 api 声明驱动，不由调用驱动，少调几个 API 一格都省不下来；要压回 96 只能从共享库（lib\\flgui_win32.fl / lib\\ui_lib.fl 等）删声明，那会同时改掉所有 FLGUI 产物的计数 = 全仓导入预算重排，不是 studio_win 单方面能解的。",
+      "Owner": "待拍板：用户/主 Agent（本条目由取证子代理按实测代填，尚未经所有人签字）",
+      "Due": "下一次往 studio_win 加 API 之前必须先还这 7 格（或随「导入预算重排」一刀一起还）；具体日期未拍板",
+      "Evidence": "2026-10-31 实测 apps\\studio_native\\studio_win.exe 103/96；归因口径见 待拍板-面板导入预算腾挪候选.md §0（声明驱动，非调用驱动）"
+    }
+  ]
+}

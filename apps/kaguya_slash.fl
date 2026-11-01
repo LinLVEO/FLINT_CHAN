@@ -1,0 +1,339 @@
+// apps/kaguya_slash.fl -- Kaguya double slash VFX demo (FLC pixel layer).
+//
+// Reference: 26x26 pixel grid (white = first slash, cyan = second slash).
+// Timeline: white sweeps in -> holds -> fades into particles ->
+//           cyan sweeps in -> holds -> fades into particles -> loop.
+//
+// Build: hlc build apps/kaguya_slash.fl
+// Controls: close the window to quit. It loops by itself.
+include "../lib/ui_lib.fl"
+include "../lib/gfx.fl"
+include "../lib/io_lib.fl"
+
+api gdi32 int BitBlt(int, int, int, int, int, int, int, int, int);
+api kernel32 int Sleep(int);
+api user32 int AdjustWindowRect(int, int, int);
+api user32 int PostQuitMessage(int);
+
+int slash_proc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  if (msg == 0x14) { return 1; }
+  if (msg == 0x02) { PostQuitMessage(0); return 0; }
+  if (msg == 0x20) { SetCursor(LoadCursorA(0, 32512)); return 1; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int isqrt(int n) {
+  int x = 0;
+  int y = 0;
+  if (n <= 0) { return 0; }
+  x = n;
+  y = (x + 1) / 2;
+  while (y < x) { x = y; y = (x + n / x) / 2; }
+  return x;
+}
+
+// masks: bit gx of row gy = 1 means that cell is lit
+int wm[26];
+int cm[26];
+int wgx[120];
+int wgy[120];
+int cgx[120];
+int cgy[120];
+int wn = 0;
+int cn = 0;
+
+// particle pool
+int gpx[200];
+int gpy[200];
+int gvx[200];
+int gvy[200];
+int glife[200];
+int gmax[200];
+int glcol[200];
+int rng = 12345;
+
+int rnd() {
+  rng = rng * 1103515245 + 12345;
+  return (rng >> 16) & 0x7fff;
+}
+
+int mixc(int bg, int fg, int a) {
+  int r = 0;
+  int g = 0;
+  int bb = 0;
+  int br = 0;
+  int bgc = 0;
+  int bb2 = 0;
+  if (a < 0) { a = 0; }
+  if (a > 255) { a = 255; }
+  br = (bg >> 16) & 255;
+  bgc = (bg >> 8) & 255;
+  bb2 = bg & 255;
+  r = br + ((((fg >> 16) & 255) - br) * a) / 255;
+  g = bgc + ((((fg >> 8) & 255) - bgc) * a) / 255;
+  bb = bb2 + (((fg & 255) - bb2) * a) / 255;
+  return (r << 16) | (g << 8) | bb;
+}
+
+int main() {
+  struct WNDCLASS wc;
+  struct Surf s;
+  struct GfxBuf b;
+  struct RECT rc;
+  struct MSG msg;
+  int *h = 0;
+  int *wdc = 0;
+  int cw = 480;
+  int ch = 270;
+  int ox = 136;
+  int oy = 31;
+  int cell = 8;
+  int run = 1;
+  int t = 0;
+  int i = 0;
+  int gx = 0;
+  int gy = 0;
+  int k = 0;
+  int phase = 0;
+  int alpha = 0;
+  int prog = 0;
+  int dist = 0;
+  int maxd = 24;
+  int base = 0;
+  int ddx = 0;
+  int ddy = 0;
+  int fg = 0;
+  int bg = 0x000B0E1A;
+  int px = 0;
+  int py = 0;
+  int idx = 0;
+  int sx = 14;
+  int sy = 1;
+  int cx0 = 4;
+  int cy0 = 3;
+
+  wm[0] = 0x0; cm[0] = 0x0;
+  wm[1] = 0xC000; cm[1] = 0x0;
+  wm[2] = 0x6000; cm[2] = 0x0;
+  wm[3] = 0x7000; cm[3] = 0x10;
+  wm[4] = 0x1800; cm[4] = 0x30;
+  wm[5] = 0x0; cm[5] = 0x0;
+  wm[6] = 0x1800; cm[6] = 0x60;
+  wm[7] = 0xA00; cm[7] = 0x60;
+  wm[8] = 0xA00; cm[8] = 0xC0;
+  wm[9] = 0xA00; cm[9] = 0x1C0;
+  wm[10] = 0x800; cm[10] = 0x380;
+  wm[11] = 0x0; cm[11] = 0x1B00;
+  wm[12] = 0x0; cm[12] = 0x7A00;
+  wm[13] = 0xA00; cm[13] = 0x1F000;
+  wm[14] = 0x1800; cm[14] = 0x7E000;
+  wm[15] = 0x3800; cm[15] = 0x3F0000;
+  wm[16] = 0x7000; cm[16] = 0x0;
+  wm[17] = 0x6000; cm[17] = 0x0;
+  wm[18] = 0xE000; cm[18] = 0x0;
+  wm[19] = 0x1C000; cm[19] = 0x0;
+  wm[20] = 0x18000; cm[20] = 0x0;
+  wm[21] = 0x0; cm[21] = 0x0;
+  wm[22] = 0x70000; cm[22] = 0x0;
+  wm[23] = 0x0; cm[23] = 0x0;
+  wm[24] = 0x0; cm[24] = 0x0;
+  wm[25] = 0x0; cm[25] = 0x0;
+
+  i = 0;
+  while (i < 200) { glife[i] = 0; i = i + 1; }
+
+  // expand masks into cell lists (for particle emission)
+  wn = 0;
+  cn = 0;
+  gy = 0;
+  while (gy < 26) {
+    gx = 0;
+    while (gx < 26) {
+      if (((wm[gy] >> gx) & 1) != 0) { wgx[wn] = gx; wgy[wn] = gy; wn = wn + 1; }
+      if (((cm[gy] >> gx) & 1) != 0) { cgx[cn] = gx; cgy[cn] = gy; cn = cn + 1; }
+      gx = gx + 1;
+    }
+    gy = gy + 1;
+  }
+
+  wc.style = 0;
+  wc.fn = &slash_proc;
+  wc.cb1 = 0;
+  wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0;
+  wc.cur = LoadCursorA(0, 32512);
+  wc.brush = 0;
+  wc.menu = 0;
+  wc.cls = "KAGUYA_SLASH";
+  if (RegisterClassA(&wc) == 0) { return 1; }
+
+  rc.l = 0; rc.t = 0; rc.r = cw; rc.b = ch;
+  AdjustWindowRect(&rc, 0x00CF0000, 0);
+  h = CreateWindowExA(0, "KAGUYA_SLASH", "Kaguya - double slash", 0x00CF0000,
+                      420, 240, rc.r - rc.l, rc.b - rc.t, 0, 0, 0, 0);
+  if (h == 0) { return 2; }
+
+  s.h = h;
+  s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = cw; s.bh = ch;
+  s.cw = cw; s.ch = ch;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0;
+  s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 3; }
+  if (gfx_attach(&b, &s, cw, ch) == 0) { return 4; }
+
+  ShowWindow(h, 1);
+
+  while (run == 1) {
+    while (PeekMessageA(&msg, 0, 0, 0, 1) != 0) {
+      if (msg.message == 0x0012) { run = 0; }
+      DispatchMessageA(&msg);
+    }
+    if (run == 1) {
+      // ---- background + grid ----
+      gfx_clear(&b, bg);
+      gx = 0;
+      while (gx <= 26) {
+        gfx_rect(&b, ox + gx * cell, oy, ox + gx * cell + 1, oy + 26 * cell, 0x00131A2A);
+        gx = gx + 1;
+      }
+      gy = 0;
+      while (gy <= 26) {
+        gfx_rect(&b, ox, oy + gy * cell, ox + 26 * cell, oy + gy * cell + 1, 0x00131A2A);
+        gy = gy + 1;
+      }
+
+      // ---- timeline ----
+      if (t < 8) { phase = 0; prog = t * 100 / 8; alpha = 255; }
+      else if (t < 22) { phase = 1; prog = 100; alpha = 255; }
+      else if (t < 40) { phase = 2; prog = 100; alpha = 255 - (t - 22) * 255 / 18; }
+      else if (t < 48) { phase = 3; prog = (t - 40) * 100 / 8; alpha = 255; }
+      else if (t < 62) { phase = 4; prog = 100; alpha = 255; }
+      else if (t < 80) { phase = 5; prog = 100; alpha = 255 - (t - 62) * 255 / 18; }
+      else { phase = 6; prog = 100; alpha = 0; }
+
+      // ---- emit particles while fading ----
+      if (phase == 2) {
+        k = 0;
+        while (k < 6) {
+          idx = 0;
+          if (wn > 0) { idx = rnd() % wn; }
+          gx = wgx[idx];
+          gy = wgy[idx];
+          i = 0;
+          while (i < 200) {
+            if (glife[i] <= 0) {
+              glife[i] = 10 + (rnd() % 12);
+              gmax[i] = glife[i];
+              gpx[i] = ox + gx * cell + cell / 2;
+              gpy[i] = oy + gy * cell + cell / 2;
+              gvx[i] = (rnd() % 7) - 3;
+              gvy[i] = (rnd() % 5) - 4;
+              glcol[i] = 0;
+              i = 200;
+            }
+            i = i + 1;
+          }
+          k = k + 1;
+        }
+      }
+      if (phase == 5) {
+        k = 0;
+        while (k < 6) {
+          idx = 0;
+          if (cn > 0) { idx = rnd() % cn; }
+          gx = cgx[idx];
+          gy = cgy[idx];
+          i = 0;
+          while (i < 200) {
+            if (glife[i] <= 0) {
+              glife[i] = 10 + (rnd() % 12);
+              gmax[i] = glife[i];
+              gpx[i] = ox + gx * cell + cell / 2;
+              gpy[i] = oy + gy * cell + cell / 2;
+              gvx[i] = (rnd() % 7) - 3;
+              gvy[i] = (rnd() % 5) - 4;
+              glcol[i] = 1;
+              i = 200;
+            }
+            i = i + 1;
+          }
+          k = k + 1;
+        }
+      }
+
+      // ---- white slash (phase 0..2) ----
+      if (phase <= 2) {
+        gy = 0;
+        while (gy < 26) {
+          gx = 0;
+          while (gx < 26) {
+            if (((wm[gy] >> gx) & 1) != 0) {
+              ddx = gx - sx;
+              ddy = gy - sy;
+              dist = isqrt(ddx * ddx + ddy * ddy);
+              if (dist <= prog * maxd / 100) {
+                fg = mixc(bg, 0x00F0F0F0, alpha);
+                gfx_rect(&b, ox + gx * cell + 1, oy + gy * cell + 1,
+                         ox + gx * cell + cell - 1, oy + gy * cell + cell - 1, fg);
+              }
+            }
+            gx = gx + 1;
+          }
+          gy = gy + 1;
+        }
+      }
+
+      // ---- cyan slash (phase 3..5) ----
+      if (phase >= 3) {
+        if (phase <= 5) {
+          gy = 0;
+          while (gy < 26) {
+            gx = 0;
+            while (gx < 26) {
+              if (((cm[gy] >> gx) & 1) != 0) {
+                ddx = gx - cx0;
+                ddy = gy - cy0;
+                dist = isqrt(ddx * ddx + ddy * ddy);
+                if (dist <= prog * maxd / 100) {
+                  fg = mixc(bg, 0x007FD8E8, alpha);
+                  gfx_rect(&b, ox + gx * cell + 1, oy + gy * cell + 1,
+                           ox + gx * cell + cell - 1, oy + gy * cell + cell - 1, fg);
+                }
+              }
+              gx = gx + 1;
+            }
+            gy = gy + 1;
+          }
+        }
+      }
+
+      // ---- particles ----
+      i = 0;
+      while (i < 200) {
+        if (glife[i] > 0) {
+          gpx[i] = gpx[i] + gvx[i];
+          gpy[i] = gpy[i] + gvy[i];
+          if (t % 4 == 0) { gvy[i] = gvy[i] + 1; }
+          glife[i] = glife[i] - 1;
+          base = 0x00F0F0F0;
+          if (glcol[i] == 1) { base = 0x007FD8E8; }
+          fg = mixc(bg, base, glife[i] * 255 / gmax[i]);
+          gfx_rect(&b, gpx[i], gpy[i], gpx[i] + 2, gpy[i] + 2, fg);
+        }
+        i = i + 1;
+      }
+
+      wdc = GetDC(h);
+      BitBlt(wdc, 0, 0, cw, ch, s.dc, 0, 0, 0x00CC0020);
+      ReleaseDC(h, wdc);
+      t = t + 1;
+      if (t >= 110) { t = 0; }
+      Sleep(16);
+    }
+  }
+  return 0;
+}

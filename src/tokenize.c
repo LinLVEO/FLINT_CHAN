@@ -85,9 +85,9 @@ static void verror_at(char *loc, char *fmt, va_list ap) {
 
   // v0.9.1：报错头带文件名 + 列号（原先只有行号、^ 前只有空格没有数字列）
   if (file)
-    fprintf(stderr, "FLINT 编译错误（%s 第 %d 行第 %d 列）:\n", file, line_no, col);
+    fprintf(stderr, "hlc 编译错误（%s 第 %d 行第 %d 列）:\n", file, line_no, col);
   else
-    fprintf(stderr, "FLINT 编译错误（第 %d 行第 %d 列）:\n", line_no, col);
+    fprintf(stderr, "hlc 编译错误（第 %d 行第 %d 列）:\n", line_no, col);
   fprintf(stderr, "  %.*s\n", (int)(line_end - line_start), line_start);
   fprintf(stderr, "  %*s^\n", (int)(loc - line_start), "");
   fprintf(stderr, "  ");
@@ -106,7 +106,7 @@ void error_at(char *loc, char *fmt, ...) {
 void error(char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  fprintf(stderr, "FLINT 错误: ");
+  fprintf(stderr, "hlc 错误: ");
   vfprintf(stderr, fmt, ap);
   fprintf(stderr, "\n");
   exit(1);

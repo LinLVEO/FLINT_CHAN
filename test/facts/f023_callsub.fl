@@ -44,7 +44,7 @@
 //   criterion: differs
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f023_callsub.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\boot\lib_parse.fl
 //
 // ASCII only, no BOM; prints no pointer value (only the first byte of a string literal and a constant).

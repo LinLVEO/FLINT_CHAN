@@ -1,0 +1,30 @@
+// test_catch.fl — catch 游戏 ROM 的无头判据：按住右键 4000 步 ⇒ 挡板必须停在右边界 56
+//   跑法：cd apps\chip8 && ..\..\hlc.exe test_catch.fl（CWD 决定 roms\catch.ch8 的相对路径）
+include "chip8_core.fl"
+include "../../lib/io_lib.fl"
+
+int main() {
+  struct C8 c;
+  char mem[4096];
+  int fb[2048];
+  int n = 0;
+  int i = 0;
+  int dtacc = 0;
+
+  c8_reset(&c, mem, fb);
+  n = std::file_read("roms\\catch.ch8", mem + 0x200, 3584);
+  if (n <= 0) { return 1; }
+
+  c.key = 6;                       // 一直按住「右」
+  while (i < 4000) {
+    c8_exec(&c, mem, fb);
+    dtacc = dtacc + 1;
+    if (dtacc >= 40) {             // 模拟 60Hz：每 40 条指令 DT 减 1
+      dtacc = 0;
+      if (c.dt > 0) { c.dt = c.dt - 1; }
+    }
+    i = i + 1;
+  }
+  if (c.v[0] == 56 && c.v[2] <= 30) { return 42; }
+  return c.v[0] * 1000 + c.v[2] * 10 + c.v[3];
+}

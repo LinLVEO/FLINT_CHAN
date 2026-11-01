@@ -1,0 +1,49 @@
+// f084_audio.fl -- M6 第一版：PlaySoundA 异步播放（不崩、不阻塞）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  audio_stop() != 0（成功停止，Windows 口径非 0）
+//   bit1  不存在的文件异步提交不崩：play 之后 stop 仍成功（异步档不校验文件存在）
+//   bit2  audio_play("apps/beep.wav") == 1
+//   bit3  播放调用耗时 < 100 ms（异步，不阻塞）
+//   bit4  audio_play(0) == 0
+//   bit5  连续播 5 次后 audio_stop() != 0（不崩）
+//   bit6  stop 后再播 == 1
+//   bit7  两次 stop 都非 0（确定性）
+include "../../lib/audio.fl"
+
+int main() {
+  int mask = 0;
+  int t0 = 0;
+  int dt = 0;
+  int i = 0;
+  int ok = 1;
+
+  if (audio_stop() != 0) { mask = mask | 1; }
+  audio_play("test/tmp/f084_none.wav");
+  if (audio_stop() != 0) { mask = mask | 2; }
+  if (audio_play("apps/beep.wav") == 1) { mask = mask | 4; }
+
+  t0 = GetTickCount();
+  audio_play("apps/beep.wav");
+  dt = GetTickCount() - t0;
+  if (dt < 100) { mask = mask | 8; }
+
+  if (audio_play(0) == 0) { mask = mask | 16; }
+
+  i = 0;
+  while (i < 5) {
+    audio_play("apps/beep.wav");
+    i = i + 1;
+  }
+  if (audio_stop() != 0) { mask = mask | 32; }
+
+  if (audio_play("apps/beep.wav") == 1) { mask = mask | 64; }
+
+  if (audio_stop() != 0) {
+    if (audio_stop() != 0) { mask = mask | 128; }
+  }
+
+  print(["f084 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

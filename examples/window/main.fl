@@ -1,5 +1,5 @@
 // main.fl -- the smallest FLGUI window: open a window, draw one line of text, close it.
-// Build: flint.exe examples\window\main.fl -o examples\window\window.exe
+// Build: hlc.exe examples\window\main.fl -o examples\window\window.exe
 // Run:   window.exe            real window; click the X (or the "close" button) to quit
 //        window.exe autoclose  real window that closes itself after 90 frames
 //        window.exe headless   NO window: one synthetic frame + gui_dump, exit 42

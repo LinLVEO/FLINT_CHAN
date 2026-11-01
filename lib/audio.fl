@@ -1,0 +1,29 @@
+// audio.fl -- 音频（M6 第一版）：winmm 的 PlaySoundA 异步播 WAV
+//
+// 用法：include "audio.fl"
+// 路线：先走 PlaySoundA 异步档（SND_FILENAME | SND_ASYNC）——不阻塞主循环、
+//   零线程管理；waveOut 流式留给"需要混音/循环点/低延迟"的第二版（工单 M6 待选）。
+// 边界：只播 WAV 文件路径；停止用 PlaySound(NULL)（Windows 口径返回 0）。
+// 导入：winmm.dll 1 条（软预算 96/8 只是台账量尺，超了照编）。
+api kernel32 int GetTickCount();
+api winmm int PlaySoundA(int, int, int);
+
+// 异步播放 WAV 文件。1 = 已开始，0 = 失败（文件不在/格式不支持）。
+// flags = SND_FILENAME(0x20000) | SND_ASYNC(0x1) | SND_NODEFAULT(0x2)
+//   —— NODEFAULT 必须带：否则文件找不到时 PlaySound 会改播系统默认音并返回 1。
+int audio_play(char *path) {
+  if (path == 0) { return 0; }
+  return PlaySoundA(path, 0, 0x20000 + 0x1 + 0x2);
+}
+
+// 停止当前播放。PlaySound(NULL) 成功返回非 0（Windows 口径）。
+int audio_stop() {
+  return PlaySoundA(0, 0, 0);
+}
+
+// 循环播放（SND_LOOP 必须与 SND_ASYNC 同用）。1=已开始，0=失败。
+// flags = SND_FILENAME | SND_ASYNC | SND_NODEFAULT | SND_LOOP(0x8)
+int audio_play_loop(char *path) {
+  if (path == 0) { return 0; }
+  return PlaySoundA(path, 0, 0x20000 + 0x1 + 0x2 + 0x8);
+}

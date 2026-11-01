@@ -1,0 +1,39 @@
+// f051_uint_mixed_conv.fl -- v1.9.0 usual arithmetic conversions: the *result type* of a mixed
+// expression, judged only through observable behaviour (value + high-half), never by inspection.
+//
+// WHY THIS PROBE EXISTS: SPEC pins four mixed rows:
+//   uint_32 + int      -> uint_32  (unsigned wins at equal width)
+//   uint_32 + int_64   -> int_64   (wider side is signed and holds all of uint_32's range)
+//   int_64  + uint_64  -> uint_64  (unsigned wins at equal width)
+//   uint_8  + int      -> int      (integer promotion)
+// A wrong promotion shows up as a *value* (the uint_32 side gets sign-extended to -1) or as a
+// *type* (the result prints/compares as signed). Both are caught here.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\uint-exp.js        (section "== f051")
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 255 (all eight bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  uint_32 u = 0;
+  u = u - 1;                       // 4294967295
+  int i = 0 - 1;
+  int_64 i64 = 0 - 1;
+  uint_64 u64 = 0;
+  u64 = u64 - 2;                   // 2^64-2
+  uint_8 b = 255;
+
+  int m = 0;
+  if (u + i == 4294967294) { m = m + 1; }             // uint_32 + int -> uint_32
+  if (u + i64 == 4294967294) { m = m + 2; }           // uint_32 + int_64 -> int_64 (zero-extended u)
+  if ((u + i64) > 0) { m = m + 4; }                   // ... and it is a positive int_64
+  if (i64 + u64 == (uint_64)0 - 3) { m = m + 8; }  // int_64 + uint_64 -> uint_64（无 u 后缀 ⇒ 用表达式写 2^64-3）
+  if ((i64 + u64) > 0) { m = m + 16; }                // unsigned comparison proves the type
+  if (u / i == 1) { m = m + 32; }                     // uint_32 / int(-1) = unsigned 4294967295/4294967295
+  if ((int_64)u == 4294967295) { m = m + 64; }        // value-preserving widening
+  if (b + i == 254) { m = m + 128; }                  // uint_8 promotes to int: 255 + (-1)
+
+  print(["u+i64=", u + i64, " i64+u64=", i64 + u64, " mask=", m, " expect=255\n"]);
+  if (m == 255) { return 42; }
+  return 7;
+}

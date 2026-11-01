@@ -1,0 +1,41 @@
+// f101_array_init.fl -- 局部 int 数组整体初始化（v2.5.0）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  {1,2,3} 基本形态（a[1] == 2）
+//   bit1  不足补 0（{1} -> a[1]..a[2] == 0）
+//   bit2  负值（{-5,7} -> c[0] == -5）
+//   bit3  enum 常量作元素
+//   bit4  表达式元素（2*3、1+1）
+//   bit5  与逐元素赋值结果相同（独立裁判）
+//   bit6  二维数组 row-major 填充（{1,2,3,4} -> m[1][0] == 3）
+//   bit7  长度 1 的数组
+enum N { TWO = 2, THREE = 3 };
+
+int main() {
+  int mask = 0;
+  int a[3] = {1, 2, 3};
+  int b[3] = {1};
+  int c[2] = {-5, 7};
+  int d[2] = {TWO, THREE};
+  int e[2] = {2 * 3, 1 + 1};
+  int g[3] = {7, 8, 9};
+  int h[3];
+  int m[2][2] = {1, 2, 3, 4};
+  int k[1] = {9};
+
+  if (a[1] == 2) { mask = mask | 1; }
+  if (b[1] == 0 && b[2] == 0) { mask = mask | 2; }
+  if (c[0] == -5) { mask = mask | 4; }
+  if (d[0] == 2 && d[1] == 3) { mask = mask | 8; }
+  if (e[0] == 6 && e[1] == 2) { mask = mask | 16; }
+
+  h[0] = 7; h[1] = 8; h[2] = 9;
+  if (g[0] == h[0] && g[1] == h[1] && g[2] == h[2]) { mask = mask | 32; }
+
+  if (m[1][0] == 3 && m[0][1] == 2) { mask = mask | 64; }
+  if (k[0] == 9) { mask = mask | 128; }
+
+  print(["f101 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

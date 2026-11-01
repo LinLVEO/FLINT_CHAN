@@ -60,7 +60,7 @@ void flint_stats_func_begin(const char *name) {
   if (g_fn_stats_n == g_fn_stats_cap) {
     int cap = g_fn_stats_cap ? g_fn_stats_cap * 2 : 64;
     FuncStat *p = realloc(g_fn_stats, (size_t)cap * sizeof(FuncStat));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     g_fn_stats = p; g_fn_stats_cap = cap;
   }
   FuncStat *f = &g_fn_stats[g_fn_stats_n++];
@@ -139,7 +139,7 @@ static void buf_grow(Buf *b, size_t need) {
   size_t cap = b->cap ? b->cap * 2 : 64;
   while (cap < b->len + need) cap *= 2;
   b->data = realloc(b->data, cap);
-  if (!b->data) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+  if (!b->data) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
   b->cap = cap;
 }
 
@@ -163,7 +163,7 @@ void buf_u64(Buf *b, uint64_t x) {
 }
 
 void buf_patch_u32(Buf *b, size_t off, uint32_t x) {
-  if (off + 4 > b->len) { fprintf(stderr, "FLINT: 内部错误：补丁越界\n"); exit(1); }
+  if (off + 4 > b->len) { fprintf(stderr, "hlc: 内部错误：补丁越界\n"); exit(1); }
   b->data[off] = x & 0xFF;
   b->data[off + 1] = (x >> 8) & 0xFF;
   b->data[off + 2] = (x >> 16) & 0xFF;
@@ -172,13 +172,13 @@ void buf_patch_u32(Buf *b, size_t off, uint32_t x) {
 
 static void *xmalloc(size_t n) {
   void *p = malloc(n);
-  if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+  if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
   return p;
 }
 
 static void *xcalloc(size_t n, size_t sz) {
   void *p = calloc(n, sz);
-  if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+  if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
   return p;
 }
 
@@ -215,7 +215,7 @@ static void loop_push(FuncCtx *c, int brk, int cont) {
   if (c->nloops == c->loops_cap) {
     int cap = c->loops_cap ? c->loops_cap * 2 : 16;
     void *p = realloc(c->loops, (size_t)cap * sizeof(*c->loops));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->loops = p; c->loops_cap = cap;
   }
   c->loops[c->nloops].brk = brk;
@@ -241,7 +241,7 @@ static int new_label(FuncCtx *c) {
     size_t cap = c->labels_cap ? c->labels_cap * 2 : 64;
     size_t *pos = realloc(c->label_pos, cap * sizeof(*pos));
     bool *set = realloc(c->label_set, cap * sizeof(*set));
-    if (!pos || !set) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!pos || !set) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->label_pos = pos;
     c->label_set = set;
     c->labels_cap = cap;
@@ -265,7 +265,7 @@ static void note_patch(FuncCtx *c, int label) {
   if (c->npatches == c->patches_cap) {
     size_t cap = c->patches_cap ? c->patches_cap * 2 : 64;
     Patch *p = realloc(c->patches, cap * sizeof(*p));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->patches = p;
     c->patches_cap = cap;
   }
@@ -278,7 +278,7 @@ static void note_patch(FuncCtx *c, int label) {
 static void resolve_patches(FuncCtx *c) {
   for (size_t i = 0; i < c->npatches; i++) {
     int label = c->patches[i].label;
-    if (!c->label_set[label]) { fprintf(stderr, "FLINT: 内部错误：标签未定义\n"); exit(1); }
+    if (!c->label_set[label]) { fprintf(stderr, "hlc: 内部错误：标签未定义\n"); exit(1); }
     size_t off = c->patches[i].off;
     uint32_t disp = (uint32_t)(c->label_pos[label] - (off + 4));
     buf_patch_u32(&c->code, off, disp);
@@ -291,7 +291,7 @@ static void note_ext(FuncCtx *c, int target) {
   if (c->nexts == c->exts_cap) {
     size_t cap = c->exts_cap ? c->exts_cap * 2 : 16;
     ExtCall *e = realloc(c->exts, cap * sizeof(*e));
-    if (!e) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!e) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->exts = e;
     c->exts_cap = cap;
   }
@@ -318,7 +318,7 @@ static size_t note_dblref(FuncCtx *c, double v) {
   if (c->ndblrefs == c->dblrefs_cap) {
     size_t cap = c->dblrefs_cap ? c->dblrefs_cap * 2 : 8;
     DblRef *d = realloc(c->dblrefs, cap * sizeof(*d));
-    if (!d) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!d) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->dblrefs = d;
     c->dblrefs_cap = cap;
   }
@@ -337,7 +337,7 @@ static void note_dbluse(FuncCtx *c, size_t idx, size_t off) {
   if (r->noffs == r->offs_cap) {
     size_t cap = r->offs_cap ? r->offs_cap * 2 : 4;
     size_t *p = realloc(r->offs, cap * sizeof(*p));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     r->offs = p;
     r->offs_cap = cap;
   }
@@ -353,7 +353,7 @@ static void note_guse(FuncCtx *c, int gi) {
   if (c->nguses == c->guses_cap) {
     size_t cap = c->guses_cap ? c->guses_cap * 2 : 8;
     GUse *p = realloc(c->guses, cap * sizeof(*p));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->guses = p;
     c->guses_cap = cap;
   }
@@ -408,7 +408,7 @@ static void note_funcaddr(FuncCtx *c, int target) {
   if (c->nfuncaddrs == c->funcaddrs_cap) {
     size_t cap = c->funcaddrs_cap ? c->funcaddrs_cap * 2 : 8;
     FuncAddrRef *f = realloc(c->funcaddrs, cap * sizeof(*f));
-    if (!f) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!f) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->funcaddrs = f;
     c->funcaddrs_cap = cap;
   }
@@ -422,7 +422,7 @@ static StrRef *note_strref(FuncCtx *c) {
   if (c->nstrrefs == c->strrefs_cap) {
     size_t cap = c->strrefs_cap ? c->strrefs_cap * 2 : 8;
     StrRef *sr = realloc(c->strrefs, cap * sizeof(*sr));
-    if (!sr) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!sr) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->strrefs = sr;
     c->strrefs_cap = cap;
   }
@@ -603,6 +603,18 @@ static void emit_idiv64(Buf *b)               { const uint8_t x[] = {0x48, 0xF7,
 static void emit_mov_rax_rdx64(Buf *b)        { const uint8_t x[] = {0x48, 0x89, 0xD0}; buf_bytes(b, x, 3); } // mov rax,rdx（取余数）
 // int_64 → int（to_int32）：取低 32 位。`mov eax,eax` 顺带把高半清零（64 位寄存器的 32 位写约束）
 static void emit_l2i(Buf *b)                  { const uint8_t x[] = {0x89, 0xC0}; buf_bytes(b, x, 2); }
+// ===== v1.9.0：无符号（uint_*）专用的三族发射器 —— 有符号档一行未改 =====
+//   `shr` 逻辑右移（无符号）/ `div` 无符号除法（rdx:rax ÷ rcx，商 rax 余 rdx）
+//   口径：无符号除法**不用** cqo 符号扩展，而是 `xor edx,edx`（32 位）/`xor rdx,rdx`（64 位）
+//   把高半清零 —— 这就是 C 的 uint 除法。除零仍是硬件 #DE（与有符号同一条纪律，不做守卫）。
+static void emit_shr(Buf *b)                  { const uint8_t x[] = {0xD3, 0xE8}; buf_bytes(b, x, 2); }       // shr eax,cl
+static void emit_shr64(Buf *b)                { const uint8_t x[] = {0x48, 0xD3, 0xE8}; buf_bytes(b, x, 3); } // shr rax,cl
+static void emit_xor_edx_edx(Buf *b)          { const uint8_t x[] = {0x31, 0xD2}; buf_bytes(b, x, 2); }       // xor edx,edx
+static void emit_xor_rdx_rdx(Buf *b)          { const uint8_t x[] = {0x48, 0x31, 0xD2}; buf_bytes(b, x, 3); } // xor rdx,rdx
+static void emit_div(Buf *b)                  { const uint8_t x[] = {0xF7, 0xF1}; buf_bytes(b, x, 2); }       // div ecx（无符号 32）
+static void emit_div64(Buf *b)                { const uint8_t x[] = {0x48, 0xF7, 0xF1}; buf_bytes(b, x, 3); } // div rcx（无符号 64）
+// 零扩展（ND_U2L）：`mov eax,eax` —— 32 位自写把高 32 位清零，就是把 0..2^32-1 原值搬进 rax
+static void emit_u2l(Buf *b)                  { const uint8_t x[] = {0x89, 0xC0}; buf_bytes(b, x, 2); }
 // mov rax, imm64：`48 B8` + 8 字节；能装进 int32 时退 `48 C7 C0 imm32`（符号扩展，短 3 字节）
 static void emit_mov_rax_imm64(Buf *b, long long v) {
   if (v >= -2147483648LL && v <= 2147483647LL) {
@@ -627,6 +639,9 @@ static void emit_inc_rax(Buf *b)              { const uint8_t x[] = {0x48, 0xFF,
 static void emit_dec_rax(Buf *b)              { const uint8_t x[] = {0x48, 0xFF, 0xC8}; buf_bytes(b, x, 3); } // v1.0.6.1 A1：dec rax（指针 -- 64 位，字节步进）
 
 static void emit_push_rbp(Buf *b)             { buf_byte(b, 0x55); g_rspm = (g_rspm - 8) & 15; }
+// 栈上"一个槽" = 8 字节 —— 帧布局的唯一单位：push 一个 64 位寄存器 = 1 槽、new_lvar 每个变量/数组
+//   元素各占 1 槽。`-debug` 的帧表（D-3）用它算 retAddrOff（返回地址在保存的 rbp 之上 1 槽）。
+#define FRAME_SLOT_BYTES 8
 static void emit_mov_rbp_rsp(Buf *b)          { const uint8_t x[] = {0x48, 0x89, 0xE5}; buf_bytes(b, x, 3); }
 
 static void emit_sub_rsp(Buf *b, int imm) {
@@ -683,7 +698,8 @@ static void emit_store_byte_at_rdx(Buf *b) { const uint8_t x[] = {0x88, 0x02}; b
 static void emit_inc_byte_at_edx(Buf *b) { const uint8_t x[] = {0xFE, 0x02}; buf_bytes(b, x, 2); } // inc byte [rdx]
 static void emit_dec_byte_at_edx(Buf *b) { const uint8_t x[] = {0xFE, 0x0A}; buf_bytes(b, x, 2); } // dec byte [rdx]
 // v1.0.5：左值是 char 目标（ND_VAR char 标量 / ND_DEREF.ty==TY_CHAR 字段·元素·char*）→ 字节宽
-static bool lv_is_char(Node *lv) { return lv->ty == TY_CHAR; }
+// v1.9.0：uint_8 同表示、同读写宽度 ⇒ 一并按字节目标走（漏了它就会 32 位读改写，邻字节污染）
+static bool lv_is_char(Node *lv) { return ty_is8(lv->ty); }
 // —— v0.8 64 位地址链：地址类值（指针变量/引用槽存的地址）全 64 位存取 ——
 // 槽侧发射器已归口映射层（v1.4.21 M2）：slot_load_rax64 / slot_store_rax64，见 src\slotmap.c
 // 形参装载的 8 个槽发射器（rcx/rdx/r8/r9 的 64 位与 32 位档）已归口映射层（v1.4.21 M2）：
@@ -789,7 +805,7 @@ static bool mark_slot(int off) {
   if (g_nai == g_aicap) {
     int cap = g_aicap ? g_aicap * 2 : 8;
     int *p = realloc(g_ai, (size_t)cap * sizeof(int));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     g_ai = p; g_aicap = cap;
   }
   g_ai[g_nai++] = off;
@@ -804,7 +820,11 @@ static bool is_addr_value(Node *n) {
     case ND_STR: case ND_ADDR: case ND_FUNC_ADDR: case ND_NEW: return true;
     case ND_VAR:
       if (n->is_ref) return n->ty == TY_STRUCT;
-      if (n->ty == TY_INT) return slot_marked(n->offset);   // T1：装过地址的 int
+      // T1 槽号分域（2026-10-29）：全局变量的 offset 是 globals **下标**，与局部帧槽偏移
+      //   共用同一段正整数空间 ⇒ 全局下标 == 某个被标记的局部偏移时会误报
+      //   「地址值不能装进全局 int」（M4n 撞到，卡 T-20260928-195316）。全局 int 永远不可能
+      //   合法持有地址（写入侧 :2511 硬拒），故这里必须先排除 is_global 再查标记表。
+      if (n->ty == TY_INT && !n->is_global) return slot_marked(n->offset);   // T1：装过地址的 int
       // v1.3.2：函数指针变量本身值就是地址（T1 门槛/存宽判定按 64 位）
       return n->ty == TY_PTR || n->ty == TY_ARR || n->ty == TY_STRUCT || n->ty == TY_FUNCPTR;
     case ND_DEREF: return n->ty == TY_PTR;
@@ -950,7 +970,7 @@ static bool is_local_ptr_var(Node *n) {
 static bool is_nonneg_idx(Node *n) {
   if (!n) return false;
   if (n->kind == ND_NUM) return n->val >= 0;
-  if (n->kind == ND_VAR) return n->ty == TY_CHAR && !n->is_ref && !n->is_global;
+  if (n->kind == ND_VAR) return ty_is8(n->ty) && !n->is_ref && !n->is_global;   // char / uint_8 都恒非负
   if (n->kind == ND_BITAND) {
     if (n->rhs && n->rhs->kind == ND_NUM && n->rhs->val >= 0) return true;
     if (n->lhs && n->lhs->kind == ND_NUM && n->lhs->val >= 0) return true;
@@ -969,7 +989,7 @@ static bool is_pure_expr(Node *n) {
     case ND_LOGAND: case ND_LOGOR:
       return is_pure_expr(n->lhs) && is_pure_expr(n->rhs);
     case ND_NEG: case ND_NOT: case ND_BITNOT: case ND_I2D: case ND_D2I: case ND_ADDR:
-    case ND_CAST:   // v1.8.0：转型无副作用（指针转型更是一个字节都不发）
+    case ND_CAST: case ND_U2L:   // v1.8.0 转型 / v1.9.0 零扩展拓宽：都无副作用
       return is_pure_expr(n->lhs);
     default: return false;   // 调用 / API / new / 赋值 / 自增自减 / 三元：保守一律不算
   }
@@ -1245,7 +1265,8 @@ static void check_ptr_target(Node *st, Node *rhs) {
   if (is_addr_expr(rhs)) return;                                     // 64 位算出来的地址（含地址链）
   if (rhs->kind == ND_NUM) return;                                   // 显式常量（0/null 等）
   if (rhs->kind == ND_APICALL) return;                               // API 返回值全宽（句柄兼容路径）
-  if (rhs->kind == ND_VAR && rhs->ty == TY_INT && slot_marked(rhs->offset)) return;  // T1 ②：装地址的 int
+  // T1 槽号分域（2026-10-29）：同上，全局 offset 是 globals 下标，不是帧槽 → 不查标记表
+  if (rhs->kind == ND_VAR && !rhs->is_global && rhs->ty == TY_INT && slot_marked(rhs->offset)) return;  // T1 ②：装地址的 int
   if (rhs->kind == ND_ASSIGN) { check_ptr_target(st, rhs->rhs); return; }            // 赋值表达式：看被赋的值
   if ((rhs->kind == ND_PRE_INC || rhs->kind == ND_PRE_DEC || rhs->kind == ND_POST_INC || rhs->kind == ND_POST_DEC) &&
       rhs->lhs && (rhs->lhs->ty == TY_PTR || is_addr_expr(rhs->lhs)))
@@ -1347,21 +1368,41 @@ static void gen_binop(FuncCtx *c, Node *node) {
     } else emit_mov_ecx_eax(b);        // ecx = rhs
     emit_pop_rax(b);                 // rax = lhs
   }
+  // v1.9.0：**符号性分岔只在这三族**（div/mod、shr、比较）＋ 打印分派，别撒得到处都是。
+  //   结果类型由 parse 的通常算术转换刻在 node->ty 上 ⇒ 这里读一次就够。
+  //   注意 `unsigned` 也会让 i64_wide 为真（uint_64 同宽 8/8/8），两个判据互不替代。
+  bool uns = ty_uns(node->ty);
   switch (node->kind) {
     case ND_ADD: if (wide) emit_add64(b); else emit_add(b); break;
     case ND_SUB: if (wide) emit_sub64(b); else emit_sub(b); break;
     // v1.7.0：int_64 的乘/除/取模/位运算/移位全部走 64 位档（§2.4 的 P0 清单）
     case ND_MUL: if (i64_wide) emit_imul64(b); else emit_imul(b); break;
-    case ND_DIV: if (i64_wide) { emit_cqo(b); emit_idiv64(b); }
-                 else { emit_cdq(b); emit_idiv(b); } break;
-    case ND_MOD: if (i64_wide) { emit_cqo(b); emit_idiv64(b); emit_mov_rax_rdx64(b); }
-                 else { emit_cdq(b); emit_idiv(b); emit_mov_eax_edx(b); } break;
+    // v1.9.0：无符号除/模 = `xor edx,edx / xor rdx,rdx` 前置 + `div`（不是 cdq/cqo + idiv）
+    case ND_DIV: if (i64_wide) {
+                   if (uns) { emit_xor_rdx_rdx(b); emit_div64(b); }
+                   else     { emit_cqo(b);          emit_idiv64(b); }
+                 } else {
+                   if (uns) { emit_xor_edx_edx(b); emit_div(b); }
+                   else     { emit_cdq(b);          emit_idiv(b); }
+                 } break;
+    case ND_MOD: if (i64_wide) {
+                   if (uns) { emit_xor_rdx_rdx(b); emit_div64(b); }
+                   else     { emit_cqo(b);          emit_idiv64(b); }
+                   emit_mov_rax_rdx64(b);
+                 } else {
+                   if (uns) { emit_xor_edx_edx(b); emit_div(b); }
+                   else     { emit_cdq(b);          emit_idiv(b); }
+                   emit_mov_eax_edx(b);
+                 } break;
     // v0.7.2 位运算（eax op ecx；移位量在 cl）
     case ND_BITAND: if (i64_wide) emit_and64(b); else emit_and(b); break;
     case ND_BITOR:  if (i64_wide) emit_or64(b);  else emit_or(b); break;
     case ND_BITXOR: if (i64_wide) emit_xor64(b); else emit_xor(b); break;
     case ND_SHL:    if (i64_wide) emit_shl64(b); else emit_shl(b); break;
-    case ND_SHR:    if (i64_wide) emit_sar64(b); else emit_sar(b); break;
+    // v1.9.0：`>>` 无符号 = 逻辑右移 hi半补 0（shr）；有符号仍是算术右移（sar）
+    case ND_SHR:    if (i64_wide) { if (uns) emit_shr64(b); else emit_sar64(b); }
+                    else          { if (uns) emit_shr(b);   else emit_sar(b); }
+                    break;
     default: break;
   }
 }
@@ -1381,6 +1422,8 @@ static void emit_cvttsd2si_eax_xmm0(Buf *b) { const uint8_t x[] = {0xF2, 0x0F, 0
 //   cvttsd2si rax, xmm0 = F2 48 0F 2C C0
 static void emit_cvtsi2sd_xmm0_rax(Buf *b) { const uint8_t x[] = {0xF2, 0x48, 0x0F, 0x2A, 0xC0}; buf_bytes(b, x, 5); }
 static void emit_cvttsd2si_rax_xmm0(Buf *b) { const uint8_t x[] = {0xF2, 0x48, 0x0F, 0x2C, 0xC0}; buf_bytes(b, x, 5); }
+// v1.9.0：cvtsi2sd xmm0, rcx = F2 48 0F 2A C1（reg=xmm0 / rm=rcx）—— uint_64 → double 的高位分支用
+static void emit_cvtsi2sd_xmm0_rcx(Buf *b) { const uint8_t x[] = {0xF2, 0x48, 0x0F, 0x2A, 0xC1}; buf_bytes(b, x, 5); }
 static void emit_sse_binop(Buf *b, char op) {
   switch (op) {
     case '+': { const uint8_t x[] = {0xF2, 0x0F, 0x58, 0xC1}; buf_bytes(b, x, 4); return; } // addsd xmm0,xmm1
@@ -1581,14 +1624,20 @@ static void gen_cmp_flags(FuncCtx *c, Node *node) {
 }
 
 // 比较谓词 → setcc 操作码（返回 0 = 不是比较节点）。jcc 操作码 = setcc − 0x10。
-static int setcc_of(int kind) {
-  switch (kind) {
+// v1.9.0：**无符号比较** = b/be/a/ae 族（C 的 uint 比较）。判据是 parse 在比较节点上
+//   刻的 elem_ty（= 两侧经通常算术转换后的公共类型）——不是看原操作数：`uint_8 > int`
+//   已提升到 int（有符号），看操作数会把 0..255 误判成无符号域。
+static bool cmp_is_uns(Node *n) { return n && ty_uns(n->elem_ty); }
+static int setcc_of(Node *n) {
+  if (!n) return 0;
+  bool uns = cmp_is_uns(n);
+  switch (n->kind) {
     case ND_EQ: return 0x94; // sete
     case ND_NE: return 0x95; // setne
-    case ND_LT: return 0x9C; // setl
-    case ND_LE: return 0x9E; // setle
-    case ND_GT: return 0x9F; // setg
-    case ND_GE: return 0x9D; // setge
+    case ND_LT: return uns ? 0x92 : 0x9C; // setb : setl
+    case ND_LE: return uns ? 0x96 : 0x9E; // setbe: setle
+    case ND_GT: return uns ? 0x97 : 0x9F; // seta : setg
+    case ND_GE: return uns ? 0x93 : 0x9D; // setae: setge
     default: return 0;
   }
 }
@@ -1596,7 +1645,7 @@ static int setcc_of(int kind) {
 static void gen_cmp(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
   gen_cmp_flags(c, node);
-  int cc = setcc_of(node->kind);
+  int cc = setcc_of(node);
   if (cc) emit_setcc(b, (uint8_t)cc);
   emit_movzx_eax_al(b);
 }
@@ -1621,20 +1670,21 @@ static bool try_gen_cmp_branch(FuncCtx *c, Node *cond, bool jump_if_false, int l
     emit_jcc_label(c, jump_if_false ? 0x85 : 0x84, label);
     return true;
   }
-  if (!setcc_of(cond->kind)) return false;
+  if (!setcc_of(cond)) return false;
   if (expr_is_dbl(cond->lhs) || expr_is_dbl(cond->rhs)) return false;
   gen_cmp_flags(c, cond);
-  int cc = setcc_of(cond->kind);
+  int cc = setcc_of(cond);
   int jcc;
+  bool uns = cmp_is_uns(cond);
   if (jump_if_false) {
-    // 取反条件码：je↔jne、jl↔jge、jle↔jg
-    switch (cc) {
-      case 0x94: jcc = 0x85; break;   // sete  → jne
-      case 0x95: jcc = 0x84; break;   // setne → je
-      case 0x9C: jcc = 0x8D; break;   // setl  → jge
-      case 0x9D: jcc = 0x8C; break;   // setge → jl
-      case 0x9E: jcc = 0x8F; break;   // setle → jg
-      default:   jcc = 0x8E; break;   // setg  → jle
+    // 取反条件码：je↔jne、jl↔jge、jle↔jg（无符号档对应 jb↔jae、jbe↔ja）
+    switch (cond->kind) {
+      case ND_EQ: jcc = 0x85; break;                                   // sete  → jne
+      case ND_NE: jcc = 0x84; break;                                   // setne → je
+      case ND_LT: jcc = uns ? 0x83 : 0x8D; break;                      // setb/setl → jae/jge
+      case ND_GE: jcc = uns ? 0x82 : 0x8C; break;                      // setae/setge → jb/jl
+      case ND_LE: jcc = uns ? 0x87 : 0x8F; break;                      // setbe/setle → ja/jg
+      default:    jcc = uns ? 0x86 : 0x8E; break;                      // seta/setg → jbe/jle
     }
   } else {
     jcc = cc - 0x10;                  // jcc 操作码 = setcc − 0x10（setl 0x9C → jl 0x8C …）
@@ -1898,13 +1948,13 @@ static void gen_call(FuncCtx *c, Node *node) {
                              "（要传地址请写 &x，或把形参改成值类型）", cf->name, i + 1);
       }
       if (!by_addr && arg_is_addr) {
-        if (flint_strict && cf->param_ty[i] == TY_INT)
-          error_at_nodef(node, "[E-STRICT-WIDTH] 实参是**地址值**（64 位），而第 %d 个形参声明成 int"
+        if (flint_strict && ty_is32(cf->param_ty[i]))
+          error_at_nodef(node, "[E-STRICT-WIDTH] 实参是**地址值**（64 位），而第 %d 个形参声明成 int/uint_32"
                                "（4 字节语义）⇒ 高 32 位会被丢掉（SPEC 记的 T1 遗留边界）。"
                                "请把形参声明成 int *（-strict 诊断）", i + 1);
-        if (cf->param_ty[i] == TY_INT || cf->param_ty[i] == TY_CHAR || cf->param_ty[i] == TY_DOUBLE)
+        if (ty_isint(cf->param_ty[i]) || cf->param_ty[i] == TY_DOUBLE)
           error_at_nodef(node, "地址值不能装进 int 形参——函数 '%s' 的第 %d 个形参是值类型"
-                               "（int/char/double），实参却是指针/地址"
+                               "（int/char/int_64/uint_*/double），实参却是指针/地址"
                                "（请先解引用 *p，或把形参改成指针类型）", cf->name, i + 1);
       }
     }
@@ -2091,7 +2141,7 @@ static void gen_call_many(FuncCtx *c, Node *node, Node **args, int n) {
     // 第 5 个及以后的 double 走栈 ⇒ **不占 XMM 序列**；FLINT 函数无可变参 ⇒ 不需要 gen_apicall 那套 AL 计数
   }
   // call 点 rsp≡0（total 是 16 的倍数 ⇒ 与入口同余，垫平后恒 ≡0）
-  rsp_assert_ok("FLINT 多参调用发射");
+  rsp_assert_ok("hlc 多参调用发射");
   slotmap_note_call();
   if (node->func_index < 0) {
     // 间接调用（函数指针）：目标地址在**实参全部就位之后**才装进 rax（顺序与老路同一条硬约束）
@@ -2203,7 +2253,7 @@ static void apicall_tail(FuncCtx *c, int api_index, int total) {
   if (c->napicalls == c->apicalls_cap) {
     size_t cap = c->apicalls_cap ? c->apicalls_cap * 2 : 8;
     ApiCallRef *ar = realloc(c->apicalls, cap * sizeof(*ar));
-    if (!ar) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!ar) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->apicalls = ar;
     c->apicalls_cap = cap;
   }
@@ -2258,68 +2308,83 @@ static void gen_lvalue_addr(FuncCtx *c, Node *lv) {
   else slot_lea_rax(b, lv->offset);
 }
 
-static void gen_expr(FuncCtx *c, Node *node) {
+// —— v1.10.4（B2 第一族）：C 风格转型 (type)expr（原 ND_CAST case）——
+//   原样搬运，判据 = bytecmp（产物逐字节相同）+ 1104 项回归。
+static void gen_cast(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
-  switch (node->kind) {
-    case ND_NUM: emit_mov_eax_imm(b, node->val); return;
-    // ===== v1.7.0 int_64 =====
-    case ND_NUM64:   // 64 位字面量 → rax（小值退 mov rax,imm32 符号扩展，短 3 字节）
-      emit_mov_rax_imm64(b, node->lval);
-      return;
-    case ND_I2L:     // int → int_64（符号扩展：movsxd rax,eax）
-      gen_expr(c, node->lhs);
-      emit_movsxd_rax_eax(b);
-      return;
-    case ND_L2I:     // int_64 → int（显式收窄 to_int32：低 32 位）
-      gen_expr(c, node->lhs);
-      emit_l2i(b);
-      return;
-    // ===== v1.1.0 浮点（阶段1）=====
-    case ND_DBL: {
-      // double 字面量 → xmm0（内容 8 字节位型进数据区，disp 排布后回填）
-      // ⚠️ 登记必须在发指令**之前**（note_dblref 可能 realloc，指针不能跨它存活）；
-      //    同一常量多次出现 = 多个位置（note_dbluse 逐处记，回填时逐个补）
-      size_t r = note_dblref(c, node->dval);
-      const uint8_t movsd[] = {0xF2, 0x0F, 0x10, 0x05};   // movsd xmm0,[rip+disp32]
-      buf_bytes(b, movsd, 4);
-      note_dbluse(c, r, c->code.len);
-      buf_u32(b, 0);                                       // 占位
-      return;
-    }
-    case ND_I2D:   // int → double（cvtsi2sd xmm0,eax）
-      gen_expr(c, node->lhs);
-      emit_cvtsi2sd_xmm0_eax(b);
-      return;
-    case ND_D2I:   // double → int（cvttsd2si eax,xmm0，截断取整；越界 = 0x80000000，同 C）
-      gen_expr(c, node->lhs);
-      emit_cvttsd2si_eax_xmm0(b);
-      return;
-    // ===== v1.8.0 C 风格转型 `(type)expr`（语义表见 SPEC「C 风格转型」节）=====
-    //   目标类型 = node->ty（**唯一来源**）；源类型在发射点用共用判据回推。
-    //   结果寄存器约定与全编译器一致：整数值 → eax/rax ｜ double → xmm0。
-    case ND_CAST: {
       gen_expr(c, node->lhs);
       bool from_dbl = expr_is_dbl(node->lhs);
       bool from_i64 = expr_is_i64(node->lhs);
       if (node->ty == TY_PTR) return;                    // (T*)p：只换类型，一个字节都不发
       if (node->ty == TY_DOUBLE) {
+        // v1.9.0：源侧符号性不同，转换路径就不同 —— cvtsi2sd 只认**有符号**源。
+        int sty_d = expr_ty_of(node->lhs);
+        if (from_dbl) return;                                   // double → double：恒等
+        if (sty_d == TY_UINT64) {
+          // 0..2^64-1 的一半装不进有符号 64 位 ⇒ 标准技巧：高位为 0 直接转（jns 快路），
+          //   高位为 1 先算 ((v>>1)|(v&1)) 再 ×2（IEEE 正确舍入，见 SPEC「uint_64 → double」）。
+          int l_pos = new_label(c);
+          int l_done = new_label(c);
+          const uint8_t t_rax[] = {0x48, 0x85, 0xC0};           // test rax,rax
+          const uint8_t mv_rcx[] = {0x48, 0x89, 0xC1};          // mov rcx,rax
+          const uint8_t shr_rcx[] = {0x48, 0xD1, 0xE9};         // shr rcx,1
+          const uint8_t and_one[] = {0x48, 0x83, 0xE0, 0x01};   // and rax,1
+          const uint8_t or_rax[] = {0x48, 0x09, 0xC1};          // or rcx,rax
+          const uint8_t add_self[] = {0xF2, 0x0F, 0x58, 0xC0};  // addsd xmm0,xmm0
+          buf_bytes(b, t_rax, 3);
+          emit_jcc_label(c, 0x89, l_pos);                        // jns：高位为 0
+          buf_bytes(b, mv_rcx, 3);
+          buf_bytes(b, shr_rcx, 3);
+          buf_bytes(b, and_one, 4);
+          buf_bytes(b, or_rax, 3);
+          emit_cvtsi2sd_xmm0_rcx(b);
+          buf_bytes(b, add_self, 4);
+          emit_jmp_label(c, l_done);
+          emit_label(c, l_pos);
+          emit_cvtsi2sd_xmm0_rax(b);
+          emit_label(c, l_done);
+          return;
+        }
+        if (sty_d == TY_UINT32) { emit_u2l(b); emit_cvtsi2sd_xmm0_rax(b); return; }  // 0..2^32-1：零扩展后按 64 位有符号转
         if (from_i64) emit_cvtsi2sd_xmm0_rax(b);         // int_64 → double：F2 48 0F 2A C0
-        else if (!from_dbl) emit_cvtsi2sd_xmm0_eax(b);   // int/char → double：F2 0F 2A C0（char 值已在 0..255）
+        else emit_cvtsi2sd_xmm0_eax(b);                  // int/char/uint_8 → double：F2 0F 2A C0（值已在 32 位有符号域内）
+        return;
+      }
+      // v1.9.0：uint_64 目标 —— 按 C11 6.3.1.3 的**值转换**（不是位型裁剪）：
+      //   有符号源先**符号扩展**再按新类型解释 ⇒ `(uint_64)(int)-1` = 18446744073709551615；
+      //   无符号源**零扩展**（值保持）。源已是 64 位 ⇒ 恒等。
+      if (node->ty == TY_UINT64) {
+        if (from_dbl) { emit_cvttsd2si_rax_xmm0(b); return; }   // double → uint_64（≥2^63 按 x86 越界，见 SPEC 边界）
+        if (!from_i64) {
+          if (ty_uns(expr_ty_of(node->lhs))) emit_u2l(b);
+          else emit_movsxd_rax_eax(b);
+        }
         return;
       }
       if (node->ty == TY_INT64) {
         if (from_dbl) emit_cvttsd2si_rax_xmm0(b);        // double → int_64：F2 48 0F 2C C0（截断向零）
-        else if (!from_i64) emit_movsxd_rax_eax(b);      // int/char → int_64：movsxd rax,eax（char 0..255 等价零扩展）
+        // v1.9.0：源是无符号 32/8 位 ⇒ **零扩展**（值保持）：`(int_64)(uint_32)0-1` = 4294967295。
+        //   源是有符号 ⇒ 仍是 movsxd（C11 6.3.1.3：新类型能表示原值就值不变）。
+        else if (!from_i64) {
+          if (ty_uns(expr_ty_of(node->lhs))) emit_u2l(b);
+          else emit_movsxd_rax_eax(b);                   // int/char → int_64：movsxd rax,eax
+        }
         return;
       }
+      // v1.9.0：uint_8 目标 = 低 8 位再零扩展（与 char 逐字节相同；`(uint_8)300` = 44）
+      if (node->ty == TY_UINT8) { emit_movzx_eax_al(b); return; }
       if (node->ty == TY_CHAR) { emit_movzx_eax_al(b); return; }   // → char：movzx eax,al（低 8 位 = 模 256）
-      // 剩下 TY_INT
-      if (from_dbl) emit_cvttsd2si_eax_xmm0(b);          // double → int：F2 0F 2C C0（越界 = 0x80000000，同 C）
-      else if (from_i64) emit_l2i(b);                    // int_64 → int：mov eax,eax（取低 32 位）
-      // int/char → int：恒等（char 的读路径本身已是 movzx，值域 0..255）
+      // 剩下 TY_INT / v1.9.0 TY_UINT32（同宽，截断取低 32 位 + 高半清零 ⇒ uint_32 的高 32 位天然干净）
+      if (from_dbl) emit_cvttsd2si_eax_xmm0(b);          // double → int/uint_32：F2 0F 2C C0
+      else if (from_i64) emit_l2i(b);                    // int_64/uint_64 → int/uint_32：mov eax,eax（取低 32 位）
+      // int/char → int/uint_32：恒等（char 的读路径本身已是 movzx，值域 0..255）
       return;
-    }
-    case ND_STR: {
+}
+
+// —— v1.10.6（B2 第二族）：字符串字面量 / 变量读 / 解引用读（原 ND_STR、ND_VAR、ND_DEREF case）——
+//   逐行搬运（缩进沿用原 switch 层级，便于与旧实现对照），判据 = bytecmp 产物逐字节相同 + 1106 项回归。
+static void gen_str_literal(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
       // v0.7.3：字符串字面量值 = 数据段地址。lea rax,[rip+disp32]（48 8D 05）；
       // disp 目标是拼接 code 尾部的字符串区，全部函数生成完、排布后统一回填
       const uint8_t lea[] = {0x48, 0x8D, 0x05};
@@ -2330,15 +2395,17 @@ static void gen_expr(FuncCtx *c, Node *node) {
       r->len = node->str_len;
       r->str_off = 0;
       buf_u32(b, 0);          // 占位
-      return;
-    }
-    case ND_VAR:
+}
+
+// 变量读：全局（offset = globals 下标）/ 局部（offset = 帧偏移）两套身份，宽度随类型走。
+static void gen_var_read(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
       // v1.3.0：全局变量读——宽度随类型走 [rip+disp32]（offset 存 globals 下标）
       if (node->is_global) {
         int gi = node->offset;
         if (node->ty == TY_ARR || node->ty == TY_STRUCT) { emit_lea_g(c, gi); return; }  // 数组名 = 首地址
         if (node->ty == TY_DOUBLE) { emit_load_gdbl(c, gi); return; }                    // xmm0 ← [rip+disp]
-        if (node->ty == TY_CHAR) { emit_load_gbyte(c, gi); return; }                     // movzx 字节
+        if (ty_is8(node->ty)) { emit_load_gbyte(c, gi); return; }                         // v1.9.0：uint_8 同 char
         if (node->ty == TY_PTR) { emit_load_g64(c, gi); return; }                        // 64 位值
         // int：**64 位读**（与写入侧的 64 位间接写配对）。读写宽度不一致会让 .data 槽高 4 字节
         //   留下上一次的残渣 → 后续 64 位读回垃圾（静默错值）。见 ND_ASSIGN 处「全局 int 宽度约定」。
@@ -2371,8 +2438,9 @@ static void gen_expr(FuncCtx *c, Node *node) {
         slot_load_rax64(b, node->offset);
         return;
       }
-      if (node->ty == TY_CHAR) {
+      if (ty_is8(node->ty)) {
         // v1.0.5：char 读 = movzx 字节（0..255；槽上层字节可为残留，只取低字节）
+        // v1.9.0：uint_8 同表示、同读法（区别只在类型与打印）
         slot_load_byte(b, node->offset);
         return;
       }
@@ -2381,7 +2449,8 @@ static void gen_expr(FuncCtx *c, Node *node) {
         return;
       }
       // v1.7.0：int_64 局部读 = 8 字节整读（必须排在 slot_load_eax 兜底之前 —— 漏补这一档 = 读半截）
-      if (node->ty == TY_INT64) {
+      //   v1.9.0：uint_64 同宽度（8 字节整读）
+      if (ty_is64(node->ty)) {
         slot_load_rax64(b, node->offset);
         return;
       }
@@ -2391,28 +2460,37 @@ static void gen_expr(FuncCtx *c, Node *node) {
         return;
       }
       slot_load_eax(b, node->offset);        // int 值（32 位）
-      return;
-    case ND_DEREF:
+}
+
+// 解引用读：*p / a[i] / 结构体字段 —— 宽度随**目标类型**走（不是随指针类型）。
+static void gen_deref(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
       gen_expr(c, node->lhs);    // rax = 地址（64 位完整）
       // v0.9.2：读写宽度随读取目标类型——ptr 字段（s.hwnd）→ 64 位；int 字段/*p/a[i] → 32 位
       // v1.0.5：char 目标（char 字段/元素/char* 解引用）→ movzx 字节读
       if (node->ty == TY_PTR) emit_deref_rax64(b);
       // v1.7.0：int_64 目标（int_64 数组元素 / 结构体 int_64 字段 / int_64* 解引用）→ 8 字节整读
-      else if (node->ty == TY_INT64) emit_deref_rax64(b);
-      else if (node->ty == TY_CHAR) emit_load_byte_at_rax(b);
+      //   v1.9.0：uint_64 同宽度（8 字节整读）
+      else if (ty_is64(node->ty)) emit_deref_rax64(b);
+      else if (ty_is8(node->ty)) emit_load_byte_at_rax(b);
       // v1.2.4：double 目标（double 数组元素 / double 结构体字段 / double 指针解引用）→ SSE 8 字节读
       else if (node->ty == TY_DOUBLE) { emit_mov_rdx_rax(b); emit_load_dbl_at_rdx(b); }
       else emit_deref_eax(b);    // eax = [rax]（32 位对象值）
-      return;
-    case ND_ASSIGN: {
+}
+
+// —— v1.10.6（B2 第三族）：赋值（原 ND_ASSIGN case）——
+//   逐行搬运（含 T1 宽度红线、全局宽度约定、double / 间接写两条通路），
+//   判据 = bytecmp 产物逐字节相同 + 1106 项回归。
+static void gen_assign(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
       // v1.3.0 全局 int/char：**宽度约定**——全局标量一律按 64 位读（ND_VAR 处）与 64 位写（下方间接通路），
       //   两侧宽度必须一致，否则 .data 槽高 4 字节留残渣 → 下次 64 位读回垃圾。
       //   代价：「把地址装进全局 int」没法不截断（全局变量不参与 T1 的 slot-marked 机制，
       //   运行时判不出来）→ 明确报错，不静默截断（与 v1.0.13 T1 ③④ 同一红线）。
       if (node->lhs->kind == ND_VAR && node->lhs->is_global
-          && (node->lhs->ty == TY_INT || node->lhs->ty == TY_CHAR)
-          && is_addr_value(node->rhs))
-        error_at_node(node, "地址值（64 位）不能装进全局 int / char 变量——全局变量会被按 4/1 字节写回，"
+          && (ty_is32(node->lhs->ty) || ty_is8(node->lhs->ty)) && is_addr_value(node->rhs))
+        error_at_node(node, "地址值（64 位）不能装进全局 int / char / uint_8 / uint_32 变量——"
+                            "全局变量会被按 4/1 字节写回，"
                             "高 32 位必然丢失（不静默截断）。请把地址存在**局部** int * 变量里，"
                             "或用局部变量接收后再逐值算出所需整数");
       // 直接目标 = 普通（非引用）变量：右值 → [rbp-off]（v0.8：指针变量 64 位写）
@@ -2432,11 +2510,16 @@ static void gen_expr(FuncCtx *c, Node *node) {
           slot_store_rax64(b, node->lhs->offset);
         // v1.7.0：int_64 局部槽必须 8 字节整写（排在所有 32 位档之前；parse 已保证 rhs 是
         //   64 位值或 ND_I2L，这里再兜一道 movsxd 保证高半确定 —— 与 T1 ① 同一条纪律）
-        else if (node->lhs->ty == TY_INT64) {
-          if (!is64_value(node->rhs)) emit_movsxd_rax_eax(b);
+        //   v1.9.0：uint_64 同宽；rhs 是**无符号源**时兜底用零扩展（ND_U2L 已由 parse 插好，
+        //   这条兜底只对"地址类之外、又不是 64 位值"的漏网值生效）
+        else if (ty_is64(node->lhs->ty)) {
+          if (!is64_value(node->rhs)) {
+            if (ty_uns(node->lhs->ty) && ty_uns(expr_ty_of(node->rhs))) emit_u2l(b);
+            else emit_movsxd_rax_eax(b);
+          }
           slot_store_rax64(b, node->lhs->offset);
         }
-        else if (node->lhs->ty == TY_CHAR) { slot_store_byte(b, node->lhs->offset); emit_movzx_eax_al(b); } // v1.0.5 字节写（v1.0.6.2 A2：表达式值截断=存储字节）
+        else if (ty_is8(node->lhs->ty)) { slot_store_byte(b, node->lhs->offset); emit_movzx_eax_al(b); } // v1.0.5 字节写（v1.0.6.2 A2：表达式值截断=存储字节）
         // v1.0.13 T1 ①：装地址的 int 槽按 8 字节存——地址值原样写满；普通 int 值先符号扩展再写满
         // （否则高半留旧值/栈残渣，T1 ② 的 8 字节读会读回垃圾）
         else if (node->lhs->ty == TY_INT && slot_marked(node->lhs->offset)) {
@@ -2470,15 +2553,19 @@ static void gen_expr(FuncCtx *c, Node *node) {
         return;
       }
       // v1.0.13 T1 ③④：间接目标的宽度门槛（不静默截断）
-      if ((node->lhs->ty == TY_INT || node->lhs->ty == TY_CHAR) && is_addr_value(node->rhs))
-        error_at_node(node, "地址值是 64 位，装不进 4 字节的 int / 1 字节的 char 目标"
-                            "（数组元素、结构体 int/char 字段、解引用都只有这么宽）"
+      if ((ty_is32(node->lhs->ty) || ty_is8(node->lhs->ty)) && is_addr_value(node->rhs))
+        error_at_node(node, "地址值是 64 位，装不进 4 字节的 int/uint_32 / 1 字节的 char/uint_8 目标"
+                            "（数组元素、结构体字段、解引用都只有这么宽）"
                             "——请把目标声明成 int *（或先存进一个 int * 变量再整体赋值）");
       if (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR) check_ptr_target(node, node->rhs);
       gen_expr(c, node->rhs);                 // eax/rax = 右值（内部 call 对齐）
       // v1.7.0：int_64 间接目标兜一道符号扩展（parse 已保证右侧是 64 位值或 ND_I2L；
       //   这里再守一次，保证写进内存的高 32 位永远是确定值，不留栈残渣）
-      if (node->lhs->ty == TY_INT64 && !is64_value(node->rhs)) emit_movsxd_rax_eax(b);
+      //   v1.9.0：uint_64 目标 + 无符号源 ⇒ 零扩展（同上）
+      if (ty_is64(node->lhs->ty) && !is64_value(node->rhs)) {
+        if (ty_uns(node->lhs->ty) && ty_uns(expr_ty_of(node->rhs))) emit_u2l(b);
+        else emit_movsxd_rax_eax(b);
+      }
       slot_store_rax64(b, c->scratch_off);    // [rbp-scratch] = rax（值暂存）
       gen_lvalue_addr(c, node->lhs);          // rax = 目标地址（无 call 跨越，安全）
       emit_push_rax(b);
@@ -2492,34 +2579,20 @@ static void gen_expr(FuncCtx *c, Node *node) {
       // v1.7.0：+ 目标本身是 int_64（数组元素/结构体字段/*p）→ 必须 64 位写（32 位写 = 只写低半）
       bool wide = is_addr_expr(node->rhs) ||
                   (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR) ||
-                  node->lhs->ty == TY_INT64;
-      if (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_CHAR) {
+                  ty_is64(node->lhs->ty);
+      if (node->lhs->kind == ND_DEREF && ty_is8(node->lhs->ty)) {
         emit_store_byte_at_rdx(b);   // v1.0.5：char 目标（字段/元素/char*）88 02 字节写（不碰邻字节）
         emit_movzx_eax_al(b);        // v1.0.6.2 A2：表达式值截断=存储字节（88 写后 eax 高 24 位残留运算结果）
       }
       else if (wide) emit_store_rax_at_rdx(b);   // 48 89 02
       else emit_store_eax_at_edx(b);        // 89 02；eax 保持新值 = 表达式值
       return;
-    }
-    case ND_FUNC_ADDR: {   // v0.9.3：&函数名 → 函数代码地址（lea rax,[rip+disp32]，布局后回填）
-      const uint8_t lea[] = {0x48, 0x8D, 0x05};
-      buf_bytes(b, lea, 3);
-      note_funcaddr(c, node->func_index);
-      buf_u32(b, 0);       // 占位 disp（codegen_main 布局后回填）
-      return;
-    }
-    case ND_ADDR: gen_lvalue_addr(c, node->lhs); return;
-    case ND_REF_BIND:
-      // 引用声明绑定：r 槽 = x 的地址（64 位写槽；不走引用写）
-      gen_lvalue_addr(c, node->rhs);
-      slot_store_rax64(b, node->lhs->offset);
-      return;
-    // 复合赋值 x op= e：右值→ecx，读 x→eax，运算，写回；eax 留新值
-    // 间接左值（引用/*p/a[i]）：地址先入栈（除法 cdq 清 edx，需保护）
-    case ND_ADD_ASSIGN: case ND_SUB_ASSIGN: case ND_MUL_ASSIGN:
-    case ND_DIV_ASSIGN: case ND_MOD_ASSIGN:
-    case ND_AND_ASSIGN: case ND_OR_ASSIGN: case ND_XOR_ASSIGN:
-    case ND_SHL_ASSIGN: case ND_SHR_ASSIGN: {
+}
+
+// —— v1.10.6（B2 第四族）：复合赋值（原 x op= e 那 13 个 case）——
+//   逐行搬运（direct / double / 指针 p+=n / 间接写四条通路全在），判据 = bytecmp ＋ 1106 回归。
+static void gen_assign_op(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
       bool lvchar = lv_is_char(node->lhs);   // v1.0.5：char 左值读 movzx/写字节（防邻字节污染）
       // v1.2.4：double 左值复合赋值 d += 1.0（值走 xmm0/xmm1，与整数路径完全分开；
@@ -2627,98 +2700,20 @@ static void gen_expr(FuncCtx *c, Node *node) {
       if (lvchar) { slot_store_byte(b, node->lhs->offset); emit_movzx_eax_al(b); } // v1.0.5：char 写回=字节（v1.0.6.2 A2：表达式值截断=存储字节）
       else slot_store_eax(b, node->lhs->offset); // x = 新值；eax 即新值 = 表达式值
       return;
-    }
-    case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD:
-    case ND_BITAND: case ND_BITOR: case ND_BITXOR: case ND_SHL: case ND_SHR:
-      // v1.1.0：任一操作数是 double → 走 SSE 通路（+ - * /；% 已被 parse 拦掉）
-      if (expr_is_dbl(node->lhs) || expr_is_dbl(node->rhs)) {
-        gen_dbl_binop(c, node, node->kind == ND_ADD ? '+' : node->kind == ND_SUB ? '-'
-                          : node->kind == ND_MUL ? '*' : '/');
-        return;
-      }
-      gen_binop(c, node); return;
-    case ND_POW: gen_pow(c, node); return;   // v1.0.11 幂（快速幂发射器）
-    case ND_NEG:
-      // v1.1.0：double 取负 = 翻符号位（统一走 gen_dbl_neg，别在这里重复实现一份）
-      if (expr_is_dbl(node->lhs)) { gen_dbl_neg(c, node); return; }
-      gen_expr(c, node->lhs);
-      // v1.7.0：int_64 取负 = neg rax（48 F7 D8）；int 仍是 32 位 neg eax
-      if (expr_is_i64(node->lhs)) emit_neg64(b); else emit_neg(b);
-      return;
-    // v1.3.1：三元——条件判真后**只生成被选中的那一支**（C 语义；不选的那支不求值）
-    case ND_TERN: {
-      int else_l = new_label(c), end = new_label(c);
-      if (!try_gen_cmp_branch(c, node->lhs, true, else_l)) {   // v1.4.9① 比较塌缩（条件为假 → 跳 else）
-        gen_expr(c, node->lhs);
-        if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
-        emit_jcc_label(c, 0x84, else_l);   // je else
-      }
-      gen_expr(c, node->rhs);            // 真分支（double 时结果天然落 xmm0）
-      emit_jmp_label(c, end);
-      emit_label(c, else_l);
-      gen_expr(c, node->els);            // 假分支
-      emit_label(c, end);
-      return;
-    }
-    case ND_CALL: gen_call(c, node); return;
-    case ND_APICALL:
-      gen_apicall(c, node);   // v0.8
-      // v1.1.0：double 返回的 API 结果天然在 xmm0（值语义），无需搬运——见 expr_is_dbl 的 ND_APICALL 分支
-      return;
-    case ND_SHARED_ACQUIRE: {
-      // v0.9 share 拷贝初始化：q 槽 = p 值；[p-8] refcount++（共享所有权）
-      Buf *b = &c->code;
-      gen_expr(c, node->rhs);              // rax = p（share 变量值 = 负载地址）
-      emit_push_rax(b);                    // 暂存 p
-      emit_sub_rax8(b);                    // rax = p-8（块基址）
-      emit_mov_rdx_rax(b);                 // rdx = base
-      emit_load_eax_at_edx(b);             // eax = refcount
-      emit_inc_eax(b);                     // ++
-      emit_store_eax_at_edx(b);            // [base] = 新计数
-      emit_pop_rax(b);                     // 恢复 p
-      slot_store_rax64(b, node->lhs->offset); // q 槽 = p（64 位）
-      return;
-    }
-    case ND_NEW: {   // v0.9：new int → 堆对象（头部 8B refcount + int 负载 8B；返回负载地址）
-      // 内联为 4 字面量参数的 VirtualAlloc 调用（复用 gen_apicall 寄存器路径）
-      Node a[4];
-      memset(a, 0, sizeof(a));
-      a[0].kind = ND_NUM; a[0].val = 0;              // lpAddress = NULL
-      a[1].kind = ND_NUM; a[1].val = 16;             // 头部 8 + 负载 8
-      a[2].kind = ND_NUM; a[2].val = 0x3000;         // MEM_COMMIT | MEM_RESERVE
-      a[3].kind = ND_NUM; a[3].val = 4;              // PAGE_READWRITE
-      for (int i = 0; i < 3; i++) a[i].next = &a[i + 1];
-      Node fake;
-      memset(&fake, 0, sizeof(fake));
-      fake.kind = ND_APICALL;
-      fake.api_index = node->api_index;              // 内置 VirtualAlloc 下标
-      fake.nargs = 4;
-      fake.rhs = &a[0];
-      gen_apicall(c, &fake);                         // rax = 块基址
-      // 分配失败（rax==0，64 位判真）→ 表达式值 0
-      int ok = new_label(c), end = new_label(c);
-      emit_test64(b);
-      emit_jcc_label(c, 0x85, ok);                   // jne ok
-      emit_mov_eax_imm(b, 0);
-      emit_jmp_label(c, end);
-      emit_label(c, ok);
-      // 头部：refcount @ [base] = 1（share 引用计数地基；own 走出口整体释放）
-      emit_mov_rdx_rax(b);                           // rdx = base
-      emit_mov_eax_imm(b, 1);
-      emit_store_eax_at_edx(b);                      // [base] = 1
-      // 负载 = base + 8（own 清理回退：VirtualFree(p-8)）
-      emit_lea_rax_rdx8(b);                          // rax = base+8
-      emit_label(c, end);
-      return;
-    }
-    // 前缀 ++x/--x：先改内存，值(新)进 eax
-    // 间接目标（引用 r / *p / a[i]）：地址 → rdx，间接 inc/dec
+}
+
+// —— v1.10.6（B2 第五族）：自增/自减（原 ND_PRE_INC / PRE_DEC / POST_INC / POST_DEC 四个 case）——
+//   四块原本是 switch 里各自独立的 case，这里在原位重开一层 switch(node->kind)，块内缩进原样，
+//   判据 = bytecmp 产物逐字节相同 + 1106 项回归。
+static void gen_incdec(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
+  switch (node->kind) {
     case ND_PRE_INC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
       // v1.7.0 P1：int_64 的 ++ —— 64 位读改写，值 = **新值**（在 rax）。本档覆盖
       //   局部槽（direct）/ 全局 / a[i] / *p / s.f（间接）。走 32 位档就是"只改低半槽"的
       //   静默错值（0 → 4294967295 那一族），所以必须排在 lvchar/指针档之前。
-      if (node->lhs->ty == TY_INT64) {
+      if (ty_is64(node->lhs->ty)) {
         if (direct) {
           slot_load_rax64(b, node->lhs->offset);
           emit_inc_rax(b);
@@ -2766,7 +2761,7 @@ static void gen_expr(FuncCtx *c, Node *node) {
     case ND_PRE_DEC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
       // v1.7.0 P1：int_64 的 -- —— 64 位读改写，值 = **新值**（同 ND_PRE_INC 的长度理由）
-      if (node->lhs->ty == TY_INT64) {
+      if (ty_is64(node->lhs->ty)) {
         if (direct) {
           slot_load_rax64(b, node->lhs->offset);
           emit_dec_rax(b);
@@ -2817,7 +2812,7 @@ static void gen_expr(FuncCtx *c, Node *node) {
       //   旧值必须先保存住，再做内存自增（与指针 x++ 的 push/pop 同形）。局部槽没有 call
       //   跨越，push/pop 安全；间接目标用 "load 旧值 → push → inc qword [rdx] → pop"，
       //   不重算地址（重算会冲掉 rax 里的旧值）。
-      if (node->lhs->ty == TY_INT64) {
+      if (ty_is64(node->lhs->ty)) {
         if (direct) {
           slot_load_rax64(b, node->lhs->offset);   // rax = 旧值
           emit_push_rax(b);
@@ -2875,7 +2870,7 @@ static void gen_expr(FuncCtx *c, Node *node) {
     case ND_POST_DEC: {
       bool direct = is_direct_var(node->lhs);   // v1.3.0：全局变量不走直接帧槽，转间接通路
       // v1.7.0 P1：int_64 的 x-- —— 64 位读改写，值 = **旧值**（同 ND_POST_INC 的顺序坑）
-      if (node->lhs->ty == TY_INT64) {
+      if (ty_is64(node->lhs->ty)) {
         if (direct) {
           slot_load_rax64(b, node->lhs->offset);
           emit_push_rax(b);
@@ -2928,6 +2923,172 @@ static void gen_expr(FuncCtx *c, Node *node) {
       else emit_dec_mem_edx(b);
       return;
     }
+    default: break;
+  }
+}
+
+// —— v1.10.6（B2 第六族）：堆对象（原 ND_SHARED_ACQUIRE / ND_NEW 两个 case）——
+//   share 拷贝的 refcount++ 与 new 的 VirtualAlloc 内联分配，块内缩进原样，
+//   判据 = bytecmp 产物逐字节相同 + 1106 项回归。
+static void gen_heap_op(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
+  switch (node->kind) {
+    case ND_SHARED_ACQUIRE: {
+      // v0.9 share 拷贝初始化：q 槽 = p 值；[p-8] refcount++（共享所有权）
+      Buf *b = &c->code;
+      gen_expr(c, node->rhs);              // rax = p（share 变量值 = 负载地址）
+      emit_push_rax(b);                    // 暂存 p
+      emit_sub_rax8(b);                    // rax = p-8（块基址）
+      emit_mov_rdx_rax(b);                 // rdx = base
+      emit_load_eax_at_edx(b);             // eax = refcount
+      emit_inc_eax(b);                     // ++
+      emit_store_eax_at_edx(b);            // [base] = 新计数
+      emit_pop_rax(b);                     // 恢复 p
+      slot_store_rax64(b, node->lhs->offset); // q 槽 = p（64 位）
+      return;
+    }
+    case ND_NEW: {   // v0.9：new int → 堆对象（头部 8B refcount + int 负载 8B；返回负载地址）
+      // 内联为 4 字面量参数的 VirtualAlloc 调用（复用 gen_apicall 寄存器路径）
+      Node a[4];
+      memset(a, 0, sizeof(a));
+      a[0].kind = ND_NUM; a[0].val = 0;              // lpAddress = NULL
+      a[1].kind = ND_NUM; a[1].val = 16;             // 头部 8 + 负载 8
+      a[2].kind = ND_NUM; a[2].val = 0x3000;         // MEM_COMMIT | MEM_RESERVE
+      a[3].kind = ND_NUM; a[3].val = 4;              // PAGE_READWRITE
+      for (int i = 0; i < 3; i++) a[i].next = &a[i + 1];
+      Node fake;
+      memset(&fake, 0, sizeof(fake));
+      fake.kind = ND_APICALL;
+      fake.api_index = node->api_index;              // 内置 VirtualAlloc 下标
+      fake.nargs = 4;
+      fake.rhs = &a[0];
+      gen_apicall(c, &fake);                         // rax = 块基址
+      // 分配失败（rax==0，64 位判真）→ 表达式值 0
+      int ok = new_label(c), end = new_label(c);
+      emit_test64(b);
+      emit_jcc_label(c, 0x85, ok);                   // jne ok
+      emit_mov_eax_imm(b, 0);
+      emit_jmp_label(c, end);
+      emit_label(c, ok);
+      // 头部：refcount @ [base] = 1（share 引用计数地基；own 走出口整体释放）
+      emit_mov_rdx_rax(b);                           // rdx = base
+      emit_mov_eax_imm(b, 1);
+      emit_store_eax_at_edx(b);                      // [base] = 1
+      // 负载 = base + 8（own 清理回退：VirtualFree(p-8)）
+      emit_lea_rax_rdx8(b);                          // rax = base+8
+      emit_label(c, end);
+      return;
+    }
+    default: break;
+  }
+}
+
+static void gen_expr(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
+  switch (node->kind) {
+    case ND_NUM: emit_mov_eax_imm(b, node->val); return;
+    // ===== v1.7.0 int_64 =====
+    case ND_NUM64:   // 64 位字面量 → rax（小值退 mov rax,imm32 符号扩展，短 3 字节）
+      emit_mov_rax_imm64(b, node->lval);
+      return;
+    case ND_I2L:     // int → int_64（符号扩展：movsxd rax,eax）
+      gen_expr(c, node->lhs);
+      emit_movsxd_rax_eax(b);
+      return;
+    case ND_U2L:     // v1.9.0：无符号 8/32 位 → 64 位（**零扩展**：mov eax,eax）
+      gen_expr(c, node->lhs);
+      emit_u2l(b);
+      return;
+    case ND_L2I:     // int_64 → int（显式收窄 to_int32：低 32 位）
+      gen_expr(c, node->lhs);
+      emit_l2i(b);
+      return;
+    // ===== v1.1.0 浮点（阶段1）=====
+    case ND_DBL: {
+      // double 字面量 → xmm0（内容 8 字节位型进数据区，disp 排布后回填）
+      // ⚠️ 登记必须在发指令**之前**（note_dblref 可能 realloc，指针不能跨它存活）；
+      //    同一常量多次出现 = 多个位置（note_dbluse 逐处记，回填时逐个补）
+      size_t r = note_dblref(c, node->dval);
+      const uint8_t movsd[] = {0xF2, 0x0F, 0x10, 0x05};   // movsd xmm0,[rip+disp32]
+      buf_bytes(b, movsd, 4);
+      note_dbluse(c, r, c->code.len);
+      buf_u32(b, 0);                                       // 占位
+      return;
+    }
+    case ND_I2D:   // int → double（cvtsi2sd xmm0,eax）
+      gen_expr(c, node->lhs);
+      emit_cvtsi2sd_xmm0_eax(b);
+      return;
+    case ND_D2I:   // double → int（cvttsd2si eax,xmm0，截断取整；越界 = 0x80000000，同 C）
+      gen_expr(c, node->lhs);
+      emit_cvttsd2si_eax_xmm0(b);
+      return;
+    // ===== v1.8.0 C 风格转型 `(type)expr`（语义表见 SPEC「C 风格转型」节）=====
+    //   目标类型 = node->ty（**唯一来源**）；源类型在发射点用共用判据回推。
+    //   结果寄存器约定与全编译器一致：整数值 → eax/rax ｜ double → xmm0。
+    case ND_CAST:
+      gen_cast(c, node);
+      return;
+    case ND_STR: gen_str_literal(c, node); return;
+    case ND_VAR: gen_var_read(c, node); return;
+    case ND_DEREF: gen_deref(c, node); return;
+    case ND_ASSIGN: gen_assign(c, node); return;
+    case ND_FUNC_ADDR: {   // v0.9.3：&函数名 → 函数代码地址（lea rax,[rip+disp32]，布局后回填）
+      const uint8_t lea[] = {0x48, 0x8D, 0x05};
+      buf_bytes(b, lea, 3);
+      note_funcaddr(c, node->func_index);
+      buf_u32(b, 0);       // 占位 disp（codegen_main 布局后回填）
+      return;
+    }
+    case ND_ADDR: gen_lvalue_addr(c, node->lhs); return;
+    case ND_REF_BIND:
+      // 引用声明绑定：r 槽 = x 的地址（64 位写槽；不走引用写）
+      gen_lvalue_addr(c, node->rhs);
+      slot_store_rax64(b, node->lhs->offset);
+      return;
+    case ND_ADD_ASSIGN: case ND_SUB_ASSIGN: case ND_MUL_ASSIGN:
+    case ND_DIV_ASSIGN: case ND_MOD_ASSIGN:
+    case ND_AND_ASSIGN: case ND_OR_ASSIGN: case ND_XOR_ASSIGN:
+    case ND_SHL_ASSIGN: case ND_SHR_ASSIGN: gen_assign_op(c, node); return;
+    case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD:
+    case ND_BITAND: case ND_BITOR: case ND_BITXOR: case ND_SHL: case ND_SHR:
+      // v1.1.0：任一操作数是 double → 走 SSE 通路（+ - * /；% 已被 parse 拦掉）
+      if (expr_is_dbl(node->lhs) || expr_is_dbl(node->rhs)) {
+        gen_dbl_binop(c, node, node->kind == ND_ADD ? '+' : node->kind == ND_SUB ? '-'
+                          : node->kind == ND_MUL ? '*' : '/');
+        return;
+      }
+      gen_binop(c, node); return;
+    case ND_POW: gen_pow(c, node); return;   // v1.0.11 幂（快速幂发射器）
+    case ND_NEG:
+      // v1.1.0：double 取负 = 翻符号位（统一走 gen_dbl_neg，别在这里重复实现一份）
+      if (expr_is_dbl(node->lhs)) { gen_dbl_neg(c, node); return; }
+      gen_expr(c, node->lhs);
+      // v1.7.0：int_64 取负 = neg rax（48 F7 D8）；int 仍是 32 位 neg eax
+      if (expr_is_i64(node->lhs)) emit_neg64(b); else emit_neg(b);
+      return;
+    // v1.3.1：三元——条件判真后**只生成被选中的那一支**（C 语义；不选的那支不求值）
+    case ND_TERN: {
+      int else_l = new_label(c), end = new_label(c);
+      if (!try_gen_cmp_branch(c, node->lhs, true, else_l)) {   // v1.4.9① 比较塌缩（条件为假 → 跳 else）
+        gen_expr(c, node->lhs);
+        if (is64_value(node->lhs)) emit_test64(b); else emit_test(b);
+        emit_jcc_label(c, 0x84, else_l);   // je else
+      }
+      gen_expr(c, node->rhs);            // 真分支（double 时结果天然落 xmm0）
+      emit_jmp_label(c, end);
+      emit_label(c, else_l);
+      gen_expr(c, node->els);            // 假分支
+      emit_label(c, end);
+      return;
+    }
+    case ND_CALL: gen_call(c, node); return;
+    case ND_APICALL:
+      gen_apicall(c, node);   // v0.8
+      // v1.1.0：double 返回的 API 结果天然在 xmm0（值语义），无需搬运——见 expr_is_dbl 的 ND_APICALL 分支
+      return;
+    case ND_SHARED_ACQUIRE: case ND_NEW: gen_heap_op(c, node); return;
+    case ND_PRE_INC: case ND_PRE_DEC: case ND_POST_INC: case ND_POST_DEC: gen_incdec(c, node); return;
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE: case ND_GT: case ND_GE:
       // v1.1.0：double 比较走 ucomisd（无符号条件码 + p 变体处理 NaN：x==x 为假，与 C 一致）
       if (expr_is_dbl(node->lhs) || expr_is_dbl(node->rhs)) { gen_dbl_cmp(c, node); return; }
@@ -2945,7 +3106,7 @@ static void gen_expr(FuncCtx *c, Node *node) {
       if (expr_is_i64(node->lhs)) emit_not64(b); else emit_not(b);
       return;
     default:
-      fprintf(stderr, "FLINT: 内部错误：表达式出现语句节点（kind=%d）\n", (int)node->kind);
+      fprintf(stderr, "hlc: 内部错误：表达式出现语句节点（kind=%d）\n", (int)node->kind);
       exit(1);
   }
 }
@@ -2970,7 +3131,7 @@ static void dbg_record(FuncCtx *c, Node *node, size_t start, size_t end) {
   if (c->ndbg == c->dbg_cap) {
     size_t cap = c->dbg_cap ? c->dbg_cap * 2 : 64;
     DebugRow *p = realloc(c->dbg, cap * sizeof(DebugRow));
-    if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
     c->dbg = p;
     c->dbg_cap = cap;
   }
@@ -3115,14 +3276,14 @@ static void gen_stmt_inner(FuncCtx *c, Node *node) {
       int i = c->nloops - 1;
       while (i >= 0 && c->loops[i].is_switch) i--;
       if (i < 0) {
-        fprintf(stderr, "FLINT: 内部错误：continue 不在循环上下文（parser 应已拦截）\n");
+        fprintf(stderr, "hlc: 内部错误：continue 不在循环上下文（parser 应已拦截）\n");
         exit(1);
       }
       emit_jmp_label(c, c->loops[i].cont);
       return;
     }
     default:
-      fprintf(stderr, "FLINT: 内部错误：语句出现表达式节点\n");
+      fprintf(stderr, "hlc: 内部错误：语句出现表达式节点\n");
       exit(1);
   }
 }
@@ -3190,7 +3351,16 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   c->scratch_off = frame + 8;
   frame = (frame + 8 + 15) / 16 * 16;
 
+  // ===== v5（`-debug`）：帧表（D-3）—— **记在发射现场**，事后不反推 =====
+  // 帧大小 = 序言 `sub rsp, imm` 的 imm（大帧时 emit_stack_alloc 分多段 sub，总和仍 = frame）。
+  // 记在 fn 上而不是 c 上：codegen_main 汇总 DebugFuncSpan 时只有 Program（FuncDef 数组）在手。
+  fn->frame_size = frame;
+
   emit_push_rbp(&c->code);
+  // 返回地址相对 rbp 的偏移：`push rbp` 把旧 rbp 压在 [rbp+0..7]，返回地址紧贴其上 ⇒ 偏移 = **1 个栈槽**。
+  // 从栈槽单位推（与 `frame = fn->var_count * 8` 用的是同一个单位），不写裸字面量：
+  //   将来若改成"序言保存两样东西"的形态，只需改这一行的乘数。
+  fn->ret_addr_off = 1 * FRAME_SLOT_BYTES;
   emit_mov_rbp_rsp(&c->code);
   emit_stack_alloc(&c->code, frame);   // 决策 41：大帧逐页探测（>4KB 帧不再跳过守护页）
 
@@ -3210,7 +3380,7 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
       if (i >= 4) {
         int disp = 48 + (i - 4) * 8;
         bool wide2 = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR
-                  || fn->param_ty[i] == TY_INT64;   // v1.7.0：int_64 栈参也整 64 位落槽
+                  || ty_is64(fn->param_ty[i]);   // v1.7.0：int_64 栈参也整 64 位落槽（v1.9.0：uint_64 同）
         if (fn->param_ty[i] == TY_DOUBLE) {
           emit_load_rbp_pos(&c->code, disp, 2);              // movsd xmm0,[rbp+disp]
           slot_store_dbl_xmm(&c->code, fn->param_offsets[i], 0);
@@ -3230,7 +3400,7 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
       }
       // v1.3.2：函数指针形参 = 地址 → 也要 64 位落槽（记 TY_INT 会截断成 32 位 = 静默传野地址）
       bool wide = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR
-               || fn->param_ty[i] == TY_INT64;   // v1.7.0：int_64 值形参 → 64 位 GP 落槽
+               || ty_is64(fn->param_ty[i]);   // v1.7.0：int_64 值形参 → 64 位 GP 落槽（v1.9.0：uint_64 同）
       switch (gi) {
         case 0:
           if (wide) slot_store_rcx64(&c->code, fn->param_offsets[i]);
@@ -3303,6 +3473,16 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   int reg_pad = (nreg % 2) ? 8 : 0;   // 奇数个 push ⇒ 补 8 字节垫，函数内每个 call 点恒 ≡0
   if (reg_pad) emit_sub_rsp(&c->code, reg_pad);
 
+  // v5（D-3）：被调者保存寄存器清单（**按 push 顺序**）+ push 字节数 ⇒ 帧表。
+  //   来源就是上面这次分配/发射，不去反汇编自己的产物（同一套真值）。
+  //   `-debug` 下 D-2 关掉驻留 ⇒ nreg 恒 0 ⇒ 这里如实给空表（调试器据此知道无需恢复任何寄存器）。
+  fn->nsaved = nreg > 8 ? 8 : nreg;
+  for (int i = 0; i < fn->nsaved; i++) fn->saved_regs[i] = saved_regs[i];
+  fn->push_bytes = 8 * fn->nsaved;   // 每个 push 都是 8 字节槽（rbx/r12..r15）
+  // 序言到此结束：push rbp / mov rbp,rsp / sub rsp,frame / 形参装载 / 托管槽清零 / push 保存寄存器 / 对齐垫。
+  //   调试器用它判「PC 还在序言里」⇒ 形参槽可能尚未装载完。
+  fn->prolog_len = c->code.len;
+
   flint_stats_func_begin(fn->name);   // v1.4.19：本函数统计起点（-stats）
   size_t st_len0 = c->code.len;
   // 函数体（顶层语句链表）
@@ -3371,6 +3551,9 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   // v1.4.23（M4）：收尾两件事，次序不能反 ——
   //   ① 先把寄存器里的权威值写回内存（`slotmap_flush_all`）；② 再逆序 pop 出序言 push 的寄存器。
   //   （写回用的是那些寄存器，所以必须在 pop 之前。）
+  // v5（D-3）：**尾声区间**从这里起算 —— 本行之后 rsp/rbp 开始被改写（写回 → add 垫 → 逆序 pop →
+  //   leave/ret 或 call ExitProcess）。调试器在区间内**不许**再把 rbp 当作稳定帧基址去读变量。
+  fn->epilog_off = c->code.len;
   slotmap_flush_all();
   if (reg_pad) emit_add_rsp(&c->code, reg_pad);
   for (int i = nreg - 1; i >= 0; i--) emit_pop_saved_reg(&c->code, saved_regs[i]);
@@ -3383,6 +3566,7 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
     emit_leave(&c->code); // mov rsp,rbp; pop rbp
     emit_ret(&c->code);   // 返回 caller（返回值 eax）
   }
+  fn->epilog_len = c->code.len - fn->epilog_off;
 
   free(uoffs);
   free(soffs);
@@ -3481,7 +3665,7 @@ GenResult codegen_main(Program prog) {
       if (r.nguses == r.guses_cap) {
         size_t cap = r.guses_cap ? r.guses_cap * 2 : 16;
         GUse *g = realloc(r.guses, cap * sizeof(GUse));
-        if (!g) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+        if (!g) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
         r.guses = g;
         r.guses_cap = cap;
       }
@@ -3500,8 +3684,23 @@ GenResult codegen_main(Program prog) {
     r.dbg_funcs_cap = (size_t)n;
     r.dbg_funcs = xmalloc((size_t)n * sizeof(DebugFuncSpan));
     for (int i = 0; i < n; i++) {
-      r.dbg_funcs[i].off = offsets[i];
-      r.dbg_funcs[i].len = ctxs[i].code.len;
+      FuncDef *fd = &prog.funcs[order[i]];
+      DebugFuncSpan *sp = &r.dbg_funcs[i];
+      sp->off = offsets[i];
+      sp->len = ctxs[i].code.len;
+      sp->name = fd->name;
+      // v5（D-3）：帧表 —— 值来自 codegen_func 的发射现场（**不重算、不反汇编产物**）
+      sp->frame_size = fd->frame_size;
+      sp->push_bytes = fd->push_bytes;
+      sp->ret_addr_off = fd->ret_addr_off;
+      sp->nsaved = fd->nsaved;
+      for (int k = 0; k < fd->nsaved && k < 8; k++) sp->saved_regs[k] = fd->saved_regs[k];
+      sp->prolog_len = fd->prolog_len;
+      sp->epilog_off = fd->epilog_off;
+      sp->epilog_len = fd->epilog_len;
+      // v5（D-1）：变量位置表 —— parse 建的那一张（与分槽同源）
+      sp->vars = fd->dbg_vars;
+      sp->nvars = fd->ndbg_vars;
       r.ndbg_funcs = i + 1;
     }
     for (int i = 0; i < n; i++) {
@@ -3510,7 +3709,7 @@ GenResult codegen_main(Program prog) {
         if (r.ndbg_rows == r.dbg_rows_cap) {
           size_t cap = r.dbg_rows_cap ? r.dbg_rows_cap * 2 : 256;
           DebugRow *p = realloc(r.dbg_rows, cap * sizeof(DebugRow));
-          if (!p) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+          if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
           r.dbg_rows = p;
           r.dbg_rows_cap = cap;
         }
@@ -3598,7 +3797,7 @@ GenResult codegen_main(Program prog) {
       if (r.napi_sites == r.api_sites_cap) {
         size_t cap = r.api_sites_cap ? r.api_sites_cap * 2 : 8;
         r.api_sites = realloc(r.api_sites, cap * sizeof(ApiCallRef));
-        if (!r.api_sites) { fprintf(stderr, "FLINT: 内存不足\n"); exit(1); }
+        if (!r.api_sites) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
         r.api_sites_cap = cap;
       }
       r.api_sites[r.napi_sites].off = offsets[i] + c->apicalls[s].off; // 全局偏移

@@ -1,0 +1,36 @@
+// f049_uint64_ops.fl -- v1.9.0 unsigned 64-bit: wrap-around, unsigned div/mod, logical shift,
+// unsigned comparison, bitwise ops. 真 flint only (boot has no uint_*: known gap).
+//
+// WHY THIS PROBE EXISTS: the 64-bit row of the same three families. `cqo; idiv` instead of
+// `xor rdx,rdx; div` makes 2^64-1 / 10 negative; `sar` instead of `shr` makes 2^64-1>>1 stay
+// -1; `setl` instead of `setb` inverts `b > 1`. All compile, all silently wrong.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\uint-exp.js        (section "== f049"; BigInt mod 2^64)
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 4095 (all twelve bits).
+// ASCII only, no BOM. No includes.
+int main() {
+  uint_64 b = 0;
+  b = b - 1;                      // 2^64-1 by mod-2^64 wrap
+
+  int m = 0;
+  // NOTE: FLINT has no unsigned 64-bit literals (no `u`/`U` suffix by design), so the two
+  // constants above INT64_MAX are spelled as expressions: (uint_64)0 - k == 2^64 - k.
+  if (b == (uint_64)0 - 1) { m = m + 1; }
+  if (b + 1 == 0) { m = m + 2; }
+  if (b * 2 == (uint_64)0 - 2) { m = m + 4; }
+  if (b / 3 == 6148914691236517205) { m = m + 8; }     // **unsigned** 64-bit division
+  if (b / 10 == 1844674407370955161) { m = m + 16; }
+  if (b % 3 == 0) { m = m + 32; }                      // **unsigned** 64-bit modulo
+  if (b % 10 == 5) { m = m + 64; }
+  if (b >> 1 == 9223372036854775807) { m = m + 128; }  // **logical** 64-bit shift
+  if (b > 1) { m = m + 256; }                          // **unsigned** 64-bit comparison
+  if (!(b < 1)) { m = m + 512; }
+  if ((b & 4294967295) == 4294967295) { m = m + 1024; }
+  if (b == b) { m = m + 2048; }
+
+  print(["b=", b, " mask=", m, " expect=4095\n"]);
+  if (m == 4095) { return 42; }
+  return 7;
+}

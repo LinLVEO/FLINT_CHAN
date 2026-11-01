@@ -1,0 +1,96 @@
+// apps\scroll_probe.fl -- M1 滚屏：tile 地图 + camera + 左右键
+//
+// 运行：
+//   hlc run apps\scroll_probe.fl
+//   hlc build apps\scroll_probe.fl
+//
+// 判据（自动）：退出码 = 建窗阶段错误码（90/91/92），正常关窗退 0。
+// 手动看：左右方向键把画面滚到地图两端，边界处画面停住不越界。
+// 地图：32x17 tile（16x16 px，共 512x272），视口 480x270 => camera_x 0..32。
+include "../lib/flgui_win32.fl"
+include "../lib/mapload.fl"
+include "../lib/actor.fl"
+include "../games/huiye/sprite_data.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct Grid grid;
+  struct GuiInput in;
+  int map[544];                 // 32x17 一维化：m[ty*32+tx]
+  int W = 480;
+  int H = 270;
+  int mapw = 32;
+  int maph = 17;
+  int cam_x = 0;
+  int i = 0;
+  int run = 1;
+  int fc = 0;
+  int t0 = 0;
+  int t1 = 0;
+  int avg10 = 0;
+  int buf[768];
+  int pal[7];
+  int state = 0;
+  int anim = 0;
+  int moved = 0;
+  int frame = 0;
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "SCROLLPROBE";
+  g.x = 120;
+  g.y = 100;
+  g.w = W;
+  g.h = H;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  i = 0;
+  if (grid_init(&grid, map, mapw, maph, 16, 16) == 0) { return 93; }
+  if (mapload_ascii("apps/map.txt", map, mapw, maph) == 0) { return 94; }
+  if (sprite_hero_load(buf) == 0) { return 95; }
+  if (sprite_pal_fill(pal) != 7) { return 96; }
+
+  // —— 测速：300 帧纯渲染（不 sleep，不动 camera）——
+  t0 = GetTickCount();
+  fc = 0;
+  while (fc < 300) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }
+    gfx_clear(&b, 0x000B0E1A);
+    grid_draw(&b, &grid, cam_x, 0);
+    gfx_present(&sf);
+    fc = fc + 1;
+  }
+  t1 = GetTickCount();
+  avg10 = (t1 - t0) * 10 / 300;
+  if (avg10 > 200) { avg10 = 200; }
+  print(["scroll avg10=", avg10, "\n"]);
+
+  while (run == 1) {
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      moved = 0;
+      if ((GetAsyncKeyState(0x41) & 0x8000) != 0) { cam_x = cam_x - 8; moved = 1; }
+      if ((GetAsyncKeyState(0x44) & 0x8000) != 0) { cam_x = cam_x + 8; moved = 1; }
+      if (cam_x < 0) { cam_x = 0; }
+      if (cam_x > mapw * 16 - W) { cam_x = mapw * 16 - W; }
+      if (moved == 1) { anim = anim + 1; }
+      state = actor_state_for(moved);
+      frame = actor_frame(state, anim);
+
+      gfx_clear(&b, 0x000B0E1A);
+      grid_draw(&b, &grid, cam_x, 0);
+      // 玩家：16x16 精灵（camera 滚动时它不动；站/走按状态机切帧）
+      sprite_blit(&b, W / 2 - 8, H - 64, buf, 16, 16, frame, pal, 7);
+      gfx_present(&sf);
+      gui_win_frame_wait(&c);
+    }
+  }
+  return avg10;
+}

@@ -1,0 +1,39 @@
+// f098_enum.fl -- enum 具名整数常量（2026-11-01，v2.1.0 第一刀）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  首项 = 0
+//   bit1  自增 = 上一项 + 1
+//   bit2  显式赋值 = 5
+//   bit3  显式赋值后继续自增 = 6
+//   bit4  多个 enum 并存、常量可相加
+//   bit5  常量参与算式（ATK * 2 == 10）
+//   bit6  局部变量可遮蔽同名常量
+//   bit7  常量可用于循环上界
+enum St { IDLE, WALK, ATK = 5, DASH };
+enum Mask { A = 1, B = 2, C = 4 };
+
+int main() {
+  int mask = 0;
+  int x = 0;
+  int i = 0;
+  int s = 0;
+
+  if (IDLE == 0) { mask = mask | 1; }
+  if (WALK == 1) { mask = mask | 2; }
+  if (ATK == 5) { mask = mask | 4; }
+  if (DASH == 6) { mask = mask | 8; }
+  if (A + B + C == 7) { mask = mask | 16; }
+
+  x = ATK * 2;
+  if (x == 10) { mask = mask | 32; }
+
+  int DASH = 99;
+  if (DASH == 99) { mask = mask | 64; }
+
+  for (i = 0; i < ATK; i = i + 1) { s = s + 1; }
+  if (s == 5) { mask = mask | 128; }
+
+  print(["f098 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

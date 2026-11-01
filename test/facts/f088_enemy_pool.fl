@@ -1,0 +1,87 @@
+// f088_enemy_pool.fl -- M5 第四刀：敌人池 + AI 更新循环（无渲染汇合）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 字段：0=x 1=y 2=state（stride 3）。玩家固定在 (0,0)。
+//   bit0  8 个 alloc 后 top == 0
+//   bit1  第 9 个 alloc == -1
+//   bit2  1000 帧 AI 更新后，敌人 0（x=150 远）state == 0（巡逻）
+//   bit3  1000 帧后 top 仍 0（无泄漏）
+//   bit4  free(idx 3) 后 alloc 返回 3
+//   bit5  回收后 top == 1
+//   bit6  回收不擦字段：idx 3 的 x 字段还在
+//   bit7  确定性：同一 1000 帧序列跑两次，8 个敌人 state 逐位相同
+include "../../lib/pool.fl"
+include "../../lib/enemy.fl"
+
+// 跑 1000 帧 AI，返回 8 个敌人 state 的混合值
+int ai_run(struct Pool *p) {
+  int f = 0;
+  int i = 0;
+  int idx = 0;
+  int x = 0;
+  int st = 0;
+  int dist = 0;
+  int s = 0;
+  f = 0;
+  while (f < 1000) {
+    i = 0;
+    while (i < 8) {
+      x = pool_get(p, i, 0);
+      st = pool_get(p, i, 2);
+      dist = x;
+      if (dist < 0) { dist = 0 - dist; }
+      st = enemy_next_state(st, dist);
+      pool_set(p, i, 2, st);
+      i = i + 1;
+    }
+    f = f + 1;
+  }
+  i = 0;
+  while (i < 8) {
+    s = s * 10 + pool_get(p, i, 2);
+    i = i + 1;
+  }
+  return s;
+}
+
+int main() {
+  struct Pool p;
+  int data[24];
+  int freebuf[8];
+  int mask = 0;
+  int i = 0;
+  int idx = 0;
+  int s1 = 0;
+  int s2 = 0;
+
+  if (pool_init(&p, data, freebuf, 8, 3) == 0) { return 1; }
+
+  i = 0;
+  while (i < 8) {
+    idx = pool_alloc(&p);
+    pool_set(&p, idx, 0, i * 20);
+    pool_set(&p, idx, 1, 0);
+    pool_set(&p, idx, 2, 0);
+    i = i + 1;
+  }
+  if (p.top == 0) { mask = mask | 1; }
+  if (pool_alloc(&p) == -1) { mask = mask | 2; }
+
+  // 敌人 0 距离 0（x=0）-> 攻击；敌人 7 x=140 -> 巡逻
+  s1 = ai_run(&p);
+  if (pool_get(&p, 0, 2) == 2) { mask = mask | 4; }
+  if (p.top == 0) { mask = mask | 8; }
+
+  if (pool_free(&p, 3) == 1) {
+    if (p.top == 1) { mask = mask | 32; }
+    if (pool_alloc(&p) == 3) { mask = mask | 16; }
+  }
+  if (pool_get(&p, 3, 0) == 60) { mask = mask | 64; }
+
+  s2 = ai_run(&p);
+  if (s1 == s2) { mask = mask | 128; }
+
+  print(["f088 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

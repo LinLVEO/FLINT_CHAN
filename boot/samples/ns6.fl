@@ -1,4 +1,5 @@
-// ns6（负例，B2k 改判）：struct 值字段仍不支持（char 标量字段已支持 → 改测 struct 值字段）
-struct P { int x; }
-struct Q { struct P p; }
+// ns6（负例，v2.4.0 改判）：struct **值字段**自 v2.4.0 起双端支持（见 test\facts\f100_nested_struct.fl）——
+//   本条改测「**自嵌套值字段**」必须被拒（尺寸无穷）：boot 专码 -242，
+//   真 flint 报「结构体不能把自身作为值字段」；自引用只能写指针形态 `struct P *next;`。
+struct P { int x; struct P p; }
 int main() { return 0; }

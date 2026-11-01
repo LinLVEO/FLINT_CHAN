@@ -1,82 +1,142 @@
 {
-    "Schema":  1,
-    "Tool":  "budget-gate",
-    "Recorded":  "2026-10-14 21:35:54",
-    "Reason":  "v1.5.0 str([...]) builtin: the boot-injected print/str support library gains one function (_flint_bufput, the sink writer) =\u003e boot function-table occupancy for the heaviest chain 506 -\u003e 507 (headroom 6 -\u003e 5). Flint side unchanged (str adds no api declarations); print-only flint products stay byte-identical (eqgate green).",
-    "ImportCaps":  {
-                       "MaxImports":  96,
-                       "MaxGroups":  8,
-                       "Source":  "src\\pe.c"
-                   },
-    "Products":  [
-                     {
-                         "Artifact":  "apps\\enginesnap\\enginesnap.exe",
-                         "Imports":  48,
-                         "Groups":  3,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\flgui_demo\\flgui_demo.exe",
-                         "Imports":  52,
-                         "Groups":  4,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\flgui_demo\\flgui_demo_boot.exe",
-                         "Imports":  46,
-                         "Groups":  3,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\flgui_demo\\flgui_demo_flint.exe",
-                         "Imports":  46,
-                         "Groups":  3,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\m2_float\\m2_float.exe",
-                         "Imports":  90,
-                         "Groups":  8,
-                         "Modules":  "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\m2_float\\main.exe",
-                         "Imports":  90,
-                         "Groups":  8,
-                         "Modules":  "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\student\\student.exe",
-                         "Imports":  8,
-                         "Groups":  1,
-                         "Modules":  "kernel32.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\ui_gallery\\main.exe",
-                         "Imports":  52,
-                         "Groups":  4,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\ui_gallery\\ui_gallery.exe",
-                         "Imports":  52,
-                         "Groups":  4,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
-                     },
-                     {
-                         "Artifact":  "apps\\winpanel\\winpanel.exe",
-                         "Imports":  79,
-                         "Groups":  7,
-                         "Modules":  "kernel32.dll user32.dll gdi32.dll dwmapi.dll ws2_32.dll advapi32.dll shell32.dll"
-                     }
-                 ],
-    "BootTable":  {
-                      "App":  "apps\\m2_float\\main.fl",
-                      "Occupied":  507,
-                      "Limit":  512,
-                      "Headroom":  5,
-                      "Api":  96,
-                      "Func":  411,
-                      "LimitSource":  "boot\\lib_parse.fl:1434,1561"
-                  }
+  "Schema": 1,
+  "Tool": "budget-gate",
+  "Recorded": "2026-10-28 14:51:41",
+  "Reason": "\u57fa\u7ebf\u5f55\u4e8e 10-24 20:46\uff1b10-25~10-27 lib \u6269\u5bb9\uff08\u7ec8\u7aef/IME/\u8d44\u6e90\u7ba1\u7406\u5668\u5bf9\u8bdd\u6846\u7684 api \u58f0\u660e\uff09\u4f7f boot \u8868 507->525\u3001api 96->109\u3001\u51fd\u6570 411->416\u3002\u7f16\u8bd1\u5668 src \u672a\u52a8\uff0c\u91cd\u5f55\u73b0\u72b6\u3002",
+  "ImportCaps": {
+    "MaxImports": 96,
+    "MaxGroups": 8,
+    "Source": "src\\pe.c"
+  },
+  "Products": [
+    {
+      "Artifact": "apps\\chip8\\chip8_win.exe",
+      "Imports": 51,
+      "Groups": 4,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
+    },
+    {
+      "Artifact": "apps\\chip8\\chip8.exe",
+      "Imports": 1,
+      "Groups": 1,
+      "Modules": "kernel32.dll"
+    },
+    {
+      "Artifact": "apps\\chip8\\test_catch.exe",
+      "Imports": 7,
+      "Groups": 1,
+      "Modules": "kernel32.dll"
+    },
+    {
+      "Artifact": "apps\\dsh_home_launcher\\main.exe",
+      "Imports": 63,
+      "Groups": 4,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
+    },
+    {
+      "Artifact": "apps\\enginesnap\\enginesnap.exe",
+      "Imports": 48,
+      "Groups": 3,
+      "Modules": "kernel32.dll user32.dll gdi32.dll"
+    },
+    {
+      "Artifact": "apps\\flgui_demo\\flgui_demo_boot.exe",
+      "Imports": 46,
+      "Groups": 3,
+      "Modules": "kernel32.dll user32.dll gdi32.dll"
+    },
+    {
+      "Artifact": "apps\\flgui_demo\\flgui_demo_flint.exe",
+      "Imports": 46,
+      "Groups": 3,
+      "Modules": "kernel32.dll user32.dll gdi32.dll"
+    },
+    {
+      "Artifact": "apps\\flgui_demo\\flgui_demo.exe",
+      "Imports": 52,
+      "Groups": 4,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
+    },
+    {
+      "Artifact": "apps\\inserter\\main.exe",
+      "Imports": 23,
+      "Groups": 3,
+      "Modules": "kernel32.dll user32.dll gdi32.dll"
+    },
+    {
+      "Artifact": "apps\\jsonq\\jsonq.exe",
+      "Imports": 11,
+      "Groups": 1,
+      "Modules": "kernel32.dll"
+    },
+    {
+      "Artifact": "apps\\m2_float\\m2_float.exe",
+      "Imports": 90,
+      "Groups": 8,
+      "Modules": "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
+    },
+    {
+      "Artifact": "apps\\m2_float\\main.exe",
+      "Imports": 90,
+      "Groups": 8,
+      "Modules": "kernel32.dll HwBridge.dll user32.dll gdi32.dll dwmapi.dll atiadlxx.dll iphlpapi.dll ws2_32.dll"
+    },
+    {
+      "Artifact": "apps\\student\\student.exe",
+      "Imports": 8,
+      "Groups": 1,
+      "Modules": "kernel32.dll"
+    },
+    {
+      "Artifact": "apps\\student2\\student2.exe",
+      "Imports": 8,
+      "Groups": 1,
+      "Modules": "kernel32.dll"
+    },
+    {
+      "Artifact": "apps\\studio_native\\_studio_edit.exe",
+      "Imports": 32,
+      "Groups": 2,
+      "Modules": "kernel32.dll ws2_32.dll"
+    },
+    {
+      "Artifact": "apps\\studio_native\\studio_server.exe",
+      "Imports": 32,
+      "Groups": 2,
+      "Modules": "kernel32.dll ws2_32.dll"
+    },
+    {
+      "Artifact": "apps\\studio_native\\studio_win.exe",
+      "Imports": 103,
+      "Groups": 6,
+      "Modules": "kernel32.dll gdi32.dll user32.dll studio_text.dll dwmapi.dll imm32.dll"
+    },
+    {
+      "Artifact": "apps\\ui_gallery\\main.exe",
+      "Imports": 52,
+      "Groups": 4,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
+    },
+    {
+      "Artifact": "apps\\ui_gallery\\ui_gallery.exe",
+      "Imports": 52,
+      "Groups": 4,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll"
+    },
+    {
+      "Artifact": "apps\\winpanel\\winpanel.exe",
+      "Imports": 79,
+      "Groups": 7,
+      "Modules": "kernel32.dll user32.dll gdi32.dll dwmapi.dll ws2_32.dll advapi32.dll shell32.dll"
+    }
+  ],
+  "BootTable": {
+    "App": "apps\\m2_float\\main.fl",
+    "Occupied": 525,
+    "Limit": 8192,
+    "Headroom": 7667,
+    "Api": 109,
+    "Func": 416,
+    "LimitSource": "boot\\lib_parse.fl:104"
+  }
 }

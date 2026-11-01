@@ -21,7 +21,7 @@
 //   funcdef := int 名 ( [形参 (, 形参)*] ) block
 //   形参    := int 名 | int '*' 名 | int 名 '[' ']' | char '*' 名 | struct 名 '*' 名
 //   block   := { stmt* }
-//   stmt    := 声明 | 赋值 | 复合赋值 | ++/-- | return | if | while | for | block | print | 调用语句 | *q = expr ;
+//   stmt    := 声明 | 赋值 | 复合赋值 | ++/-- | return | if | while | for | block | print | try | 调用语句 | *q = expr ;
 //   B2k：复合赋值 op= ∈ {+= -= *= /= %= &= |= ^= <<= >>=}；++/-- 前缀/后缀；
 //     目标宽度随地址类型（int 4B / char 1B / 指针 8B）；表达式值 = 存储值（char 截断）、后缀 = 旧值
 //   if      := if ( expr ) stmt [else stmt]
@@ -30,6 +30,7 @@
 //  声明    := <类型> 名 [ = expr ] ; | int 名 [ num ] ; | char 名 [ num ] ;
 //  赋值    := 左值 = expr ;      左值 := 名 | 名 [ expr ] | 名 . 字段 | 名 -> 字段
 //  return  := return expr ;
+//   try     := try 名 = expr ;（v2.4.x 补缺口 -220；展开 = `名 = expr ;` + `if (名 != 0) { return 名 ; }`）
 //   expr   := orx
 //   orx    := andx (|| andx)*            左结合
 //   andx   := rel (&& rel)*
@@ -70,8 +71,10 @@
 //   30/31/32/33 的 ty = 字段类型（0=int 1=int* 2=char* 3=struct* → 见 fld_ty/fld_addr_ty）
 //   字段节点 val = 字段序号*1000 + 字节偏移（fld_code）：机器取偏移做 disp、解释器取序号做槽映射
 //   数组/struct 声明 = 空块（kind 19, cnt=0）：只登记槽位，不产码
+//   try（v2.4.x）**不新增节点**：展开复用 7/43 写 + 17(if；then = 19 块) + 12(ne) + 0(num 0) + 6/42 读 + 9(return)
 // 类型规格 vsp[k] = ty*100000000 + aux*1000000 + sid*1000 + n：
 //   ty 0=int(n=1) 1=int 数组(n=元素数) 2=指针(aux 0=int* 1=char* 2=struct*；sid=struct) 3=本地 struct(n=字段数) 4=char 数组(n=字节数)
+//      6=本地 struct 数组(T=总槽数 占低 5 位, sid 在 10^5 格) 8=本地二维 int 数组(T=元素总数, 列数在 10^6 格；v2.2.0)
 // Ast.ty（B2j 细分）：0=int 值｜1=地址·elem int(4B 读)｜2=地址·elem char(1B 读)｜3=地址·elem 指针/struct(8B 读)
 //   —— >=1 一律是地址类（64 位加减/比较）；`*q` 的读写宽度按操作数 ty 分派
 // 语句索引：块内**直接子语句**存 p->blk（嵌套块的子语句不进父块，base=nblk-cnt 取尾段）
@@ -87,6 +90,24 @@
 //   于是 `int s = "AB"; char *q = s;`（rev4.fl 那类正例）照旧放行；判不了的一律**放行**
 //   （boot 更宽不算缺口 —— 自举只要求「真 flint 收的 boot 必收」）。
 include "lib_token.fl"
+
+// ===== 2026-10-24（容量刀·单点）：boot 侧容量上限只写在这里 =====
+// 为什么要有这几个函数：boot 的「512 函数」曾在 **3 处**手抄 —— 本文件两处守卫 +
+//   b1_emit.fl 的 `VirtualAlloc(0, 4096)` 和栈数组 `int aord[512]`。改一处漏两处
+//   = **静默越界写**（不报错、坏在别处；本项目已栽过同族坑）。
+// 为什么用函数、不用全局常量：boot 侧没有全局变量（自举时全局路径未被验证过），
+//   函数是唯一能跨文件"一份数字"的机制；代价只是多几条指令，容量表初始化时才调。
+// 口径：boot 的上限只允许「比真 flint 宽」，宽度取远大于真实用量（真 flint 侧这些表
+//   是 malloc/realloc 动态的 ⇒ 无固定上限，见 src\pe.c）。
+//   · funcs  = 函数项 + API 声明项 总数（build_pe 的 aord/ahint/aslot/agrp 按**函数下标**开）
+//   · imps   = 导入函数总数（含合成的 ExitProcess 槽 0）
+//   · groups = 导入模块数（含无 kernel32 时合成的那一组）
+int cap_funcs() { return 8192; }
+int cap_imps() { return 2048; }
+int cap_groups() { return 64; }
+// v2.1.0（2026-11-01）：enum 常量表上限 —— **表体**由 parse_program 的局部数组提供（见那里的注释），
+//   容量单点写在这里。真 flint 侧是 malloc/realloc 动态表（无固定上限），boot 只能给足。
+int enum_cap() { return 512; }
 
 struct Ast {
   int *kind;
@@ -158,6 +179,16 @@ struct Parse {
   int nglobals;
   int gcur;        // `.data` 游标（已用字节数）
   int data_size;   // `.data` 总字节数（**0 = 无全局 ⇒ 产物形态不变**，真 flint 的 TWO_SEC 同口径）
+  // ===== v2.1.0（2026-11-01）：enum 具名整数常量表（口径 = src\parse.c 的 EnumConst）=====
+  //   ⚠️ FLINT 的全局不能是 struct/指针、struct 里也不能嵌数组 ⇒ **表体**放 parse_program 的
+  //   局部 int 数组（它自己接好这两根指针），调用方 b1_emit / b1_parse **不用分配**新缓冲；
+  //   代价 = 只需要在 struct 里加指针与计数（字段数 51 → 54，离 128 上限还很远）。
+  //   ⚠️ 存的是**声明处的 token 下标**（不是源码字节偏移）：名字比较走 ps[]/ls[]（与 g_find 同纪律、
+  //   名字不拷贝），同一个下标还兼作「声明在源码里的先后」—— 真 flint 是按源码序登记常量的，
+  //   这条判据要在 parse_primary 里补回来（见那里的 -276）。
+  int *etok;       // 常量名的 token 下标（名字在 ps[etok[k]]..+ls[etok[k]]）
+  int *eval;       // 常量整数值（parse 期就折成字面量 ⇒ 发射端零改动）
+  int necons;      // 已登记常量个数（声明序）
 }
 
 int new_node(struct Ast *a, int kind, int l, int r) {
@@ -199,6 +230,7 @@ int addr_ty(int tl, int tr) {
 int fld_ty(int fty) {
   if (fty == 2) { return 2; }        // char* 字段读回 = char 地址
   if (fty == 3) { return 3; }        // struct* 字段 = 指针/struct 地址
+  if (fty == 5) { return 3; }        // v2.4：嵌套 struct 值字段 = struct 地址（8 字节地址类；读值请走链）
   if (fty == 4) { return 0; }        // B2k：char 标量字段读回 = int 值（走专用节点 55/57）
   return 1;                          // int* 字段 = 通用地址
 }
@@ -334,9 +366,55 @@ int mg_base(int aux) { if (aux >= 20) { return aux - 20; } if (aux >= 10) { retu
 //   / 配置读不出来 / 静默栈破坏）。⇒ 判据：**"低位挪作他用"的打包编码，必须问一句"这一位真的够放吗"**；
 //   数组没有 sid/aux（都恒为 0）⇒ 低位整段归 n（可放 n < 10^8），标量/struct/指针走原路径。
 int spec_ty(int s) { return s / 100000000; }
-int spec_aux(int s) { return s / 1000000 - s / 100000000 * 100; }
-int spec_sid(int s) { int t = s / 100000000; if (t == 1 || t == 4) { return 0; } return s / 1000 - s / 1000000 * 1000; }
-int spec_n(int s) { int t = s / 100000000; if (t == 1 || t == 4) { return s - s / 100000000 * 100000000; } return s - s / 1000 * 1000; }
+int spec_aux(int s) { int t = s / 100000000; if (t == 6 || t == 8) { return 0; } return s / 1000000 - s / 100000000 * 100; }
+//   ⚠️ 2026-11-01：ty=6 的位宽改了（sid 从 10^6 格挪到 **10^5** 格，T 占低 5 位）——
+//      见下方「本地 struct 数组 = ty 6」注释里那段「旧编码撞进 ty=7」的记录。ty=8 不变。
+int spec_sid(int s) { int t = s / 100000000; if (t == 1 || t == 4 || t == 8) { return 0; } if (t == 6) { return s / 100000 - 6000; } return s / 1000 - s / 1000000 * 1000; }
+int spec_n(int s) { int t = s / 100000000; if (t == 1 || t == 4) { return s - s / 100000000 * 100000000; } if (t == 6) { return s - s / 100000 * 100000; } if (t == 8) { return s - s / 1000000 * 1000000; } return s - s / 1000 * 1000; }
+
+// ===== v2.2.0（2026-11-01）：本地二维 int 数组 = ty 8 =====
+//   编码 spec = 800000000 + cols*1000000 + T
+//     T    = **元素总数** = 行 × 列（落在低 6 位十进制；ty 6 的 T 占低 5 位，见下）
+//     cols = 列数（第二维 / stride），占 10^6 那一格 ⇒ **只能两位十进制（1..99）**。
+//   ⚠️ 为什么用 ty **8** 而不是 7：ty 6（struct 数组）**旧**编码是 `600000000 + sid*10^6 + T`，
+//      sid 上限 128（st_add 的守卫）⇒ **sid ≥ 100 时 spec 就进到 7*10^8..**，
+//      用 7 会与「struct 数 ≥ 100 的 struct 数组」正面撞车（那是旧编码的算术事实，不是本轮引入的；
+//      见下方 ty 6 注释：2026-11-01 已把 sid 段挪到 10^5，旧编码实测在 sid=100 时把 ty 读成 7）。
+//      8*10^8 在 ty 6 的最大值（612,899,999）之上 ⇒ 两边不可能互踩。
+//   `m[i][j]` 在解析期折成 `m[i*cols + j]`（节点 3 乘 + 节点 1 加 + 既有节点 23/24 下标读/写）
+//   ⇒ **发射侧一个分支都不加**（D11 摊平）。行数不进编码：由 T/cols 反算。
+//   ⚠️ 容量断点（boot 比真 flint 窄的两条，都不是语法断点）：
+//      · T ≤ 99999（与 struct 数组同一条理由：帧槽偏移编码 `2000000+off` 要求槽数 ≤ 124999，
+//        取 99999 留余量）⇒ 超限报 -241；
+//      · cols ≤ 99（编码格只有两位）⇒ 超限同样报 -241（绝不静默换出别的 ty）。
+//      真 flint 只受 2GB 帧上限约束；32×17 = 544 远在门内。
+
+// ===== v2.1.0（2026-10-24，最后一个自举缺口 -240 收口）：本地 struct 数组 = ty 6 =====
+//   编码 spec = 600000000 + sid*100000 + T
+//     T = **总槽数** = st_nslots(sid) * N —— 落在低 **5** 位十进制（0..99999，见下方上限）。
+//     sid = 结构体下标（st_add 守卫 ≤ 127），占 10^5 那一格。
+//     最大值 = 600000000 + 127*100000 + 99999 = **612,899,999 < 7*10^8** ⇒ 永不漂进 ty=7 区段。
+//   ⚠️ 2026-11-01（本刀）：**旧编码 `600000000 + sid*1000000 + T` 会撞进 ty=7**，旧注释「sid ≤ 127
+//      ⇒ 127*10^6 + T < 7.3*10^8，撞不到 ty=7」**算错了两次**：① ty 判定是 `s / 10^8`（只取最高位），
+//      7.3*10^8 早就 ≥ 7*10^8；② sid ≥ 100 时 `600000000 + 100*10^6 = 7*10^8` 把最高位顶成 7。
+//      实测（boot\samples\spec6_sid100.fl，101 个 struct、`struct S100 arr[4];`）：
+//      旧 boot 报 `parse err=-54 ... arr[i].a`（spec 被当 ty=7，落不进 ty==3 的 struct 数组分支），
+//      而同一份源在 sid=99（spec 699,000,008，仍是 ty=6）下双端都跑 42 ⇒ 断点正是 10^8 进位。
+//      改法 = sid 段 `*10^6` → `*10^5`（T 上限 99999 恰好占满低 5 位，两段不重叠）；
+//      三个解码器 spec_sid / spec_n / spec_aux 对 ty=6 用新位宽（spec_aux 恒 0 不变）。
+//      **不许**动 ty=7 / ty=8 的段位（8 = 二维数组，见上一节；7 不是任何 spec）。
+//   历史（2026-10-24 容量第三刀）：**T 的上限 999 → 99999**。原来 T 挤在低 3 位（与 spec_n 共用「低 3 位」
+//      这套旧口径），于是 `struct P a[100]`（P 有 10 个槽）就 1000 槽爆 -241 —— 真实用量轻松超过。
+//      改法 = ty=6 **自己一段十进制位**，三个解码器对 ty=6 各自特判（见上面三行），
+//      不再借「低 3 位」的旧假设。sid 同步从 10^3 挪到 10^6（2026-11-01 再挪到 10^5），两者互不踩。
+//   ⚠️ 为什么上限是 **99999** 而不是 999999：帧槽偏移的编码是 `2000000 + off`（off = (槽+1)*8，
+//      见 b1_emit.fl 的值带说明），off 必须 < 10^6 ⇒ 槽数 ≤ 124999。取 99999 留足余量，
+//      再往上要先改帧槽偏移的编码带（那是另一刀）。真 flint 只受 2GB 帧上限约束。超限报 -241
+//      （见 declare_sarr）—— 绝不静默少分配（那会写穿帧，见 2026-09-22 的 sarp1 事故）。
+//   ⚠️ 元素个数 N **不进编码**：N = T / st_nslots(sid) 可反算，而所有使用方要的都是 T（帧槽数）或
+//      步长（= nslots*8），没有一处需要 N。这是刻意的：编码里多塞一个 N 就会与 sid/T 的十进制位互踩
+//      —— 本轮实测踩过：曾按 `sid*100000 + N*1000 + T` 编，N ≥ 100（如 struct P a[600]）时
+//      N*1000 进位到 10^5 位，把 sid 读成 6 ⇒ `a[599].n` 报 -152「无此字段」。
 
 // ===== v1.4.31（卡 T-20260918-014653）：指针目标值门槛（口径见文件头注释）=====
 // 按相对槽回查「装地址的 int」标记；作用域标记（vls==0 的空名项）跳过，只扫当前函数段。
@@ -714,6 +792,7 @@ int st_fbase(struct Parse *p, int sid) { return st_hdr(p, sid, 3); }
 // ⚠️ B2k 结论：不能写成 `*(p->sflat + f + k)`——FLINT 裸指针 `+` 是**字节**步进（决策 40），
 //   元素下标只有 `局部变量[i]` 才按 8 字节缩放；要解引用形式必须手写 `*(p->sflat + (f + k) * 8)`
 int st_fld(struct Parse *p, int f, int k) { int *sf = p->sflat; return sf[f + k]; }
+int st_fsid(struct Parse *p, int f) { return st_fld(p, f, 4); }   // v2.3：struct* 字段指向的结构体
 
 int st_find(struct Parse *p, int pos, int len) {
   int *sf = p->sflat;
@@ -780,10 +859,32 @@ int st_add(struct Parse *p, int pos, int len) {
 //   int 字段 4 字节 / 对齐 4；指针·句柄字段 8 字节 / 对齐 8；offset 升序累加（基址 + off）
 int st_falign(int fty) { if (fty == 0) { return 4; } if (fty == 4) { return 1; } return 8; }
 int st_fsize(int fty) { if (fty == 0) { return 4; } if (fty == 4) { return 1; } return 8; }
+// —— v2.4.0：struct 的**自身对齐** = max(直接字段对齐)（C 口径；与真 flint 的 StructDef.align 同源）——
+//   为什么不能从字节大小反推：8 字节可能是「对齐 4 的 int+char 补齐」，也可能是「对齐 8 的指针」。
+//   自递归（嵌套值字段取内层自己的对齐）；递归终止靠「内层必须已定义（-135）＋ 自嵌套值字段被
+//   parse_structs 拒（-242）」——与真 flint 同一道闸，深度 = 嵌套层数。
+int st_align_of(struct Parse *p, int sid) {
+  int base = st_fbase(p, sid);
+  int nf = st_nfields(p, sid);
+  int ma = 1;
+  int j = 0;
+  while (j < nf) {
+    int f = base + j * 5;
+    int ft = st_fty(p, f);
+    int al = 0;
+    if (ft == 5) { al = st_align_of(p, st_fsid(p, f)); }
+    else { al = st_falign(ft); }
+    if (al > ma) { ma = al; }
+    j = j + 1;
+  }
+  return ma;
+}
 // 布局游标：遍历已有字段累加（字段 ≤128，O(n²) 可接受，无需扩表头格式）
 //   2026-09-20：字段项 [2] 现在 = **fty*1000 + 数组长度**（低三位长度、高位类型）——
 //     数组占 长度 × 元素字节（int 元素 8 / char 元素 1），对齐仍按元素（真 flint parse.c:2138-2140 同口径）
 //   ⚠️ 读 [2] 当类型用一律改 st_fty()（见下方 helper 注释）。
+//   v2.4.0：fty==5（struct 值字段）= 按**内层自身对齐**落位、占**内层 size（按内层对齐取整）**——
+//     与真 flint parse_structdef 的 `align_up(cur, in->align)` / `cur = off + in->size` 逐字节同口径。
 int st_layout_cur(struct Parse *p, int sid) {
   int base = st_fbase(p, sid);
   int nf = st_nfields(p, sid);
@@ -793,9 +894,17 @@ int st_layout_cur(struct Parse *p, int sid) {
     int f = base + j * 5;
     int ft = st_fty(p, f);
     int fn2 = st_farr(p, f);
-    int al = st_falign(ft);
-    cur = (cur + al - 1) / al * al;
-    cur = cur + st_fsize(ft) * fn2;
+    if (ft == 5) {
+      int isid = st_fsid(p, f);
+      int ial = st_align_of(p, isid);
+      int isz = st_layout_cur(p, isid);
+      cur = (cur + ial - 1) / ial * ial;
+      cur = cur + (isz + ial - 1) / ial * ial;
+    } else {
+      int al = st_falign(ft);
+      cur = (cur + al - 1) / al * al;
+      cur = cur + st_fsize(ft) * fn2;
+    }
     j = j + 1;
   }
   return cur;
@@ -827,13 +936,28 @@ int st_nslots(struct Parse *p, int sid) {
     int ft = st_fty(p, f);
     int fn2 = st_farr(p, f);
     int span = st_fld(p, f, 3);             // 字段字节偏移
-    if (ft == 4) { span = span + fn2; }     // char 元素 1 字节
+    if (ft == 5) { span = span + st_nslots(p, st_fsid(p, f)) * 8; }   // v2.4：嵌套值字段整块（内层槽数×8）
+    else if (ft == 4) { span = span + fn2; }     // char 元素 1 字节
     else if (ft == 0) { span = span + fn2 * 4; }   // int 元素 4 字节（2026-10-17 int=4 ABI）
     else { span = span + fn2 * 8; }         // 指针 / struct* 元素 8 字节
     if (span > maxspan) { maxspan = span; }
     j = j + 1;
   }
   return (maxspan + 7) / 8;
+}
+
+// —— v2.1.0（缺口 -240 收口）：本地 struct 数组的登记 ——
+//   总槽数 = 每元素槽数 × N（与真 flint `new_lvar` 的 `per * n` 同源；per = st_nslots）。
+//   spec 编码见文件上方「本地 struct 数组 = ty 6」那一节：`600000000 + sid*100000 + 总槽数`。
+//   返回相对槽号（= 保留区**最低**槽）；基址槽由使用方按 `+总槽数-1` 算成升序基址。
+//   ⚠️ 容量守卫返回 -241（专用码，不是 -44）：这是 boot 的 spec 编码比真 flint 窄的地方，
+//      必须响亮 —— 静默按 N 个槽分配会写穿帧（本仓 2026-09-22 的 sarp1 就是这一类）。
+//      2026-10-24（容量第三刀）：上限 999 → **99999**（T 单独占低 5 位十进制；见上方长注释）。
+int declare_sarr(struct Parse *p, int pos, int len, int sid, int n) {
+  int per = st_nslots(p, sid);
+  int t = per * n;
+  if (t > 99999) { return -241; }
+  return declare_var_spec(p, pos, len, 600000000 + sid * 100000 + t);
 }
 
 // fspec = fty*100000 + (fsid+1)*1000 + arr_len（fsid = -1 表示非 struct；arr_len ≥ 1）
@@ -854,6 +978,7 @@ int st_add_field(struct Parse *p, int sid, int name, int fspec) {
   int farr = fspec - fspec / 1000 * 1000;     // ← 数组长度（≥1）
   int fcur = st_layout_cur(p, sid);           // B2j：C 布局游标
   int fal = st_falign(fty);
+  if (fty == 5) { fal = st_align_of(p, fspec / 1000 - fty * 100 - 1); }   // v2.4：按内层自身对齐落位
   fcur = (fcur + fal - 1) / fal * fal;
   sf[cur] = name / 1000;
   sf[cur + 1] = name - name / 1000 * 1000;
@@ -950,6 +1075,53 @@ int g_find(struct Parse *p, int pos, int len) {
   return -1;
 }
 
+// ============================================================================
+// v2.1.0（2026-11-01）：enum 具名整数常量表 —— 与 src\parse.c 的 find_enum / add_enum_const 同口径
+//   表体 = parse_program 的局部 int 数组（见 struct Parse 里 etok/eval/necons 的注释）。
+//   名字**不拷贝**：元素的 token 下标 → ps[]/ls[] → 与源码缓冲逐字节比（与 g_find / find_func_at /
+//   st_find 同一套纪律 —— 少一张字符串表，也不用碰字符串池的归属规则）。
+//   查找顺序由**调用点**决定：局部变量 → 全局变量 → **枚举常量** → 函数
+//   （与真 flint 的 parse_primary 逐条同序；常量只是字面量别名，不是变量、也不是函数）。
+// ============================================================================
+int enum_find(struct Parse *p, int pos, int len) {
+  int *et = p->etok;
+  int *ps = p->ps;
+  int *ls = p->ls;
+  char *s = p->src;
+  int i = 0;
+  while (i < p->necons) {
+    int ti = et[i];
+    if (ls[ti] == len) {
+      int j = 0;
+      int same = 1;
+      while (j < len) {
+        if (s[ps[ti] + j] != s[pos + j]) { same = 0; }
+        j = j + 1;
+      }
+      if (same != 0) { return i; }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+int enum_val(struct Parse *p, int k) {
+  int *ev = p->eval;
+  return ev[k];
+}
+
+// 登记一个常量（tok = 常量名 token 下标）；返回下标，< 0 = 错误码（-272 = 表满）
+int enum_add(struct Parse *p, int tok, int v) {
+  int *et = p->etok;
+  int *ev = p->eval;
+  int k = p->necons;
+  if (k >= enum_cap()) { return -272; }
+  et[k] = tok;
+  ev[k] = v;
+  p->necons = k + 1;
+  return k;
+}
+
 // 全局取址节点（kind 67，val = 全局下标）——机器侧 = `lea rax,[rip+disp32]`，disp32 在 build_pe 回填。
 //   ty：int（标量 / 数组元素）= 1（4 字节 elem）｜char = 2（1 字节 elem）。
 //   ⚠️ 这两个值与**本地** int / char 变量取址（kind 25）完全同款 —— 消费侧（53/54/60、地址链 1+3）
@@ -986,6 +1158,11 @@ int g_scalar_read(struct Parse *p, struct Ast *a, int gi) {
 // 登记一个全局（spec = 基础类型*1000000 + 是否数组*100000 + 元素数/字节数；**参数上限 4 必须打包**）
 //   返回全局下标；< 0 = 错误码（-177 = 全局表上限）
 int g_add(struct Parse *p, int pos, int len, int spec) {
+  // v2.1.0：全局变量与**已登记**的枚举常量同名 = 硬错。真 flint 侧由 collect_globals **先扫**
+  //   全局表，所以解析 enum 时就能看见"后面才写的"那个全局变量（报「枚举常量 'X' 与全局变量同名」）；
+  //   boot 是按源码序登记的 ⇒ 必须在这里反向再挡一次，否则 `enum X { A }; int A;` 会变成
+  //   「真 flint 拒、boot 静默收」的分岔（这类"只差顺序"的缺口最容易在差分门里漏网）。
+  if (enum_find(p, pos, len) >= 0) { return -274; }
   int base = spec / 1000000;
   int isarr = spec / 100000 - base * 10;
   int n = spec - spec / 100000 * 100000;
@@ -1175,6 +1352,68 @@ int field_arr_addr(struct Parse *p, struct Ast *a, int base, int base_fty) {
   if (base_fty == 4) { at = 2; }
   return set_ty(a, ad, at);
 }
+// —— v2.1.0（缺口 -240 收口）：struct 数组的元素地址 / 元素内字段地址 ——
+//   只用**已有**节点拼（D11：零新增发射档、零 codegen 改动）：
+//     元素 i 的地址 = kind 25（lea 基址槽）+ kind 3（下标 × 步长）+ kind 1（加）
+//       · bslot  = 元素基址槽 = 保留区**最高**槽（帧槽升序基址；与 int/char 数组、struct 变量同口径）
+//       · stride8 = 元素步长（字节）= 8*ceil(size/8) = st_nslots(sid)*8（与真 flint 的 8*per 同源）
+//       · 结果 ty = 3（地址类）⇒ kind 53/54 的读写宽度、kind 1 的 64 位加法都自动走对分支
+//     ⚠️ kind 3 的乘法在发射端是 **32 位 imul**（乘积再被父节点 kind 1 的地址链 movsxd）：
+//        下标×步长 只要不超 int32 就够 —— 帧槽总长本来就被 2GB 上限挡在同一个界里。
+//     ⚠️ 别拿 kind 23（本地 int 数组元素读）顶替：它的元素步长写死 4 字节、且带解引用；
+//        这里要的是「地址」不是「值」，步长也随 struct 大小变。
+int sarr_elem_addr(struct Ast *a, int bslot, int ix, int stride8) {
+  int bs = new_node(a, 25, 0, 0);
+  int *vv = a->val;
+  vv[bs] = bslot;
+  set_ty(a, bs, 1);
+  int sc = new_node(a, 0, 0, 0);
+  vv[sc] = stride8;
+  int mul = new_node(a, 3, ix, sc);
+  int ad = new_node(a, 1, bs, mul);
+  return set_ty(a, ad, 3);
+}
+// —— 2026-10-24（v2.2）：struct 指针下标的元素地址 p[i]（p = struct S *）——
+//   与 sarr_elem_addr 同形，只有**基址来源**不同：struct 数组的基址是帧槽地址（kind 25 lea），
+//   struct 指针的基址是**指针变量的值**（kind 26 = 指针读，64 位）⇒ 再用 kind 3 乘步长、kind 1 加。
+//   步长口径与 struct 数组**同一个式子**（st_nslots(sid)*8 = 8*ceil(size/8)）——
+//   两处各算一套的话，同一个结构体会出现两种下标步长（真 flint 侧也按这条写）。
+int sptr_elem_addr(struct Ast *a, int slot, int ix, int stride8) {
+  int bp = new_node(a, 26, 0, 0);
+  int *vv = a->val;
+  vv[bp] = slot;
+  set_ty(a, bp, 3);                       // 指针值 = 地址类（kind 1 的 64 位加法靠它）
+  int sc = new_node(a, 0, 0, 0);
+  vv[sc] = stride8;
+  int mul = new_node(a, 3, ix, sc);
+  int ad = new_node(a, 1, bp, mul);
+  return set_ty(a, ad, 3);
+}
+// v2.3：**基址是节点**（不是变量槽）的元素地址 —— 链式下标 `s.next[i]` 用。
+//   sptr_elem_addr 的 base 是「变量槽号」（它内部造 kind 26 读）；链上的基址是任意表达式节点，
+//   传节点号进那个函数会被当成槽号 ⇒ 读出垃圾指针（实测 boot 编过但运行 0xC0000005）。
+int elem_addr_node(struct Ast *a, int base, int ix, int stride8) {
+  int *vv = a->val;
+  int sc = new_node(a, 0, 0, 0);
+  vv[sc] = stride8;
+  int mul = new_node(a, 3, ix, sc);
+  int ad = new_node(a, 1, base, mul);
+  return set_ty(a, ad, 3);
+}
+
+// 元素内字段的地址 = 元素地址 + 字段字节偏移（foff = struct 表 [3]，C 布局）
+//   wty = **存储宽度类**：int 字段 1（4 字节）／char 字段 2（1 字节）／指针字段 3（8 字节）
+//     —— 就是 fld_addr_ty 的口径：kind 53/54 按它定读写宽度，make_incdec/lv_compound_at 按它定 ++ 宽度。
+//   foff == 0 直接复用元素地址节点（省一条 add）——每个元素地址节点都只被**一处**消费（各调用点新建），
+//   所以就地改 ty 安全；foff != 0 才是新节点。
+int sarr_fld_addr(struct Ast *a, int el, int foff, int wty) {
+  if (foff == 0) { return set_ty(a, el, wty); }
+  int n0 = new_node(a, 0, 0, 0);
+  int *vv = a->val;
+  vv[n0] = foff;
+  int ad = new_node(a, 1, el, n0);
+  return set_ty(a, ad, wty);
+}
 // —— 2026-09-20：把「定长数组字段的下标」这一件事收敛成两个入口，读/写/表达式三条路径共用 ——
 //   先前分散在 4 处（本地/指针 × 读/写），改动一处漏三处 ⇒ 表达式位根本没接（sarr1 报 -112）。
 // 决定形态：字段是定长数组 → 1（走 field_arr_addr + 解引用）；否则按老路（指针字段下标）。
@@ -1281,9 +1520,14 @@ int parse_structs(struct Parse *p) {
         fsid = st_find(p, ps[p->i], ls[p->i]);
         if (fsid < 0) return -135;
         p->i = p->i + 1;
-        if (!tok_is(p, '*')) return -136;      // 字段不支持 struct 值
-        fty = 3;
-        p->i = p->i + 1;
+        if (tok_is(p, '*')) { fty = 3; p->i = p->i + 1; }
+        else {
+          // ===== v2.4.0：struct **值字段**（`struct B b;`，内层必须已定义）=====
+          //   自嵌套值字段 = 尺寸无穷 ⇒ 专码 -242（指针形态 `struct A *next;` 仍合法，见上一支）。
+          //   当前结构体在建字段之前就已进表（st_add）⇒ 「刚登记的那个」就是自己。
+          if (fsid == st_count(p) - 1) return -242;
+          fty = 5;
+        }
       } else { return -137; }
       if (p->i >= p->n || ks[p->i] != 1) return -138;
       if (tok_ident_at(p, p->i, "struct")) return -138;
@@ -1305,6 +1549,7 @@ int parse_structs(struct Parse *p) {
         if (!tok_is(p, ']')) return -200;
         p->i = p->i + 1;
         if (fty == 1 || fty == 2 || fty == 3) return -200;   // 指针/struct* 数组字段不支持
+        if (fty == 5) return -200;                           // v2.4：嵌套 struct **数组字段**也不做（同码）
       }
       if (!tok_is(p, ';')) return -139;
       p->i = p->i + 1;
@@ -1471,13 +1716,13 @@ int parse_apis(struct Parse *p) {
       k = k + 1;
     }
     if (dll < 0) {
-      if (af[0] >= 16) return -177;
+      if (af[0] >= cap_groups()) return -177;      // 模块数上限（单点，2026-10-24）
       dll = af[0];
       af[2 + dll * 2] = dpos;
       af[2 + dll * 2 + 1] = dlen;
       af[0] = dll + 1;
     }
-    if (p->nfuncs >= 512) return -85;
+    if (p->nfuncs >= cap_funcs()) return -85;
     int fi = p->nfuncs;
     fpos[fi] = npos;
     flen[fi] = nlen;
@@ -1604,7 +1849,11 @@ int collect_funcs(struct Parse *p, int start) {
     }
     if (nargs > 32) return -84;                // v1.4.26：形参/实参上限 4 → 32（对齐真 flint FUNC_MAX_ARGS）
     if (find_func(p, npos, nlen) >= 0) return -178;   // B2w：函数重复定义（对齐真 flint）
-    if (p->nfuncs >= 512) return -85;          // 函数表上限 512（B2h 扩容，原 32）
+    // v2.1.0：函数与**已登记**的枚举常量同名 = 硬错。与 g_add 的反向守卫同因：真 flint 的函数表
+    //   是**预扫**的，`enum X { f }; int f() {...}` 在真 flint 报「枚举常量 'f' 与函数同名」；
+    //   boot 按源码序登记 ⇒ 函数写在 enum 后面时也必须在这里挡住，否则又是"顺序造成"的分岔。
+    if (enum_find(p, npos, nlen) >= 0) return -275;
+    if (p->nfuncs >= cap_funcs()) return -85;  // 函数表上限 = cap_funcs()（单点，2026-10-24；原 512 = B2h 扩容）
     int fi = p->nfuncs;
     fpos[fi] = npos;
     flen[fi] = nlen;
@@ -1740,6 +1989,24 @@ int str_ahead(struct Parse *p, int off) {
   return 1;
 }
 
+// —— v2.3.x（2026-10-24）：str_into(dst[, cap], [...]) 的前瞻判定 ——
+//   与 str_ahead 同族，两处差别：① 关键词是 str_into（8 字符，词边界由 tok_ident_at 保证）
+//   ② 括号后**不要求** '['（前两个实参是表达式，段列表在最后）。两种形态共用这一个判据：
+//     str_into(buf, [...])       —— 2 参数组形态（cap 由 dst 的数组声明推，见 parse_str_body）
+//     str_into(p, cap, [...])    —— 3 参指针形态
+//   与真 flint 的 is_str_call（src\parse.c :3036）**同口径**：只认 `str_into (`，此处不猜后面几参
+//   （猜错就会把真 flint 放行的写法提前拒掉 —— boot 比 flint 窄同样算分岔）。
+//   ⚠️ 必须定义在**第一个调用点之前**（parse_primary 的兜底报错用它）；boot 没有函数前向引用。
+int str_into_ahead(struct Parse *p, int off) {
+  int *ks = p->ks;
+  int *vs = p->vs;
+  int i = p->i + off;
+  if (i + 1 >= p->n) return 0;
+  if (tok_ident_at(p, i, "str_into") == 0) return 0;
+  if (!(ks[i + 1] == 3 && vs[i + 1] == '(')) return 0;
+  return 1;
+}
+
 // ===== v1.6.0：方法调用点糖 recv.name(args) ⇒ 结构体名_name(&recv, args) =====
 // 与真 flint 的 src\parse.c（v1.6.0 method_call / call_finish / call_arg_norm）**同口径**：
 //   · 定义侧一个字都不改：方法就是首参为接收者指针的普通自由函数
@@ -1826,6 +2093,188 @@ int boot_method_call(struct Parse *p, struct Ast *a, int sid, int recv, int mpos
   int atmp[32];
   atmp[0] = recv;
   return parse_call_tail(p, a, fi, atmp, 1);
+}
+
+// —— v2.1.0（缺口 -240 收口）：`a[i].字段` 的**读**（p->i 停在字段名上，'.' 已被调用方吃掉）——
+//   形态与本地 struct 字段读（kind 30 / kind 55）同构，只是基址从「struct 变量基址槽」换成元素地址链：
+//     int 字段  ：地址 + foff → kind 53（地址节点 ty=1 ⇒ mov eax,[rax] 4 字节）
+//     char 字段 ：地址 + foff（ty=2 ⇒ movzx 1 字节）
+//     指针字段  ：地址 + foff（ty=3 ⇒ 8 字节读），结果再标 fld_ty(1/2/3) 供 `*h[1].p` 这类父节点定宽
+//     定长数组字段：地址 + foff 当**基址**交给 field_arr_addr（元素宽 4/1 由 st_arr_step 定）
+//   错误码与本地 struct 字段那条路同源（-151 期望字段名 / -152 无此字段 / -223 糖名须带括号 / -13 标量不能下标）。
+//   ⚠️ 为什么读路径必须单独一个函数：'&' 分支（地址）与语句写分支（kind 54）都要「元素地址 + foff」，
+//      但只有读要造 kind 53；三者共用 sarr_fld_addr/sarr_elem_addr，别各写一份（本仓踩过"改一处漏三处"）。
+int sarr_fld_read(struct Parse *p, struct Ast *a, int el, int sid) {
+  int *ps = p->ps;
+  int *ls = p->ls;
+  if (p->i >= p->n || p->ks[p->i] != 1) { return -151; }
+  int f = st_find_field(p, sid, ps[p->i], ls[p->i]);
+  if (f < 0) {
+    if (sugar_needs_parens(p, sid, ps[p->i], ls[p->i]) == 1) { return -223; }
+    return -152;
+  }
+  p->i = p->i + 1;
+  int fty = st_fty(p, f);
+  int off = st_fld(p, f, 3);
+  // ===== v2.4.0：嵌套 struct **值字段**（fty 5）=====
+  //   `x.b` 是**一个 struct 对象**（不是值、也不是指针）：语义同真 flint 的地址节点
+  //   （ND_ADD ty=TY_STRUCT）。⇒ 只把字节偏移叠到地址链上（ty=3 = 8 字节地址类），然后：
+  //     · 后面还有 `.`  ⇒ 递归进内层字段表继续读（`x.b.c` = *(x + off_b + off_c)）
+  //     · 后面什么都没有 ⇒ 返回这个字段地址（与真 flint 的「a.b 单独出现 = 地址节点」同形）
+  //   值字段不能下标（`x.b[i]` = -13）—— 嵌套数组字段本就不做（parse_structs 也拒 -200）。
+  if (fty == 5) {
+    if (tok_is(p, '[')) { return -13; }
+    int b5 = sarr_fld_addr(a, el, off, 3);
+    if (!tok_is(p, '.')) { return b5; }
+    p->i = p->i + 1;
+    return sarr_fld_read(p, a, b5, st_fsid(p, f));
+  }
+  if (tok_is(p, '[') && fty != 3) {                      // 元素内定长数组字段：g[0].buf[j]
+                                                         //   v2.3：struct* 字段的 '[' 是**指针下标**，留给下面的链处理
+    if (fld_arr_kind(p, f) == 0) { return -13; }         // 标量字段不能下标
+    return new_node(a, 53, field_arr_addr(p, a, sarr_fld_addr(a, el, off, 1), fty), 0);
+  }
+  if (fld_arr_kind(p, f) != 0) {                          // 数组字段名作表达式 = 首元素地址
+    return sarr_fld_addr(a, el, off, 1);
+  }
+  int rd = new_node(a, 53, sarr_fld_addr(a, el, off, fld_addr_ty(fty)), 0);
+  if (fty == 0 || fty == 4) { return rd; }                // 值类（int/char）：结果就是值
+  set_ty(a, rd, fld_ty(fty));                             // 指针类：结果仍是地址（宽 8 字节已由地址 ty=3 定）
+  if (fty != 3) { return rd; }
+  // ===== 2026-10-24（v2.3）：struct* 字段 → **继续走链**：`s.next->v` / `s.next->next` / `s.next[i].v` ====
+  //   口径 =「手上只要是 struct 指针值（ty=3 + 已知 sid）就能继续 `->` / `[]`」，非 struct* 的一跳即止。
+  //   不复用 `->` 的 slot 版通路（kind 32 + 字段码）：那条路只认变量槽，而链的基址是任意表达式。
+  //   elmode = 1 表示 base 已经是**元素地址**（`x[i]` 之后），此时只接 '.'（字段偏移直接叠在元素地址上）。
+  int base = rd;
+  int sid2 = st_fsid(p, f);
+  int elmode = 0;
+  while (1) {
+    if (elmode == 0) {
+      if (tok_is(p, '[')) {                     // 指针下标：元素地址；之后只接 '.'
+        p->i = p->i + 1;
+        int ix = parse_expr(p, a);
+        if (ix < 0) { return -14; }
+        if (!tok_is(p, ']')) { return -15; }
+        p->i = p->i + 1;
+        base = elem_addr_node(a, base, ix, st_nslots(p, sid2) * 8);
+        elmode = 1;
+        continue;
+      }
+      if (!tok2_is(p, '-', '>')) { return base; }
+      p->i = p->i + 2;
+    } else {
+      if (!tok_is(p, '.')) { return base; }
+      p->i = p->i + 1;
+      elmode = 0;
+    }
+    if (p->i >= p->n || p->ks[p->i] != 1) { return -151; }
+    int f2 = st_find_field(p, sid2, p->ps[p->i], p->ls[p->i]);
+    if (f2 < 0) { return -152; }
+    p->i = p->i + 1;
+    int fty2 = st_fty(p, f2);
+    if (fld_arr_kind(p, f2) != 0) { return -152; }          // 链上的数组字段不猜（要下标请先落变量）
+    if (fty2 == 5) {                                        // v2.4：链上的嵌套值字段 → 地址链继续
+      base = sarr_fld_addr(a, base, st_fld(p, f2, 3), 3);
+      sid2 = st_fsid(p, f2);
+      elmode = 1;                                           // 值字段 = struct 对象地址 ⇒ 后面只接 '.'
+      continue;
+    }
+    int rd2 = new_node(a, 53, sarr_fld_addr(a, base, st_fld(p, f2, 3), fld_addr_ty(fty2)), 0);
+    if (fty2 == 0 || fty2 == 4) { return rd2; }
+    set_ty(a, rd2, fld_ty(fty2));
+    if (fty2 != 3) { return rd2; }
+    base = rd2;
+    sid2 = st_fsid(p, f2);
+  }
+  return base;
+}
+
+// —— 2026-10-24（v2.3）：链式**取地址**（写语句 ＋ `&` 链共用）——
+//   走法与 sarr_fld_read 的链同源，但返回**最后一跳字段的地址节点**（写语句拿它当 kind 54 的左值，
+//   `&` 链直接返回它）。*outfty = 字段类型码（0/1/2/3/4）；-1 = 一跳都没走（调用方自行处理）。
+//   数组字段落在 -2（返回首元素地址，链到此为止 —— 数组再链下去没有意义）。
+//   v2.4.0：多一个 elmode0 —— 链**起点**是「struct 指针值」还是「struct 对象地址」：
+//     · 0 = 指针值（`w->next->v` / `w->next[0].v` / `p->next->v`）：下一跳只接 `->` 或 `[`
+//     · 1 = 对象地址（`a.b.c` 里的 `a.b`、元素地址 `a[i].b.c`）：下一跳只接 `.`
+//   两种起点不能靠"看下一个 token"猜（`.x` 在指针起点上非法、`->x` 在对象起点上非法）——
+//   让调用方按语义传，解析器不替人挑。
+int chain_fld_addr(struct Parse *p, struct Ast *a, int base, int sid, int *outfty, int elmode0) {
+  *outfty = -1;
+  int cur = base;
+  int csid = sid;
+  int elmode = elmode0;
+  while (1) {
+    if (elmode == 0) {
+      if (tok_is(p, '[')) {                     // 指针下标：元素地址
+        p->i = p->i + 1;
+        int ix = parse_expr(p, a);
+        if (ix < 0) { return -14; }
+        if (!tok_is(p, ']')) { return -15; }
+        p->i = p->i + 1;
+        cur = elem_addr_node(a, cur, ix, st_nslots(p, csid) * 8);
+        elmode = 1;
+        continue;
+      }
+      if (!tok2_is(p, '-', '>')) { return cur; }
+      p->i = p->i + 2;
+    } else {
+      if (!tok_is(p, '.')) { return cur; }
+      p->i = p->i + 1;
+      elmode = 0;
+    }
+    if (p->i >= p->n || p->ks[p->i] != 1) { return -151; }
+    int f = st_find_field(p, csid, p->ps[p->i], p->ls[p->i]);
+    if (f < 0) { return -152; }
+    p->i = p->i + 1;
+    int fty = st_fty(p, f);
+    int off = st_fld(p, f, 3);
+    if (tok_is(p, '[')) {                       // 数组字段下标：首元素地址 + 下标
+      if (st_is_arr(p, f) == 0) { return -47; }
+      *outfty = -2;
+      return field_arr_addr(p, a, sarr_fld_addr(a, cur, off, 1), fty);
+    }
+    if (st_is_arr(p, f) != 0) {                 // 数组字段名 = 首元素地址
+      *outfty = -2;
+      return sarr_fld_addr(a, cur, off, 1);
+    }
+    if (fty == 5) {                             // v2.4：嵌套值字段 → 地址链继续（后面只接 '.'）
+      cur = sarr_fld_addr(a, cur, off, 3);
+      csid = st_fsid(p, f);
+      elmode = 1;
+      continue;
+    }
+    int ad = sarr_fld_addr(a, cur, off, fld_addr_ty(fty));
+    if (fty != 3) {
+      *outfty = fty;
+      return ad;
+    }
+    cur = new_node(a, 53, ad, 0);               // struct* 字段：读出指针值，继续走链
+    set_ty(a, cur, 3);
+    csid = st_fsid(p, f);
+  }
+  return cur;
+}
+
+// —— v2.4.0：`<链> = expr ;` 的公共尾巴（嵌套值字段的写语句用）——
+//   p->i 停在这条链的**第一个运算符**上（`a.b` 已由调用方折成地址 ⇒ 此刻是 `.`；指针起点则是 `->`/`[`），
+//   chain_fld_addr 吃掉整条 `.`/`->`/`[i]` 链并返回最后一跳字段的地址，
+//   这里再吃 `= 右值 ;`、落 kind 54（写宽度由地址节点的 ty 定：int 字段 1 / char 2 / 指针·struct 3）。
+//   与既有的 `w->next->v = 7` 那一支**逐节点同序**（那一支改成调用本函数，产物不变）。
+//   错误码沿用既有口径：-54 期望 '=' / -55 右值 / -57 期望 ';' / -198 指针字段值门槛。
+int chain_assign_tail(struct Parse *p, struct Ast *a, int base, int sid, int elmode0) {
+  int oft = -1;
+  int chad = chain_fld_addr(p, a, base, sid, &oft, elmode0);
+  if (chad < 0) { return chad; }
+  if (oft < 0) { return -54; }
+  if (!tok_is(p, '=')) { return -54; }
+  p->i = p->i + 1;
+  int ev = parse_expr(p, a);
+  if (ev < 0) { return -55; }
+  if (oft >= 1 && oft != 4 && rhs_addr_like(p, a, ev, 1) == 0) { return -198; }
+  int wr = new_node(a, 54, chad, ev);
+  if (!tok_is(p, ';')) { return -57; }
+  p->i = p->i + 1;
+  return wr;
 }
 
 // 调用收尾：实参已缓冲在 atmp[0..argc-1]（普通调用 = 0 个、方法糖 = 接收者 1 个），
@@ -1925,7 +2374,8 @@ int parse_primary(struct Parse *p, struct Ast *a) {
   //   函数调用 `str(...)` 吞掉，再被上层表达式的错误码掩成 -50 —— 那支报错不指「为什么不行」）
   //   它只在 3 个语句级形态可用（指针声明初始化 / 指针变量赋值右值 / 指针返回函数的 return），
   //   由 parse_stmt 与 parse_decl_body 在语句层展开成语句链 ⇒ 落到这里 = print 段/实参/条件/算术/嵌套/丢弃
-  if (str_ahead(p, 0) == 1) return -210;
+  // v2.3.x：str_into 同罪同罚（它同样是"展开成语句链"的糖，不能夹进表达式里）
+  if (str_ahead(p, 0) == 1 || str_into_ahead(p, 0) == 1) return -210;
   if (tok_is_num(p)) {
     int v = tok_num_val(p);
     p->i = p->i + 1;
@@ -2117,8 +2567,65 @@ int parse_primary(struct Parse *p, struct Ast *a) {
     //     struct 基址 `lea -0x608(%rbp)` ＝ 最高槽，字段 +4、元素 +8i ⇒ a[191] 落 -0x60C）。
     //     ⚠️ 原来两者同取"最低槽"是**错的**：struct 的字段基址因此越过保留区上界 4 字节、
     //       数组字段更是直接写穿整个帧（实测 12 次崩 4~5 次，0xC0000005）。
-    if (ty2 == 1 || ty2 == 3 || ty2 == 4) { slot2 = slot2 + n2 - 1; }
+    //   · struct 数组（ty=6，v2.1.0）：保留区是 N 个元素连排 ⇒ 基址同样取**最高**槽，
+    //     因为元素 i 的地址 = 基址 + i×步长（步长 = nslots×8），元素沿地址**升序**排上去。
+    if (ty2 == 1 || ty2 == 3 || ty2 == 4 || ty2 == 6 || ty2 == 8) { slot2 = slot2 + n2 - 1; }
     p->i = p->i + 1;
+    if (ty2 == 6) {                             // v2.1.0：&a[i] ／ &a[i].f ／ &a
+      // &a[i] = **元素地址本身**（不套取址节点 —— 那条地址链就是地址，SPEC v2.1.0 明写）。
+      if (tok_is(p, '[')) {
+        p->i = p->i + 1;
+        int ix6 = parse_expr(p, a);
+        if (ix6 < 0) return -14;
+        if (!tok_is(p, ']')) return -15;
+        p->i = p->i + 1;
+        int el6 = sarr_elem_addr(a, slot2, ix6, st_nslots(p, spec_sid(spec2)) * 8);
+        if (!tok_is(p, '.')) { return el6; }
+        p->i = p->i + 1;
+        if (p->i >= p->n || ks2[p->i] != 1) return -156;
+        int f6 = st_find_field(p, spec_sid(spec2), ps2[p->i], ls2[p->i]);
+        if (f6 < 0) return -156;
+        p->i = p->i + 1;
+        int off6 = st_fld(p, f6, 3);
+        if (st_fty(p, f6) == 3 && (tok2_is(p, '-', '>') || tok_is(p, '['))) {
+          // v2.3：`&a[i].next->v` / `&a[i].next[0].v` —— 先读出指针字段，再沿链取最后一跳的地址
+          int rd6 = new_node(a, 53, sarr_fld_addr(a, el6, off6, 3), 0);
+          set_ty(a, rd6, 3);
+          int oft6 = -1;
+          return chain_fld_addr(p, a, rd6, st_fsid(p, f6), &oft6, 0);
+        }
+        if (tok_is(p, '[')) {                   // &a[i].buf[j]（元素内定长数组字段）
+          if (st_is_arr(p, f6) == 0) return -47;
+          return field_arr_addr(p, a, sarr_fld_addr(a, el6, off6, 1), st_fty(p, f6));
+        }
+        return sarr_fld_addr(a, el6, off6, fld_addr_ty(st_fty(p, f6)));
+      }
+      int a6 = new_node(a, 25, 0, 0);           // &a = 首元素地址（与 a 作表达式同值）
+      int *vv6 = a->val;
+      vv6[a6] = slot2;
+      return set_ty(a, a6, 3);
+    }
+    if (ty2 == 2 && spec_aux(spec2) == 2 && tok_is(p, '[')) {   // v2.2：&p[i] ／ &p[i].f（元素地址本身）
+      p->i = p->i + 1;
+      int ixp = parse_expr(p, a);
+      if (ixp < 0) return -14;
+      if (!tok_is(p, ']')) return -15;
+      p->i = p->i + 1;
+      int sidp = spec_sid(spec2);
+      int elp = sptr_elem_addr(a, slot2, ixp, st_nslots(p, sidp) * 8);
+      if (!tok_is(p, '.')) { return elp; }
+      p->i = p->i + 1;
+      if (p->i >= p->n || ks2[p->i] != 1) return -156;
+      int fp2 = st_find_field(p, sidp, ps2[p->i], ls2[p->i]);
+      if (fp2 < 0) return -156;
+      p->i = p->i + 1;
+      int offp2 = st_fld(p, fp2, 3);
+      if (tok_is(p, '[')) {
+        if (st_is_arr(p, fp2) == 0) return -47;
+        return field_arr_addr(p, a, sarr_fld_addr(a, elp, offp2, 1), st_fty(p, fp2));
+      }
+      return sarr_fld_addr(a, elp, offp2, fld_addr_ty(st_fty(p, fp2)));
+    }
     if (tok2_is(p, '-', '>')) {                 // B2h：&p->f（struct* 字段地址）
       if (ty2 != 2 || spec_aux(spec2) != 2) return -156;
       p->i = p->i + 2;
@@ -2183,6 +2690,21 @@ int parse_primary(struct Parse *p, struct Ast *a) {
       if (ix < 0) return -14;
       if (!tok_is(p, ']')) return -15;
       p->i = p->i + 1;
+      // v2.2.0：`&m[i][j]`（二维 int 数组元素取址）—— 与读路径同一条折叠：线性下标 = i*cols + j
+      if (ty2 == 8) {
+        if (!tok_is(p, '[')) return -277;
+        p->i = p->i + 1;
+        int ix2 = parse_expr(p, a);
+        if (ix2 < 0) return -14;
+        if (!tok_is(p, ']')) return -15;
+        p->i = p->i + 1;
+        int cols7 = spec2 / 1000000 - 800;
+        int cn7 = new_node(a, 0, 0, 0);
+        int *vvn7 = a->val;
+        vvn7[cn7] = cols7;
+        int ml7 = new_node(a, 3, ix, cn7);
+        ix = new_node(a, 1, ml7, ix2);
+      }
       int base_ty = 1;
       int step = 4;                                       // 2026-10-17 int=4 ABI：int 数组/int* 元素 4 字节
       if (ty2 == 4) { base_ty = 2; step = 1; }            // 本地 char 数组 → char*
@@ -2263,7 +2785,25 @@ int parse_primary(struct Parse *p, struct Ast *a) {
       if (k < 0) {
         // 2026-09-21（卡 T-20260921-194703）：函数内查不到 → 查全局表（**局部遮蔽全局**，查找顺序固定）
         int gk = g_find(p, ps[i], ls[i]);
-        if (gk < 0) return -7;
+        if (gk < 0) {
+          // v2.1.0（2026-11-01）：**枚举常量**（局部变量与全局变量已优先遮蔽 —— 与真 flint 的
+          //   parse_primary 同序：局部变量 → 全局变量 → 枚举常量 → 函数）。常量只是字面量别名：
+          //   直接产出 kind 0（整数字面量）节点 ⇒ 发射端零改动、产物与真 flint 逐字节同。
+          int ek = enum_find(p, ps[i], ls[i]);
+          if (ek < 0) { return -7; }
+          // ⚠️ 顺序判据（与真 flint 的**源码序**登记一致）：真 flint 一边解析一边登记常量 ⇒
+          //   函数体里只能看见**写在它前面**的 enum；boot 是「顶层先扫完、函数体后解析」，
+          //   天然能看见写在后面的 enum ⇒ `int main(){...} enum E { A };`（main 里用 A）在
+          //   真 flint 报未声明、在 boot 却会静默收下。这里按 token 下标把这条顺序补回来。
+          //   fbody[main_idx] 此刻 = 当前函数的**起点 token 下标**（parse_program 的 B2l 借位）。
+          int *etk = p->etok;
+          if (etk[ek] > p->fbody[p->main_idx]) { return -276; }
+          int en = new_node(a, 0, 0, 0);
+          int *ev = a->val;
+          ev[en] = enum_val(p, ek);
+          p->i = p->i + 1;
+          return en;
+        }
         return parse_global_ref(p, a, gk);
       }
       int *vsp = p->vsp;
@@ -2309,6 +2849,17 @@ int parse_primary(struct Parse *p, struct Ast *a) {
         int nfd = st_nslots(p, sid);                              // 2026-09-22（卡 T-20260922-201154）：struct 变量预留**槽数**
         int ftyd = st_fty(p, f);
         int fcd = fld_code(p, sid, f);
+        // ===== v2.4.0：嵌套 struct **值字段**（`a.b` / `a.b.c`）=====
+        //   与真 flint 的地址节点同形：不读值，造「struct 基址地址」再交给链式读（sarr_fld_read）。
+        //   基址 = 本地 struct 的**升序基址槽**（slot + nfd - 1，与 kind 52/25 同口径）。
+        if (ftyd == 5) {
+          if (tok_is(p, '[')) { return -13; }                     // 值字段不能下标（嵌套数组字段不做）
+          p->i = p->i - 1;                                        // 退回字段名，交给链式读自己吃
+          int b5 = new_node(a, 25, 0, 0);
+          vv[b5] = slot + nfd - 1;
+          set_ty(a, b5, 1);
+          return sarr_fld_read(p, a, b5, sid);
+        }
         if (tok_is(p, '[')) {                                     // B2m：s.arr[i] 直接下标读
           // 2026-09-20（卡 T-20260920-141033）：**必须"先看 '[' 再判 char 标量"** ——
           //   原顺序把 `char cbuf[6]` 字段的 `b.cbuf[0]` 判成「char 标量字段读」并**当场 return**，
@@ -2375,6 +2926,16 @@ int parse_primary(struct Parse *p, struct Ast *a) {
         p->i = p->i + 1;
         int fcd2 = fld_code(p, sid, f);
         int ftyd2 = st_fty(p, f);
+        // v2.4.0：`p->b.c`（b 是嵌套 struct 值字段）—— 基址 = 指针变量的**值**（kind 26，ty=3），
+        //   其余交给链式读（与上面本地 `.` 那一支同源；地址随时可用，不需要先落变量）。
+        if (ftyd2 == 5) {
+          if (tok_is(p, '[')) { return -13; }
+          p->i = p->i - 1;
+          int pb5 = new_node(a, 26, 0, 0);
+          vv[pb5] = slot;
+          set_ty(a, pb5, 3);
+          return sarr_fld_read(p, a, pb5, sid);
+        }
         if (tok_is(p, '[')) {                                     // B2m：p->arr[i] 直接下标读
           // 2026-09-20（卡 T-20260920-141033）：先看 '[' 再看 char 标量（理由同本地那条 -112）
           if (st_is_arr(p, f) != 0) {                             // 定长数组字段
@@ -2407,24 +2968,81 @@ int parse_primary(struct Parse *p, struct Ast *a) {
           vv[cidx2] = fcd2;
           return cidx2;
         }
+        if (ftyd2 == 3) {                                      // v2.3：struct* 字段 → 交给链式读（sarr_fld_read）
+          p->i = p->i - 1;                                     // 让 sarr_fld_read 自己吃字段名
+          int pb = new_node(a, 26, 0, 0);                      // 基址 = 指针变量的**值**（不是变量槽）
+          vv[pb] = slot;
+          set_ty(a, pb, 3);
+          return sarr_fld_read(p, a, pb, sid);
+        }
         int idx = new_node(a, 32, slot, 0);
         vv[idx] = fcd2;
         if (ftyd2 >= 1) { set_ty(a, idx, fld_ty(ftyd2)); }
         return idx;
       }
       if (tok_is(p, '[')) {                                       // —— 下标读 ——
+        if (ty == 6) {                                            // v2.1.0：struct 数组元素 a[i]
+          // 语义 = **元素地址**（基址 + i×步长），不是值：与真 flint 的 ND_ADD 地址链同形。
+          //   ⇒ a[i] 可直接作 struct S * 实参；&a[i] 就是这个值（'&' 分支直接返回它）；
+          //     a[i].f 在这条地址链上再叠字段偏移（sarr_fld_read）。
+          p->i = p->i + 1;
+          int e6 = parse_expr(p, a);
+          if (e6 < 0) return -14;
+          if (!tok_is(p, ']')) return -15;
+          p->i = p->i + 1;
+          int el6 = sarr_elem_addr(a, slot + spec_n(spec) - 1, e6, st_nslots(p, spec_sid(spec)) * 8);
+          if (tok_is(p, '.')) {                                   // a[i].字段
+            p->i = p->i + 1;
+            return sarr_fld_read(p, a, el6, spec_sid(spec));
+          }
+          if (tok_is(p, '[')) return -13;                          // a[i][j]：不猜（SPEC 禁区 5）
+          return el6;
+        }
+        if (ty == 2 && spec_aux(spec) == 2) {                     // v2.2：struct 指针下标 p[i]
+          // 语义与 a[i] 完全同形：p 的值 + i×步长 = 元素地址（ty=3 地址类）⇒ p[i].f 再叠字段偏移。
+          p->i = p->i + 1;
+          int xp = parse_expr(p, a);
+          if (xp < 0) return -14;
+          if (!tok_is(p, ']')) return -15;
+          p->i = p->i + 1;
+          int sidp = spec_sid(spec);
+          int elp = sptr_elem_addr(a, slot, xp, st_nslots(p, sidp) * 8);
+          if (tok_is(p, '.')) {                                   // p[i].字段
+            p->i = p->i + 1;
+            return sarr_fld_read(p, a, elp, sidp);
+          }
+          if (tok_is(p, '[')) return -13;                          // p[i][j]：不猜（与 a[i][j] 同一条禁区）
+          return elp;
+        }
         if (ty == 0 || ty == 3) return -13;                       // 标量/struct 不能下标
         p->i = p->i + 1;
         int e = parse_expr(p, a);
         if (e < 0) return -14;
         if (!tok_is(p, ']')) return -15;
         p->i = p->i + 1;
+        // v2.2.0：二维 int 数组 `m[i][j]` —— 第二维折成 `i*cols + j`，再喂**既有** kind 23。
+        //   ⇒ 发射侧零改动；线性下标表达式与一维下标走同一条路（表达式下标本来就被支持）。
+        if (ty == 8) {
+          if (!tok_is(p, '[')) return -277;                       // 只写一维：不猜（防静默读错行）
+          p->i = p->i + 1;
+          int e2 = parse_expr(p, a);
+          if (e2 < 0) return -14;
+          if (!tok_is(p, ']')) return -15;
+          p->i = p->i + 1;
+          int cols7 = spec / 1000000 - 800;
+          int cn7 = new_node(a, 0, 0, 0);
+          int *vvn7 = a->val;
+          vvn7[cn7] = cols7;
+          int ml7 = new_node(a, 3, e, cn7);
+          int lin7 = new_node(a, 1, ml7, e2);
+          return new_node(a, 23, slot + spec_n(spec) - 1, lin7);
+        }
         if (ty == 1) return new_node(a, 23, slot + spec_n(spec) - 1, e);   // 本地 int 数组（升序基址）
         if (ty == 4) return new_node(a, 39, slot + spec_n(spec) - 1, e);   // 本地 char 数组（升序基址）
         if (spec_aux(spec) == 1) return new_node(a, 37, slot, e); // char* → 字节
         return new_node(a, 28, slot, e);                          // int*/struct* → 8 字节
       }
-      if (ty == 1) {                                              // 裸 int 数组名 = 取址（升序基址）
+      if (ty == 1 || ty == 8) {                                   // 裸 int 数组名 = 取址（升序基址）
         int ai = new_node(a, 25, 0, 0);
         vv[ai] = slot + spec_n(spec) - 1;
         return set_ty(a, ai, 1);
@@ -2442,6 +3060,13 @@ int parse_primary(struct Parse *p, struct Ast *a) {
         if (aux2 == 1) { pt = 2; }
         else if (aux2 == 2) { pt = 3; }
         return set_ty(a, pi, pt);
+      }
+      if (ty == 6) {                                              // v2.1.0：struct 数组名 = 首元素地址
+        // 与「struct 变量名作表达式 = 首地址」同一条语义（SPEC v2.1.0）；基址 = 保留区最高槽。
+        // 所以 `setn(a, 55)`（形参 struct Pair *）拿到的就是 &a[0]，与真 flint 同口径。
+        int ai6 = new_node(a, 25, 0, 0);
+        vv[ai6] = slot + spec_n(spec) - 1;
+        return set_ty(a, ai6, 3);
       }
       if (ty == 3) return -154;                                   // struct 值不能当表达式
       if (ty == 5) {                                              // B2g char 标量读（字节）
@@ -3023,17 +3648,65 @@ int seg_out_fn(struct Parse *p, struct Ast *a, int e, int fam) {
 
 // —— v1.5.0：str 内建 —— str([段, ...]) → char*（拼进静态缓冲，**不**输出到 stdout）——
 //   与真 flint **同口径**：只在 3 个语句级形态可用（char*/int* 声明初始化 / 赋值右值 / 指针返回函数的 return）。
+//   v2.3.x 起同一个函数还服务 str_into(dst[, cap], [...])（调用方按 str_into_ahead 判形态，见函数内注释）。
 //   展开 = **语句链**（begin + 各段 put + end），段序由语句序保证（不靠实参求值顺序 —— 真 flint 侧实测
 //   实参是**右→左**求值，嵌套调用链会静默拼错；本文件 parse_print 的老写法是块语句，天然没这问题）。
-// p->i 必须停在 'str' 上。返回末尾 `_flint_str_end()` 调用节点下标（值 = char*，失败时 0）；
-// begin/各段 put 已按序追加进 blk 表 ⇒ 调用方用「进函数前记 mark = p->nblk」取 cnt 并包成块节点。
+// p->i 必须停在 'str' / 'str_into' 上。返回末尾收尾调用节点下标（str = `_flint_str_end()` 0 参；
+// str_into = `_flint_str_end_to(dst, cap)` 2 参）——**函数下标已由本函数填入**，调用方只当值用。
+//   值 = char*（失败时 0）；begin/各段 put 已按序追加进 blk 表 ⇒ 调用方用「进函数前记 mark = p->nblk」
+//   取 cnt 并包成块节点。
 int parse_str_body(struct Parse *p, struct Ast *a) {
+  // v2.3.x（2026-10-24）：本函数同时服务 str([...]) 与 str_into(dst[, cap], [...])——
+  //   两条腿的段机制/控制流**逐条相同**（begin + 各段 put），只有三处不同：
+  //   ① 关键词后面多两个表达式实参（dst / cap）② 末尾换成 _flint_str_end_to ③ 2 参数组形态的
+  //   cap 由 dst 的**数组声明**推出来。语义权威 = src\parse.c 的 str_parse_body（into 分支）。
+  int into = str_into_ahead(p, 0);
   int fb = find_func_by(p, "_flint_str_begin");
   int fe = find_func_by(p, "_flint_str_end");
+  if (into == 1) { fe = find_func_by(p, "_flint_str_end_to"); }
   if (fb < 0 || fe < 0) return -213;            // 注入库缺失（编译器内部问题）
-  p->i = p->i + 1;                              // 吃 'str'
+  p->i = p->i + 1;                              // 吃 'str' / 'str_into'
   if (!tok_is(p, '(')) return -210;
   p->i = p->i + 1;
+  int dstn = -1;
+  int capn = -1;
+  if (into == 1) {
+    // —— dst：任意 char* 表达式（真 flint 用 assign 层；boot 的 parse_expr 就是这一层）——
+    //    记下**第一个 token** 的 pos/len：2 参数组形态要拿它去查"这是不是本函数里声明的数组"。
+    int dpos = -1;
+    int dlen = 0;
+    if (p->i < p->n && p->ks[p->i] == 1) { dpos = p->ps[p->i]; dlen = p->ls[p->i]; }
+    dstn = parse_expr(p, a);
+    if (dstn < 0) return -211;
+    if (!tok_is(p, ',')) return -210;
+    p->i = p->i + 1;
+    if (tok_is(p, '[')) {
+      // —— 2 参数组形态：cap = 数组声明里的字节数（含结尾 0），省掉手算容量这个容易错的活 ——
+      //   真 flint 口径 = ty_arr_stride(elem_ty) * arr_len（src\parse.c :3125-3127）。
+      //   boot 的数组长度编码在**变量规格**里（declare_arr 100000000+n / declare_carr 400000000+n）：
+      //     ty 4（char 数组）⇒ spec_n 就是**字节数**（declare_carr 存的是字节数）；
+      //     ty 1（int 数组）⇒ spec_n 是**元素数**，元素宽按真 flint 的 ty_arr_stride(int) = 4 乘。
+      //   ⚠️ 别把 boot 自己的 8 字节槽宽写进来：cap 是**给用户看的字节数**，要和真 flint 同一个数
+      //      （boot 的 int 数组实际占 8*n 槽 ⇒ 4*n 只会少用、永不越界，两个方向都安全）。
+      if (dpos < 0) return -250;
+      int dv = find_var_idx(p, dpos, dlen);
+      if (dv < 0) return -250;
+      int *vspc = p->vsp;
+      int dspc = vspc[dv];
+      int dtyc = spec_ty(dspc);
+      if (dtyc != 4 && dtyc != 1) return -250;
+      int capv = spec_n(dspc);
+      if (dtyc == 1) { capv = capv * 4; }
+      capn = new_node(a, 0, 0, 0);
+      int *vvc = a->val;
+      vvc[capn] = capv;
+    } else {
+      capn = parse_expr(p, a);
+      if (capn < 0) return -211;
+      if (!tok_is(p, ',')) return -210;
+      p->i = p->i + 1;
+    }
+  }
   if (!tok_is(p, '[')) return -210;
   p->i = p->i + 1;
   int bnode = new_node(a, 10, 0, 0);            // 10 = call（0 参）
@@ -3101,7 +3774,24 @@ int parse_str_body(struct Parse *p, struct Ast *a) {
   if (tok_is(p, ',')) return -212;              // str 不接受 print 的第二参（换行标志）
   if (!tok_is(p, ')')) return -210;
   p->i = p->i + 1;
-  return new_node(a, 10, 0, 0);                 // 末尾 _flint_str_end()（调用方填 func 下标 + 当值用）
+  // 末尾收尾调用：str → _flint_str_end()（0 参）；str_into → _flint_str_end_to(dst, cap)（2 参）。
+  //   实参链存法与 seg 的 put 调用、parse_call_tail 一致：args[base] = 第 1 个，往后按序。
+  //   ⚠️ 顺序 = dst 先、cap 后（真 flint：dst->next = cap）—— 发射端按这个序喂 rcx/rdx。
+  int nbase = 0;
+  int narc = 0;
+  if (into == 1) {
+    int *are = p->args;
+    if (p->nargs + 1 >= 65536) return -10;
+    nbase = p->nargs;
+    are[nbase] = dstn;
+    are[nbase + 1] = capn;
+    p->nargs = p->nargs + 2;
+    narc = 2;
+  }
+  int endn = new_node(a, 10, nbase, narc);
+  int *vve = a->val;
+  vve[endn] = fe;                               // 收尾函数下标在这里填（调用方只当值用，别再覆盖）
+  return endn;
 }
 
 // —— B2g：print 内建 —— print ( [ 段, ... ] [, 换行] ) ;
@@ -3274,7 +3964,22 @@ int parse_decl_body(struct Parse *p, struct Ast *a, int spec) {
   int len = ls[p->i];
   p->i = p->i + 1;
   if (tok_is(p, '[')) {                               // 数组（长度必须字面量）
-    if (ty != 0 && ty != 4) return -144;
+    if (ty != 0 && ty != 3 && ty != 4) { return -144; }
+    // ===== v2.1.0（2026-10-24，卡「最后一个自举缺口 -240」）：struct 数组 `struct S a[N];` 已接 =====
+    //   这一格原先 `return -240`（BOOT_FAIL）。三条"为什么不做"的理由逐条被证伪/收口：
+    //   ① 规格编码：不再把 slots×N 往低 3 位塞 —— 改用 ty=6 专用编码
+    //      `600000000 + sid*100000 + T`（T = 总槽数 = st_nslots(sid)*N；低 5 位给
+    //      declare_var_spec 当槽数，sid 占 10^5 位；N 不进编码，可由 T/per 反算）。
+    //      ⚠️ 2026-11-01：sid 段由 10^6 收到 10^5 —— 旧编码在 sid≥100 时进位到 7*10^8，
+    //         被 spec_ty 读成 ty=7（实测 boot 报 parse err=-54）。详见文件上方 ty 6 那一节。
+    //   ② 发射档：**一个都不加**（D11）—— 元素地址 = kind 25(lea) + kind 3(×步长) + kind 1(加)，
+    //      字段 = 元素地址 + 字段偏移 → kind 53/54（解引用读/写）与 kind 60（复合赋值/++）原样复用；
+    //      地址节点 ty 标 1/2/3（存储宽度类）⇒ 读/写宽度自动落对（b1_emit gen_expr 既有分支）。
+    //   ③ 函数表：新增 4 个 helper（declare_sarr / sarr_elem_addr / sarr_fld_addr /
+    //      sarr_fld_read），余量足够（见 tools\boot余量.ps1 的账）。
+    //   ⚠️ 诚实边界（boot 比真 flint 窄的**容量**断点，不是语法断点）：总槽数 ≤ 99999
+    //      （2026-10-24 由 999 抬到 99999，即 N ≤ 99999/st_nslots(sid)）；超限报 -241
+    //      （专用码，绝不静默少分配 —— 那会写穿帧）。真 flint 只受 2GB 帧上限约束。
     p->i = p->i + 1;
     if (!tok_is_num(p)) return -70;
     int n = tok_num_val(p);
@@ -3283,12 +3988,114 @@ int parse_decl_body(struct Parse *p, struct Ast *a, int spec) {
     if (!tok_is(p, ']')) return -72;
     p->i = p->i + 1;
     int aslot = 0;
-    if (ty == 4) { aslot = declare_carr(p, pos, len, n); }
+    int is2d = 0;                                     // v2.5.0：本数组是不是二维 int（ty=8）
+    int nelem = n;                                    // v2.5.0：元素总数（一维 = n；二维 = 行×列）
+    // ===== v2.2.0（2026-11-01）：二维 int 数组 `int m[行][列];`（ty=7；编码见 spec 那段注释）=====
+    //   落地 = 只登记（槽数 = 行×列），`m[i][j]` 的下标折叠在 parse_primary/parse_stmt 里；
+    //   发射侧零新增（D11）。边界：三维不猜（-277）；列数/总数超编码格报 -241（不静默截断）。
+    if (ty == 0 && tok_is(p, '[')) {
+      p->i = p->i + 1;
+      if (!tok_is_num(p)) return -70;
+      int ncol = tok_num_val(p);
+      if (ncol <= 0) return -71;
+      p->i = p->i + 1;
+      if (!tok_is(p, ']')) return -72;
+      p->i = p->i + 1;
+      if (tok_is(p, '[')) return -277;
+      if (ncol > 99) return -241;                     // cols 占 10^6 格（两位十进制）
+      if (n > 99999) return -241;                     // 与 struct 数组同一条帧槽偏移编码带
+      int tot = n * ncol;
+      if (tot > 99999) return -241;
+      is2d = 1;
+      nelem = tot;
+      aslot = declare_var_spec(p, pos, len, 800000000 + ncol * 1000000 + tot);
+    }
+    else if (ty == 4) { aslot = declare_carr(p, pos, len, n); }
+    else if (ty == 3) {
+      aslot = declare_sarr(p, pos, len, sid, n);      // v2.1.0：本地 struct 数组（槽数 = nslots×N）
+      if (aslot == -241) { return -241; }
+    }
     else { aslot = declare_arr(p, pos, len, n); }
     if (aslot < 0) return -44;
-    if (tok_is(p, '=')) return -73;                   // 数组初始化暂不支持
+    // ===== v2.5.0（2026-11-01）：局部 int 数组整体初始化 `int a[N] = {v0, v1, ...};` =====
+    //   语义权威 = 真 flint 端 src\parse.c 的 decl_list v2.5.0 分支（**同一份语言语义，改一端必须改另一端**）：
+    //     · 元素数 k ≤ N，不足 N 的补 0（C 口径），k > N = 编译期硬错；
+    //     · 元素只收 int 表达式（负号 / enum 常量 / 简单算式都走既有 parse_expr）；
+    //     · 空 `{}` 拒（至少写一个元素；全零请写 {0}）；尾逗号放行；
+    //     · 二维 ty=8 同一路：帧里是 row-major 连续块，按**线性下标** 0..R*C-1 填（r 下标不折 cols，
+    //       等价于 m[i/C][i%C]；与真 flint 的 arr_init_elem_stmt 同为「一维线性」口径）；
+    //     · 明确不做（保持响亮报错）：char/struct 数组（沿用 -73）、`int a[] = {...}` 省略长度
+    //       （长度那一格先报 -70）、嵌套大括号、字符串初始化；**全局数组初始化本函数不碰**
+    //       （parse_globals 的 -73 原样保留；真 flint 的全局 braced init 走 parse_global_init，
+    //        boot 未实现 = 已登记的容量/功能缺口，不在本条范围）。
+    //   落地 = parse 期展开成**逐元素写**节点（kind 24：l = 升序基址槽（同读/写路径 slot+n-1）、
+    //   r = 常量下标、val = 值表达式），与 `a[i] = v` 语句的既有形态逐字同形 ⇒ 发射侧零改动（D11）。
+    //   展开的语句**包在独立块节点里**（父块只多 1 个直接子语句）⇒ 不占 parse_block 的 tmp[512] 名额。
+    //   ⚠️ 容量断点（boot 比真 flint 窄的**容量**断点，不是语法断点）：初值元素总数 ≤ 64（-283 响亮报错）。
+    //      64 是保守值：AST 表 262144 节点、单块子节点 512、代码缓冲 2MiB —— 本可更多，但先按小口径
+    //      钉住（每个元素还要解析一棵表达式树，64 已覆盖手写初始化表的常见规模）。
+    //   错误码（-277 之后的空位）：
+    //     -280 初值不是 `{`（写了标量初值）  -281 空 `{}`
+    //     -282 元素比声明长度多             -283 初值元素总数超过 64（boot 容量断点）
+    if (tok_is(p, '=')) {
+      if (ty != 0) { return -73; }                     // char / struct 数组：整块布局未定，沿用旧码
+      p->i = p->i + 1;                                 // 吃 '='
+      if (!tok_is(p, '{')) { return -280; }            // 标量初值：数组没有标量初值语义
+      if (nelem > 64) { return -283; }                 // 容量断点（见上）
+      int abase = aslot + nelem - 1;                   // 升序基址（与 3047 / 4954 两处读写路径同口径）
+      int amark = p->nblk;
+      p->i = p->i + 1;                                 // 吃 '{'
+      if (tok_is(p, '}')) { return -281; }             // 空 {}：真 flint 同口径拒
+      int aix = 0;
+      int amore = 1;
+      int *aivv = a->val;
+      int *aiblk = p->blk;
+      while (amore == 1) {
+        if (aix >= nelem) { return -282; }             // 元素比声明长度多
+        int aiv = parse_expr(p, a);
+        if (aiv < 0) { return -45; }
+        int aiix = new_node(a, 0, 0, 0);               // 常量下标节点（kind 0）
+        aivv[aiix] = aix;
+        int aiw = new_node(a, 24, abase, aiix);        // 与 `a[i] = v` 同形（kind 24）
+        aivv[aiw] = aiv;
+        if (p->nblk >= 131072) { return -101; }
+        aiblk[p->nblk] = aiw;
+        p->nblk = p->nblk + 1;
+        aix = aix + 1;
+        amore = 0;
+        if (tok_is(p, ',')) {
+          p->i = p->i + 1;
+          if (!tok_is(p, '}')) { amore = 1; }          // 尾逗号：`}` 就在下一个 token ⇒ 收尾
+        }
+      }
+      if (!tok_is(p, '}')) { return -47; }
+      p->i = p->i + 1;                                 // 吃 '}'
+      while (aix < nelem) {                            // 不足 N：补 0（C 口径）
+        int aiz = new_node(a, 0, 0, 0);
+        aivv[aiz] = 0;
+        int aizx = new_node(a, 0, 0, 0);
+        aivv[aizx] = aix;
+        int aizw = new_node(a, 24, abase, aizx);
+        aivv[aizw] = aiz;
+        if (p->nblk >= 131072) { return -101; }
+        aiblk[p->nblk] = aizw;
+        p->nblk = p->nblk + 1;
+        aix = aix + 1;
+      }
+      int acnt = p->nblk - amark;
+      if (tok_is(p, ',')) { return new_node(a, 19, amark, acnt); }   // 多声明：`int a[2] = {1,2}, b;`（真 flint 放行）
+      if (!tok_is(p, ';')) { return -47; }
+      p->i = p->i + 1;
+      return new_node(a, 19, amark, acnt);             // 整条声明 = 含 N 条逐元素写的块
+    }
+    // 数组初始化暂不支持（char/struct 数组走上一条的 -73；int 数组已由 v2.5.0 接住）
     // 2026-09-20（卡 T-20260920-144154）：数组声明符后面可以接 `,` —— 真 flint 实测放行
     //   `int a[3], b;`（boot 原先在这里直接 -47 = 双端断点）。把 `,` 留给调用方的多声明循环。
+    // ⚠️ 2026-10-24（struct 数组收口）：**struct 数组例外** —— 真 flint 实测 `struct P a[2], b;`
+    //   报「期望 ';'」（与上面 struct **值**多声明同一条口径，见本函数 3476 一带的注释）。
+    //   boot 若默默放行就是「boot 比真 flint 宽」的静默分岔（本轮实测：boot 编过并跑出 11、
+    //   真 flint 编译期硬错）⇒ 沿用 -47（= 本文件的「期望 ';'」）。
+    if (ty == 3 && tok_is(p, ',')) { return -47; }
     if (tok_is(p, ',')) { return new_node(a, 19, p->nblk, 0); }
     if (!tok_is(p, ';')) return -47;
     p->i = p->i + 1;
@@ -3335,16 +4142,13 @@ int parse_decl_body(struct Parse *p, struct Ast *a, int spec) {
   if (tok_is(p, '=')) {
     if (ty == 3) return -145;                         // struct 值初始化暂不支持
     // v1.5.0：char *s = str([...]); —— str 的语句级展开（只在**指针**声明初始化放行）
+    // v2.3.x：char *t = str_into(buf, [...]) / str_into(p, cap, [...]) 同路（同一条语句链，末尾换成 end_to）
     //   ⚠️ 此处 p->i 还停在 '=' 上 ⇒ 前瞻用 str_ahead(p, 1)（踩过：写成 0 直接落到 parse_expr ⇒ -45）
-    if (ty == 2 && mg == 0 && str_ahead(p, 1) == 1) {
+    if (ty == 2 && mg == 0 && (str_ahead(p, 1) == 1 || str_into_ahead(p, 1) == 1)) {
       int mark = p->nblk;
       p->i = p->i + 1;                                // 吃 '='
       int endn = parse_str_body(p, a);
       if (endn < 0) return endn;
-      int fe = find_func_by(p, "_flint_str_end");
-      if (fe < 0) return -213;
-      int *vve = a->val;
-      vve[endn] = fe;
       set_ty(a, endn, 2);                             // 末尾调用返回 char*（地址类，与串段同解码）
       int *blkn = p->blk;
       if (p->nblk >= 131072) return -101;
@@ -3662,6 +4466,93 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
   if (tok_ident_eq(p, "int") || tok_ident_eq(p, "char") || tok_ident_eq(p, "struct")) {
     return parse_decl_stmt(p, a);             // B2f：声明语句（2026-09-20：支持多声明 `int a=1, b, c=3;`）
   }
+  // ===== v2.4.x（2026-10-24，补缺口 -220）：try 错误传播糖 =====
+  // 语义权威 = src\parse.c 的 try_stmt（约 :3239-3304）。形态（唯一）：
+  //   try <变量> = <表达式> ;
+  // 展开 = 两条语句（**不新增 AST 种类**，codegen / 解释器零改动）：
+  //   <变量> = <表达式> ;
+  //   if (<变量> != 0) { return <变量>; }
+  // 判据（与真 flint 逐条对齐）：
+  //   ① 入口判据 = `try` 后面**紧跟标识符**才算糖（src\parse.c:1134）——
+  //      `try = 5;` 里的 try 仍是普通变量名，落到下面的赋值分支。
+  //   ② 目标必须是**本函数里已声明**的 32 位整数变量：boot 的类型宇宙里 = int(ty 0) / char(ty 5)；
+  //      数组(1/4) / 指针(2) / struct(3) 一律拒（真 flint 白名单同口径，char 在真 flint 里放行）。
+  //   ③ 所在函数必须**返回 int**：void(ret 5) / 指针(ret 1/2/3) / char 值(ret 4) 全拒。
+  //   ④ 展开里目标变量出现**三次**（写一次、读两次）⇒ 每处各建一个节点（AST 是树，节点不能共用；
+  //      src\parse.c:3279-3293 正是为这个建了 lhs1/lhs2/lhs3 三个 new_var_node）。
+  //   ⑤ 错误值约定 = 非 0 即错（正负数都算），与真 flint 的 `!= 0` 一字不差。
+  // 错误码（新占 -260..-266，与 -220「不支持」区分开）：
+  //   -260 目标未声明 / -261 缺 '='（左值不是单个变量）/ -262 目标类型不在白名单
+  //   -263 void 函数 / -264 返回值不是 int / -265 右值解析失败 / -266 缺 ';'
+  if (tok_ident_eq(p, "try") && p->i + 1 < p->n && ks[p->i + 1] == 1) {
+    p->i = p->i + 1;                          // 吃 try（p->i 现在指目标变量名）
+    int tk = find_var_idx(p, ps[p->i], ls[p->i]);
+    if (tk < 0) return -260;                  // 未声明（全局名也走这条：真 flint 的 find_lvar 同口径）
+    if (!(p->i + 1 < p->n && ks[p->i + 1] == 3 && vs[p->i + 1] == '=')) return -261;
+    int tspec = p->vsp[tk];
+    int tty = spec_ty(tspec);
+    if (tty != 0 && tty != 5) return -262;    // 只放行 int / char 标量
+    int trt = fn_retptr(p->fpty[p->main_idx]); // 本函数返回类型（解析期 main_idx = 当前函数下标）
+    if (trt == 5) return -263;
+    if (trt != 0) return -264;
+    int tslot = p->vslots[tk] - p->sbase;
+    int *tvv = a->val;
+    p->i = p->i + 2;                          // 越过 <变量> 与 '='，p->i 指向右值
+    int te = parse_expr(p, a);
+    if (te < 0) return -265;
+    if (!tok_is(p, ';')) return -266;
+    p->i = p->i + 1;
+    int tasg = 0;
+    if (tty == 0) {
+      // 与普通 int 赋值同一条通路（含 v1.4.31 的「装过地址的 int」T1 标记）
+      if (rhs_addr_like(p, a, te, 0) != 0) { set_addr_mark(p, tslot); }
+      tasg = new_node(a, 7, tslot, te);
+      t1_mark_store(p, tasg, tslot);
+    } else {
+      tasg = new_node(a, 43, tslot, te);      // char 标量写（字节截断，B2g）
+    }
+    // 条件里的读、return 里的读 —— 各建一个独立节点（第三次「引用」是上面那次写）
+    int tc = 0;
+    int tr = 0;
+    if (tty == 0) {
+      tc = new_node(a, 6, 0, 0);
+      tvv[tc] = tslot;
+      if (slot_addr_mark(p, tslot) == 1) { p->pmark[tc] = 2; }
+      tr = new_node(a, 6, 0, 0);
+      tvv[tr] = tslot;
+      if (slot_addr_mark(p, tslot) == 1) { p->pmark[tr] = 2; }
+    } else {
+      tc = new_node(a, 42, 0, 0);
+      tvv[tc] = tslot;
+      tr = new_node(a, 42, 0, 0);
+      tvv[tr] = tslot;
+    }
+    int tz = new_node(a, 0, 0, 0);
+    tvv[tz] = 0;
+    int tcond = new_node(a, 12, tc, tz);      // ne
+    int tret = new_node(a, 9, tr, 0);         // return <变量>;
+    // then 块 = 1 条语句（节点 17 的 r 恒为 kind 19 块节点，照 parse_stmt_block 的构造）
+    int *tb = p->blk;
+    if (p->nblk >= 131072) return -101;
+    tb[p->nblk] = tret;
+    p->nblk = p->nblk + 1;
+    int tthen = new_node(a, 19, p->nblk - 1, 1);
+    int tif = new_node(a, 17, tcond, tthen);
+    tvv[tif] = -1;                            // 无 else
+    // 展开的两条语句进**本语句的块**（与 `{ ... }` 语句同一机制：嵌套块的子语句不进父块）
+    if (p->nblk >= 131072) return -101;
+    tb[p->nblk] = tasg;
+    p->nblk = p->nblk + 1;
+    if (p->nblk >= 131072) return -101;
+    tb[p->nblk] = tif;
+    p->nblk = p->nblk + 1;
+    return new_node(a, 19, p->nblk - 2, 2);
+  }
+  // v2.3.x（2026-10-24）：str_into **已实现**（2 参数组 / 3 参指针两种形态，见 parse_str_body）。
+  //   原先这里有一条 `if (tok_ident_eq(p, "str_into")) return -250;` 的整词拒绝 —— 现在删掉：
+  //   语句级形态（声明初始化 / 赋值右值 / return）在各条路径上按 str_into_ahead 识别，
+  //   而"裸语句丢弃"这种非法位置与 `str([...]);` 同族 ⇒ 落到下面那条 str_ahead 的 -210 分支
+  //   （真 flint 实测同样拒绝，报的是 str_ctx_error —— 见 test\facts\f057 的注释与交接报告）。
   if (tok_ident_eq(p, "print")) {
     return parse_print(p, a);
   }
@@ -3676,15 +4567,12 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
     }
     if (p->ret_void != 0) return -201;       // void 函数不能 return 表达式（真 flint 实测 p3 报此错）
     // v1.5.0：return str([...]); —— 只在**指针返回**函数里（else 响亮报错 -210，不静默给错值）
-    if (str_ahead(p, 0) == 1) {
+    // v2.3.x：return str_into(dst[, cap], [...]); 同路（末尾换成 end_to）
+    if (str_ahead(p, 0) == 1 || str_into_ahead(p, 0) == 1) {
       if (p->ret_ptr != 1) return -210;
       int markr = p->nblk;
       int endr = parse_str_body(p, a);
       if (endr < 0) return endr;
-      int fer = find_func_by(p, "_flint_str_end");
-      if (fer < 0) return -213;
-      int *vver = a->val;
-      vver[endr] = fer;
       set_ty(a, endr, 2);
       int *blkr = p->blk;
       if (p->nblk >= 131072) return -101;
@@ -3764,7 +4652,8 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
   if (tok_ident_eq(p, "else")) return -115;   // else 无 if
   // v1.5.0：`str([...]);` 当语句丢弃 —— 响亮报错 -210（必须放在**调用语句路径之前**：
   //   否则会被那条路的 parse_expr 吞掉、错误码被 parse_or 掩成 -50，报不出「为什么不行」）
-  if (str_ahead(p, 0) == 1) return -210;
+  // v2.3.x：`str_into(...);` 裸语句丢弃同理（真 flint 也拒绝：str_ctx_error 同一句文案）
+  if (str_ahead(p, 0) == 1 || str_into_ahead(p, 0) == 1) return -210;
   // B2h：调用语句（表达式语句）——真实库大量出现 `foo(a);`（B2d 边界，自举必需）
   if ((p->i + 1 < p->n && ks[p->i] == 1 && ks[p->i + 1] == 3 && vs[p->i + 1] == '(')
       || method_call_ahead(p) == 1) {   // v1.6.0：+ 语句级方法调用点糖
@@ -3807,11 +4696,13 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
     return inc;
   }
   // v1.5.0：`str([...]);` 当语句丢弃 —— 不支持（它只在 3 个语句级形态可用）⇒ 响亮报错 -210
-  if (str_ahead(p, 0) == 1) return -210;
+  //   （上面 3868 已经拦过一次；这里保留同名判据给"自增/自减语句之后"这条路径兜底，口径不变）
+  if (str_ahead(p, 0) == 1 || str_into_ahead(p, 0) == 1) return -210;
   // v1.5.0：`s = str([...]);` —— 语句级展开（左值必须是已声明的 char*/int* 指针变量；其余响亮报错）
   //   必须在通用赋值路径**之前**按语句形态识别（str 的展开是一串语句，夹进表达式里就会与实参求值顺序打架）
+  // v2.3.x：`t = str_into(dst[, cap], [...]);` 同路（末尾换成 end_to；左值门槛一条不动）
   if (p->i + 2 < p->n && ks[p->i] == 1 && ks[p->i + 1] == 3 && vs[p->i + 1] == '='
-      && str_ahead(p, 2) == 1) {
+      && (str_ahead(p, 2) == 1 || str_into_ahead(p, 2) == 1)) {
     int kks = find_var_idx(p, ps[p->i], ls[p->i]);
     if (kks < 0) return -214;                                   // 未声明 / 不是本地变量
     int *vsps = p->vsp;
@@ -3820,13 +4711,9 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
     if (mg_var_kind(p, kks) != 0) return -170;                  // own/share 不能重赋值（沿用既有码）
     int slots = vsls[kks] - p->sbase;
     int marks = p->nblk;
-    p->i = p->i + 2;                                            // 吃 标识符 与 '='（当前 = 'str'）
+    p->i = p->i + 2;                                            // 吃 标识符 与 '='（当前 = 'str'/'str_into'）
     int ends = parse_str_body(p, a);
     if (ends < 0) return ends;
-    int fes = find_func_by(p, "_flint_str_end");
-    if (fes < 0) return -213;
-    int *vves = a->val;
-    vves[ends] = fes;
     set_ty(a, ends, 2);
     int *blks = p->blk;
     if (p->nblk >= 131072) return -101;
@@ -3896,6 +4783,19 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
       int f = st_find_field(p, sid, ps[p->i], ls[p->i]);
       if (f < 0) return -152;
       p->i = p->i + 1;
+      // ===== v2.4.0：`a.b.c = e`（b 是嵌套 struct 值字段）=====
+      //   基址 = 本地 struct 的升序基址槽（kind 25）；整条 `.` 链由 chain_fld_addr 折成
+      //   「基址 + off_b + off_c」→ kind 54 写（宽度随最后一跳字段类型）。
+      //   `a.b = e`（整体赋 struct）没有值语义 ⇒ -64（与下面「数组名/struct 整体赋值不支持」同码）。
+      if (st_fty(p, f) == 5) {
+        if (tok_is(p, '=')) { return -64; }
+        int b5 = new_node(a, 25, 0, 0);
+        int *vvb5 = a->val;
+        vvb5[b5] = slot + st_nslots(p, sid) - 1;
+        set_ty(a, b5, 1);
+        int adb5 = sarr_fld_addr(a, b5, st_fld(p, f, 3), 3);    // b 的字段地址 = struct 基址 + off_b
+        return chain_assign_tail(p, a, adb5, st_fsid(p, f), 1); // 对象地址起点 ⇒ 下一跳是 '.'
+      }
       if (tok_is(p, '[')) {                    // B2m：s.arr[i] = expr（指针字段直接下标写）
         int fst = st_fty(p, f);
         int fcd1 = fld_code(p, sid, f);
@@ -3935,6 +4835,95 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
       p->i = p->i + 1;
       return idx;
     }
+    if (ty == 6 && tok_is(p, '[')) {           // v2.1.0（缺口 -240 收口）：a[i].f = e ／ a[i].buf[j] = e
+      // 与真 flint 同形（src\parse.c postfix 的 v2.1.0 块）：元素地址 = 基址 + i×步长，
+      //   字段写 = 元素地址 + 字段偏移 → 解引用写（kind 54，宽度随地址节点 ty）。
+      //   ⚠️ 为什么必须在这条**语句级**显式分支里做，而不能只靠表达式路径：
+      //     语句赋值只认「变量名 + 固定后缀形态」逐条展开（本函数里 `->` / `[` / ty==5 / ty==2 那一串），
+      //      探针路（本函数开头「parse_primary + lv_addr_from + lv_compound」那一支）只接**复合赋值/++/--**，`=` 不接 ⇒ 不写这一支就落到下标赋值
+      //      老路（ty 不是 0/3 ⇒ 被当本地 int 数组）⇒ 静默按 4 字节宽写 struct 元素（错）。
+      p->i = p->i + 1;
+      int ix6 = parse_expr(p, a);
+      if (ix6 < 0) return -59;
+      if (!tok_is(p, ']')) return -66;
+      p->i = p->i + 1;
+      int sid6 = spec_sid(spec);
+      int el6 = sarr_elem_addr(a, slot + spec_n(spec) - 1, ix6, st_nslots(p, sid6) * 8);
+      if (!tok_is(p, '.')) { return -154; }    // a[i] = ...：struct 没有整体值语义（同真 flint）
+      p->i = p->i + 1;
+      if (p->i >= p->n || ks[p->i] != 1) return -151;
+      int f6 = st_find_field(p, sid6, ps[p->i], ls[p->i]);
+      if (f6 < 0) return -152;
+      p->i = p->i + 1;
+      int off6 = st_fld(p, f6, 3);
+      int fty6 = st_fty(p, f6);
+      int fad6 = 0;
+      // v2.4.0：`a[i].b.c = e`（元素里再嵌一层 struct 值字段）—— 交给链式写
+      if (fty6 == 5) {
+        if (tok_is(p, '=')) { return -64; }
+        int ad6 = sarr_fld_addr(a, el6, st_fld(p, f6, 3), 3);
+        return chain_assign_tail(p, a, ad6, st_fsid(p, f6), 1);
+      }
+      if (tok_is(p, '[')) {                    // 元素内定长数组字段（g[0].buf[j]）
+        if (fld_arr_kind(p, f6) == 0) return -13;
+        fad6 = field_arr_addr(p, a, sarr_fld_addr(a, el6, off6, 1), fty6);
+        if (fad6 < 0) return fad6;
+      } else {
+        if (fld_arr_kind(p, f6) != 0) return -64;    // 数组字段名整体赋值不支持
+        fad6 = sarr_fld_addr(a, el6, off6, fld_addr_ty(fty6));
+      }
+      if (!tok_is(p, '=')) return -54;
+      p->i = p->i + 1;
+      int fe6 = parse_expr(p, a);
+      if (fe6 < 0) return -55;
+      if (fty6 >= 1 && fty6 != 4 && rhs_addr_like(p, a, fe6, 1) == 0) { return -198; }   // 指针字段值门槛（与本地 struct 字段写那一支同源，见上面 4266）
+      int fw6 = new_node(a, 54, fad6, fe6);
+      if (!tok_is(p, ';')) return -57;
+      p->i = p->i + 1;
+      return fw6;
+    }
+    if (ty == 2 && spec_aux(spec) == 2 && tok_is(p, '[')) {   // v2.2：p[i].f = e ／ p[i].buf[j] = e
+      // 与上面 ty==6 那一支同形，只有基址来源不同（sptr_elem_addr 用指针的**值**当基址）。
+      p->i = p->i + 1;
+      int ixp = parse_expr(p, a);
+      if (ixp < 0) return -59;
+      if (!tok_is(p, ']')) return -66;
+      p->i = p->i + 1;
+      int sidp = spec_sid(spec);
+      int elp = sptr_elem_addr(a, slot, ixp, st_nslots(p, sidp) * 8);
+      if (!tok_is(p, '.')) { return -154; }    // p[i] = ...：struct 没有整体值语义
+      p->i = p->i + 1;
+      if (p->i >= p->n || ks[p->i] != 1) return -151;
+      int fp = st_find_field(p, sidp, ps[p->i], ls[p->i]);
+      if (fp < 0) return -152;
+      p->i = p->i + 1;
+      int offp = st_fld(p, fp, 3);
+      int ftyp = st_fty(p, fp);
+      int fadp = 0;
+      // v2.4.0：`p[i].b.c = e` —— 与上面 ty==6 那一支同源
+      if (ftyp == 5) {
+        if (tok_is(p, '=')) { return -64; }
+        int adp = sarr_fld_addr(a, elp, st_fld(p, fp, 3), 3);
+        return chain_assign_tail(p, a, adp, st_fsid(p, fp), 1);
+      }
+      if (tok_is(p, '[')) {                    // 元素内定长数组字段（p[i].buf[j]）
+        if (fld_arr_kind(p, fp) == 0) return -13;
+        fadp = field_arr_addr(p, a, sarr_fld_addr(a, elp, offp, 1), ftyp);
+        if (fadp < 0) return fadp;
+      } else {
+        if (fld_arr_kind(p, fp) != 0) return -64;
+        fadp = sarr_fld_addr(a, elp, offp, fld_addr_ty(ftyp));
+      }
+      if (!tok_is(p, '=')) return -54;
+      p->i = p->i + 1;
+      int fep = parse_expr(p, a);
+      if (fep < 0) return -55;
+      if (ftyp >= 1 && ftyp != 4 && rhs_addr_like(p, a, fep, 1) == 0) { return -198; }
+      int fwp = new_node(a, 54, fadp, fep);
+      if (!tok_is(p, ';')) return -57;
+      p->i = p->i + 1;
+      return fwp;
+    }
     if (tok2_is(p, '-', '>')) {                // B2f：指针 -> 字段写
       if (ty != 2 || spec_aux(spec) != 2) return -153;
       int sid = spec_sid(spec);
@@ -3943,6 +4932,27 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
       int f = st_find_field(p, sid, ps[p->i], ls[p->i]);
       if (f < 0) return -152;
       p->i = p->i + 1;
+      // v2.4.0：`p->b.c = e`（b 是嵌套 struct 值字段）—— 基址 = 指针变量的值（kind 26，ty=3）
+      if (st_fty(p, f) == 5) {
+        if (tok_is(p, '=')) { return -64; }    // struct 没有整体值语义
+        int pb5 = new_node(a, 26, 0, 0);
+        int *vvp5 = a->val;
+        vvp5[pb5] = slot;
+        set_ty(a, pb5, 3);
+        int adp5 = sarr_fld_addr(a, pb5, st_fld(p, f, 3), 3);
+        return chain_assign_tail(p, a, adp5, st_fsid(p, f), 1);
+      }
+      if (st_fty(p, f) == 3 && !tok_is(p, '=')) {    // v2.3：链上继续 -> / [i] 之后再赋值
+        // `w->next->v = 7` / `w->next[0].v = 7`：先把指针字段读出来当基址，再沿链取地址，
+        //   最后照普通字段写的口径落 kind 54（宽度由地址节点的 ty 决定，与 s.f = e 同一条路）。
+        int *vvp = a->val;
+        int pb = new_node(a, 26, 0, 0);
+        vvp[pb] = slot;
+        set_ty(a, pb, 3);
+        int rdw = new_node(a, 53, sarr_fld_addr(a, pb, st_fld(p, f, 3), 3), 0);
+        set_ty(a, rdw, 3);
+        return chain_assign_tail(p, a, rdw, st_fsid(p, f), 0);
+      }
       if (tok_is(p, '[')) {                    // B2m：p->arr[i] = expr（指针字段直接下标写）
         int fst2 = st_fty(p, f);
         int fcd3 = fld_code(p, sid, f);
@@ -3983,12 +4993,27 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
       return idx;
     }
     if (tok_is(p, '[')) {                      // B2e：下标赋值
-      if (ty == 0 || ty == 3) return -74;      // 标量/struct 不能下标
+      if (ty == 0 || ty == 3 || ty == 6) return -74;      // 标量/struct/struct 数组不能走本支（6 已被上面接住；防御）
       p->i = p->i + 1;
       int ix = parse_expr(p, a);
       if (ix < 0) return -59;
       if (!tok_is(p, ']')) return -66;
       p->i = p->i + 1;
+      // v2.2.0：二维 int 数组 `m[i][j] = e` —— 与读路径同一条折叠（i*cols + j），复用 kind 24
+      if (ty == 8) {
+        if (!tok_is(p, '[')) return -277;
+        p->i = p->i + 1;
+        int ix2 = parse_expr(p, a);
+        if (ix2 < 0) return -59;
+        if (!tok_is(p, ']')) return -66;
+        p->i = p->i + 1;
+        int cols7 = spec / 1000000 - 800;
+        int cn7 = new_node(a, 0, 0, 0);
+        int *vvn7 = a->val;
+        vvn7[cn7] = cols7;
+        int ml7 = new_node(a, 3, ix, cn7);
+        ix = new_node(a, 1, ml7, ix2);
+      }
       if (!tok_is(p, '=')) return -54;
       p->i = p->i + 1;
       int e = parse_expr(p, a);
@@ -4001,7 +5026,7 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
       }
       int lslot = slot;
       if (ty == 4) { lslot = slot + spec_n(spec) - 1; }       // char 数组（升序基址）
-      if (ty == 1) { lslot = slot + spec_n(spec) - 1; }       // B2i：int 数组也升序（与指针语义一致）
+      if (ty == 1 || ty == 8) { lslot = slot + spec_n(spec) - 1; }  // B2i：int 数组也升序（与指针语义一致）
       int idx = new_node(a, nk, lslot, ix);
       int *vv = a->val;
       vv[idx] = e;
@@ -4044,6 +5069,105 @@ int parse_stmt(struct Parse *p, struct Ast *a) {
   }
 }
 
+// —— v2.1.0：**flint 的 is_keyword 逐字镜像**（src\parse.c:148 那张清单，一个不多一个不少）——
+//   为什么要单列一张：boot 平时不靠"关键字表"挡名字，而是靠"用到那处才报码"；可枚举常量名可以
+//   **一直不出现**在表达式里 ⇒ 不在这里挡就成「真 flint 拒、boot 收」的静默分岔。
+//   ⚠️ 清单里**没有** struct / api / main —— 与真 flint 一致（它们是上下文识别，不是关键字）。
+int tok_is_kw_at(struct Parse *p, int i) {
+  if (tok_ident_at(p, i, "int") != 0) { return 1; }
+  if (tok_ident_at(p, i, "char") != 0) { return 1; }
+  if (tok_ident_at(p, i, "void") != 0) { return 1; }
+  if (tok_ident_at(p, i, "return") != 0) { return 1; }
+  if (tok_ident_at(p, i, "if") != 0) { return 1; }
+  if (tok_ident_at(p, i, "else") != 0) { return 1; }
+  if (tok_ident_at(p, i, "while") != 0) { return 1; }
+  if (tok_ident_at(p, i, "for") != 0) { return 1; }
+  if (tok_ident_at(p, i, "new") != 0) { return 1; }
+  if (tok_ident_at(p, i, "own") != 0) { return 1; }
+  if (tok_ident_at(p, i, "share") != 0) { return 1; }
+  if (tok_ident_at(p, i, "ptr") != 0) { return 1; }
+  if (tok_ident_at(p, i, "double") != 0) { return 1; }
+  if (tok_ident_at(p, i, "int_64") != 0) { return 1; }
+  if (tok_ident_at(p, i, "uint_8") != 0) { return 1; }
+  if (tok_ident_at(p, i, "uint_32") != 0) { return 1; }
+  if (tok_ident_at(p, i, "uint_64") != 0) { return 1; }
+  if (tok_ident_at(p, i, "switch") != 0) { return 1; }
+  if (tok_ident_at(p, i, "case") != 0) { return 1; }
+  if (tok_ident_at(p, i, "default") != 0) { return 1; }
+  return 0;
+}
+
+// —— v2.1.0（2026-11-01）：enum 具名整数常量定义 ——
+//   口径与 src\parse.c 的 parse_enumdef **逐条同形**（同一份语言语义，改一端必须改另一端）：
+//     · 首项 = 0，后续 = 上一项 + 1；
+//     · 显式赋值只认「整数字面量 / 已登记的枚举常量 / '-' + 上面两种」；
+//     · 常量名与全局变量/函数/已有常量同名 = 编译期硬错（真 flint 报中文，boot 报专码）；
+//     · 末尾分号可选；至少一个常量；名字不许是关键字（flint 的 is_keyword 清单）；
+//     · 常量在解析期就折成整数字面量 ⇒ 发射侧零改动、产物与真 flint 逐字节相同。
+//   ⚠️ 两个**反向守卫**（g_add / collect_funcs）是本条语义的另一半：真 flint 的全局表与函数表是
+//     **预扫**的，所以 `enum X { A }; int A;` 在解析 enum 时就能看见后面的全局变量；boot 按源码序
+//     登记 ⇒ 必须在"后登记的那一端"再挡一次，否则只差顺序就成了「真 flint 拒、boot 静默收」。
+//   错误码（紧接 -240..-266 之后的空位；boot 的码是内部码，真 flint 侧文案见上）：
+//     -267 枚举定义形态错（缺名字/项名非法/缺 '{' 或 '}'）
+//     -268 枚举常量赋值只认整数字面量或已登记的枚举常量
+//     -269 枚举常量与全局变量同名        -270 枚举常量与函数同名
+//     -271 枚举常量重复声明              -272 枚举常量表满（enum_cap()）
+//     -273 enum 里至少要有一个常量       -274 全局变量与枚举常量同名（g_add 反向守卫）
+//     -275 函数与枚举常量同名（collect_funcs 反向守卫）
+//     -276 函数体用了**写在它后面**的 enum 常量（真 flint 按源码序登记 ⇒ 未声明；见 parse_primary）
+int parse_enumdef(struct Parse *p) {
+  int *ks = p->ks;
+  int *ps = p->ps;
+  int *ls = p->ls;
+  p->i = p->i + 1;                                     // 吃 'enum'
+  if (p->i >= p->n || ks[p->i] != 1) { return -267; }  // enum 后需要名字
+  if (tok_is_kw_at(p, p->i) != 0) { return -267; }
+  p->i = p->i + 1;                                     // 吃枚举名（不入表：不做枚举类型/枚举变量）
+  if (!tok_is(p, '{')) { return -267; }
+  p->i = p->i + 1;
+  int next = 0;
+  int cnt = 0;
+  int more = 1;                                        // FLINT 无 break 依赖 → 用标志位收尾
+  while (more == 1 && !tok_is(p, '}')) {
+    if (p->i >= p->n || ks[p->i] != 1) { return -267; }
+    if (tok_is_kw_at(p, p->i) != 0) { return -267; }
+    int ctok = p->i;                                   // 常量名 token 下标（入表；兼作声明先后判据）
+    int cpos = ps[p->i];
+    int clen = ls[p->i];
+    p->i = p->i + 1;
+    int val = next;
+    if (tok_is(p, '=')) {
+      p->i = p->i + 1;
+      int neg = 0;
+      if (tok_is(p, '-')) { neg = 1; p->i = p->i + 1; }
+      if (tok_is_num(p)) {
+        val = tok_num_val(p);
+        p->i = p->i + 1;
+      } else {
+        if (p->i >= p->n || ks[p->i] != 1) { return -268; }
+        int ei = enum_find(p, ps[p->i], ls[p->i]);
+        if (ei < 0) { return -268; }
+        val = enum_val(p, ei);
+        p->i = p->i + 1;
+      }
+      if (neg == 1) { val = 0 - val; }
+    }
+    if (g_find(p, cpos, clen) >= 0) { return -269; }
+    if (find_func_at(p, cpos, clen) >= 0) { return -270; }
+    if (enum_find(p, cpos, clen) >= 0) { return -271; }
+    int ad = enum_add(p, ctok, val);
+    if (ad < 0) { return ad; }
+    next = val + 1;
+    cnt = cnt + 1;
+    if (tok_is(p, ',')) { p->i = p->i + 1; } else { more = 0; }
+  }
+  if (!tok_is(p, '}')) { return -267; }
+  p->i = p->i + 1;
+  if (tok_is(p, ';')) { p->i = p->i + 1; }              // 末尾分号可选（`enum A { X };` 与 `enum A { X }` 都收）
+  if (cnt == 0) { return -273; }
+  return 0;
+}
+
 // —— B2f：多函数程序（struct 声明区 + 函数区）——
 int parse_program(struct Parse *p, struct Ast *a) {
   int *sf = p->sflat;
@@ -4051,6 +5175,17 @@ int parse_program(struct Parse *p, struct Ast *a) {
   // ⚠️ 字段数组必须先局部化再下标：`*(p->ks + i)` 是**字节**偏移（裸指针 ± 字节步进），
   //    元素下标要靠 `局部变量[i]` 的 8 字节缩放（B2k 实测：写成解引用会静默读错位置）
   int *ksp = p->ks;
+  // ===== v2.1.0（2026-11-01）：enum 常量表的**表体**（本函数的局部数组）=====
+  //   为什么放这里：FLINT 的全局不能是 struct/指针、struct 里也不能嵌数组 ⇒ 表体没有别的落脚点。
+  //   放在 parse_program 的帧里 ⟺ 生命周期正好等于"一次编译"（parse_enumdef 与 parse_primary
+  //   都在它返回之前跑完）；p->etok/eval 只是把这两根指针带进 Parse。
+  //   ⚠️ 数组长度必须 == enum_cap()（512）：数组长度在 FLINT 里只能写字面量 ⇒ 这两处是**同一个数**，
+  //      改一处必须改另一处（本仓「容量单点」纪律的唯一例外，代价是这一行注释）。
+  int etok[512];
+  int eval[512];
+  p->etok = &etok;
+  p->eval = &eval;
+  p->necons = 0;
   sf[0] = 0;
   sf[1] = 514;            // 2026-09-20：表头区 2..513（**128** struct × 4），字段区 514 起
                           //   （原为 130 = 32 struct；随 st_add 上限 32→128 同步挪，见 st_add 注释）
@@ -4072,6 +5207,11 @@ int parse_program(struct Parse *p, struct Ast *a) {
     if (tok_ident_eq(p, "struct")) {
       int se = parse_structs(p);
       if (se < 0) return se;
+    } else if (tok_ident_eq(p, "enum")) {
+      // v2.1.0（2026-11-01）：enum 与 struct 同级（真 flint 的顶层循环里也是并列分支）；
+      //   常量登记进表后**吃掉整段 enum**，不产 AST、不产码。
+      int ee = parse_enumdef(p);
+      if (ee < 0) return ee;
     } else if (tok_ident_eq(p, "api")) {
       int ae = parse_apis(p);
       if (ae < 0) return ae;
@@ -4086,6 +5226,10 @@ int parse_program(struct Parse *p, struct Ast *a) {
     if (tok_ident_eq(p, "struct")) {
       int se2 = parse_structs(p);
       if (se2 < 0) return se2;
+    } else if (tok_ident_eq(p, "enum")) {
+      // v2.1.0：enum 可出现在函数之后的顶层任意位置（真 flint 同：它的第二遍循环也是并列分支）
+      int ee2 = parse_enumdef(p);
+      if (ee2 < 0) return ee2;
     } else if (tok_ident_eq(p, "api")) {
       int ae2 = parse_apis(p);                 // B2i：api 声明可出现在顶层任意位置
       if (ae2 < 0) return ae2;

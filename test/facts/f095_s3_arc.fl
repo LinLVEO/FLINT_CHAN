@@ -1,0 +1,61 @@
+// f095_s3_arc.fl -- 3D 弧面刀光（2026-11-01）：细线 + 采样点回吐 + 粒子向上飘
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  s3_arc n=96 -> s3_px_n == 97（97 个采样点）
+//   bit1  中点（角度 0）落在 (104,64) 且非背景
+//   bit2  细线：中点上方 4px 无像素（宽度只有 1..4px）
+//   bit3  s3_emit_arc 发射 4 个 -> 返回 4
+//   bit4  发射后 4 个粒子 life > 0
+//   bit5  粒子 vy == -3（向上）
+//   bit6  fx_update_rise 一帧后 y 变小（真的向上飘）
+//   bit7  fx_update_rise 第二帧 |vy| 变小（速度向 0 收敛 = 飘停）
+include "../../lib/slash3d.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  struct Particle ps[16];
+  int mask = 0;
+  int i = 0;
+  int n = 0;
+  int live = 0;
+  int y0 = 0;
+  int vy0 = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 128; s.bh = 128; s.cw = 128; s.ch = 128;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 128, 128) == 0) { return 2; }
+
+  gfx_clear(&b, 0x00000000);
+  s3_arc(&b, 64, 64, 0, 40, -88, 88, 96, 0x00F0F0F0, 255, 0, 0, 0);
+  if (s3_px_n == 97) { mask = mask | 1; }
+  if (gfx_get(&b, 104, 64) != 0) { mask = mask | 2; }
+  if (gfx_get(&b, 108, 64) == 0) { mask = mask | 4; }
+
+  i = 0;
+  while (i < 16) { ps[i].life = 0; i = i + 1; }
+  n = s3_emit_arc(ps, 16, 4, 3);
+  if (n == 4) { mask = mask | 8; }
+  live = 0;
+  i = 0;
+  while (i < 16) {
+    if (ps[i].life > 0) { live = live + 1; }
+    i = i + 1;
+  }
+  if (live == 4) { mask = mask | 16; }
+  if (ps[0].vy == -3) { mask = mask | 32; }
+
+  y0 = ps[0].y;
+  fx_update_rise(ps, 16);
+  if (ps[0].y < y0) { mask = mask | 64; }
+  vy0 = ps[0].vy;
+  fx_update_rise(ps, 16);
+  if (ps[0].vy > vy0) { mask = mask | 128; }
+
+  print(["f095 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

@@ -1,0 +1,47 @@
+// hitfx.fl -- 打击感（M4 第一版）：hitstop / 震屏 / 闪白
+//
+// 用法：include "hitfx.fl"
+// 口径：全部确定性（LCG 伪随机），同 seed 同序列；不取系统时间，探针可逐位复现。
+//   freeze = 冻帧剩余帧数（命中后打击感"定住"）；shake = 震屏幅度（像素）；
+//   flash = 闪白剩余帧数（渲染端按它叠白）。
+// 第一版只做状态机，具体"怎么用"（冻谁、震多少、白多厚）留给游戏层。
+struct HitFx { int freeze; int shake; int flash; int seed; }
+
+// 起手：设定冻帧/震幅/闪白帧数，seed 重置。返回 1。
+int hitfx_start(struct HitFx *h, int freeze, int shake, int flash) {
+  if (h == 0) { return 0; }
+  h->freeze = freeze;
+  h->shake = shake;
+  h->flash = flash;
+  h->seed = 12345;
+  return 1;
+}
+
+// 每帧 tick：freeze / flash 各减 1（到 0 停）。返回 0。
+int hitfx_tick(struct HitFx *h) {
+  if (h == 0) { return 0; }
+  if (h->freeze > 0) { h->freeze = h->freeze - 1; }
+  if (h->flash > 0) { h->flash = h->flash - 1; }
+  return 0;
+}
+
+// LCG 伪随机：返回 0..32767（确定性）
+int hitfx_rand(struct HitFx *h) {
+  h->seed = h->seed * 1103515245 + 12345;
+  return (h->seed >> 16) & 32767;
+}
+
+// 震屏偏移（x）：[-shake, shake]；shake<=0 时恒 0（且不推进 seed）
+int hitfx_shake_x(struct HitFx *h) {
+  int r = 0;
+  int span = 0;
+  if (h->shake <= 0) { return 0; }
+  r = hitfx_rand(h);
+  span = h->shake * 2 + 1;
+  return (r % span) - h->shake;
+}
+
+// 震屏偏移（y）：同一套 LCG 序列
+int hitfx_shake_y(struct HitFx *h) {
+  return hitfx_shake_x(h);
+}

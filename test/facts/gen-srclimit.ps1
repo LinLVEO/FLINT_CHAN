@@ -1,38 +1,46 @@
 # gen-srclimit.ps1 -- generator + self-asserting probe for the boot compiler's SOURCE SIZE ceiling.
 #
 # WHY IT EXISTS
-#   boot\b1_emit.exe reads the (include-spliced) source into a 262144-byte buffer
-#   (boot\b1_emit.fl: `char *fbuf = VirtualAlloc(0, 262144, ...)` then
-#    `int n = read_file(name, fbuf, 262144);`), and read_file returns -3 when
+#   boot\b1_emit.exe reads ONE source file into a per-file buffer
+#   (boot\b1_emit.fl: `char *fbuf = VirtualAlloc(0, <CAP>, ...)` then
+#    `int n = read_file(name, fbuf, <CAP>);`), and read_file returns -3 when
 #    `got >= cap` (boot\b1_emit.fl: `if (got >= cap) return -3;`).  Caller prints
 #    `cannot read '<file>' (err=-3)` and exits 3.
-#   The real compiler (flint.exe) has no such ceiling.  So this is a LOUD FAILURE that
-#   must stay loud and must stay at the same threshold -- and it is an ERROR CODE, so it
-#   is easy to mis-file as a defect.  This script pins both facts.
+#   The real compiler (hlc.exe) has no such ceiling.  So this is a LOUD FAILURE that
+#   must stay loud -- and it is an ERROR CODE, so it is easy to mis-file as a defect.
+#   This script pins both facts.
+#
+#   <CAP> IS READ FROM THE SOURCE, NOT TYPED HERE.  2026-11-01: the cap moved
+#   262144 -> 524288 because boot\lib_parse.fl crossed the old 256 KiB per-file limit
+#   (the 2D-array parse pushed it to 262,254 B), so a check that never followed the
+#   source would have gone red against a DELIBERATE capacity move.  The two legs below
+#   still pin the exact threshold (cap-1 accepted / cap refused), so an accidental
+#   off-by-one in either the source or this reader still fails the probe.
 #
 # WHY A GENERATOR (and not a checked-in .fl)
-#   The probe source is >256 KiB, most of it 20000 identical statements.  Storing it in the
-#   repo would add a quarter-megabyte of noise to git and to every directory listing, so the
-#   oversized source is generated at run time under %TEMP% and never enters the repository.
+#   The probe source is >256 KiB, most of it thousands of identical statements.  Storing it
+#   in the repo would add a quarter-megabyte of noise to git and to every directory listing,
+#   so the oversized source is generated at run time under %TEMP% and never enters the
+#   repository.
 #
 # WHAT IT ASSERTS (all expected values computed here, nothing hand-typed)
-#   leg A: 262143 bytes (= 262144 - 1, the largest readable source) -> flint.exe compiles,
+#   leg A: cap-1 bytes (the largest readable source) -> hlc.exe compiles,
 #          the produced program exits with the statement count; boot\b1_emit.exe compiles
-#          the SAME source without complaint (proves the threshold is exactly 262144, not
+#          the SAME source without complaint (proves the threshold is exactly cap, not
 #          "big files in general").
-#   leg B: exactly 262144 bytes (the cap itself)                -> flint.exe still compiles and
+#   leg B: exactly cap bytes (the cap itself)                -> hlc.exe still compiles and
 #          the produced program still exits with the statement count; boot\b1_emit.exe
 #          REFUSES LOUDLY: stdout/stderr contains "err=-3" and its exit code is 3.
 #          It must NOT produce an .exe.
 #   The two legs differ by ONE byte, so together they pin the threshold exactly: whatever
-#   number the cap is moved to, one of them turns red.
+#   number the cap is moved to (in the source), one of them turns red if the reader drifts.
 #
 # WHY THE STATEMENTS ARE CHUNKED (and not 20000 flat ones)
 #   boot also has a per-block ceiling: parse_block() buffers a block's DIRECT child statements
 #   in `int tmp[512]` (boot\lib_parse.fl) and returns -101 at the 512th (measured 2026-10-15:
 #   510 x-statements + `return x;` = 511 children compiles, 511 + `return` = 512 children is
-#   refused).  A flat ~20000-statement body therefore dies of -101 long before the 262144-byte
-#   file ceiling this script is about.  Every $chunk statements are wrapped in their own nested
+#   refused).  A flat ~20000-statement body therefore dies of -101 long before the per-file
+#   source-size ceiling this script is about.  Every $chunk statements are wrapped in their own nested
 #   block instead, which resets that counter per block and leaves the program's meaning alone.
 #
 # USAGE (ASCII only, no BOM; run it with the same interpreter as every other fact probe):
@@ -47,10 +55,20 @@ $ErrorActionPreference = 'Stop'
 
 $factsDir = $PSScriptRoot
 $lab      = Split-Path (Split-Path $factsDir -Parent) -Parent          # E:\FLINT-lab
-$flintExe = Join-Path $lab 'flint.exe'
+$flintExe = Join-Path $lab 'hlc.exe'
 $bootExe  = Join-Path $lab 'boot\b1_emit.exe'
 $work     = Join-Path $env:TEMP 'dsh-assert\srclimit'
-$cap      = 262144          # the ceiling under test (boot\b1_emit.fl: VirtualAlloc(...,262144,...) + read_file(name, fbuf, 262144))
+# The ceiling under test = the per-file read buffer in boot\b1_emit.fl.  Read it from the
+# source instead of typing it twice (the 2026-11-01 move 262144 -> 524288 proved that a
+# hand-typed copy turns this probe into a false red against a deliberate capacity move).
+$emitSrc = Join-Path $lab 'boot\b1_emit.fl'
+$cap = 0
+if (Test-Path -LiteralPath $emitSrc) {
+    $mCap = Select-String -LiteralPath $emitSrc -Pattern 'read_file\(name,\s*fbuf,\s*([0-9]+)\)' -Encoding UTF8 |
+            Select-Object -First 1
+    if ($mCap -and $mCap.Matches.Count -ge 1) { $cap = [int]$mCap.Matches[0].Groups[1].Value }
+}
+if ($cap -le 0) { [Console]::Out.WriteLine('FAIL gen-srclimit: cannot read the read_file cap from boot\b1_emit.fl'); exit 1 }
 
 $script:Failed = 0
 function Say([string]$m) { [Console]::Out.WriteLine($m) }
@@ -86,7 +104,7 @@ function Invoke-Cap([string]$exe, [string[]]$argv) {
 # WHY THE STATEMENTS ARE CHUNKED: boot's parse_block buffers a block's DIRECT child statements
 # in `int tmp[512]` (boot\lib_parse.fl) and returns -101 when the 512th direct child is reached
 # (measured 2026-10-15: 511 children pass, 512 is refused) -- so ~20000 statements in one flat
-# block would hit THAT ceiling long before the 262144-byte file ceiling this probe is about.
+# block would hit THAT ceiling long before the per-file source-size ceiling this probe is about.
 # Wrapping every $chunk statements in their own nested block keeps every block far under 512 and
 # leaves the program's meaning untouched (nesting blocks scopes nothing here; x stays the outer
 # local).  The chunk size is derived from the 512 figure rather than typed in a second time.
@@ -168,7 +186,7 @@ Say ("leg A bytes=" + $a.Bytes + " stmts=" + $a.Stmts + " expect_program_exit=" 
 
 $fa = Compile-One $flintExe $a.Path
 Say ("  flint compile exit=" + $fa.Code + " exe=" + $fa.ExeExists + " :: " + $fa.Out)
-if ($fa.Code -ne 0 -or -not $fa.ExeExists) { Fail 'leg A: real flint must compile a 262143-byte source' }
+if ($fa.Code -ne 0 -or -not $fa.ExeExists) { Fail ('leg A: real flint must compile a ' + ($cap - 1) + '-byte source') }
 else {
     $ra = Run-Program $fa.Exe
     Say ("  flint program exit=" + $ra.Code)

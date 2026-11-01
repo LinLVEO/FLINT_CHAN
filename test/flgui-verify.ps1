@@ -4,6 +4,10 @@
 #   且要证明"同一份源码在两个编译器下产出行为逐字节一致"。总门（test\verify-all.ps1）里没有"stdout 快照基线"这种步骤，
 #   所以 FLGUI 自建一道门（与 test\loop-verify.ps1 同级）；样本本身**同时**注册进总门的 regress / 差分门 / boot 门。
 #
+#
+# ⚠️ 2026-10-29 实测：**必须用 Windows PowerShell 5.1 跑**（powershell -NoProfile -File ...），
+#   不能用 pwsh 7 —— 基线与 dump 的编码不同（基线 UTF-16LE / pwsh 7 写 UTF-8），
+#   powershell 5.1 下 213/0 全绿，pwsh 7 下 20 条「与基线不一致」全是**编码差异**（内容逐行相等）。
 # 用法：
 #   pwsh -File test\flgui-verify.ps1                 # 跑门（无头内核样本 flgui1~flgui5 ＋ 真窗 app 无头 dump）
 #   pwsh -File test\flgui-verify.ps1 -WriteBaseline  # 重录基线（**只在你确认输出变化是有意的之后**）
@@ -65,14 +69,14 @@
 #   spacing 4 / line_h 14 / btn_h 20 / "OK" 2 字节）在 PowerShell 里独立算，不抄 dump 里的数。
 param(
     [switch]$WriteBaseline,
-    [string[]]$Samples = @('flgui1', 'flgui2', 'flgui3', 'flgui4', 'flgui5', 'flgui6', 'flgui7', 'flgui8', 'flgui9', 'flgui10', 'flgui11', 'flgui12', 'flgui13', 'flgui14', 'flgui15', 'flgui16', 'flgui17', 'flgui18'),
+    [string[]]$Samples = @('flgui1', 'flgui2', 'flgui3', 'flgui4', 'flgui5', 'flgui6', 'flgui7', 'flgui8', 'flgui9', 'flgui10', 'flgui11', 'flgui12', 'flgui13', 'flgui14', 'flgui15', 'flgui16', 'flgui17', 'flgui18', 'flgui19'),
     [switch]$SkipDemo
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $root = Split-Path -Parent $PSScriptRoot          # E:\FLINT-lab
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $boot = Join-Path $root 'boot\b1_emit.exe'
 $work = Join-Path $root 'tmp\flgui'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -163,7 +167,7 @@ function Invoke-DualEnd([string]$name, [string]$src, [string]$expect) {
   $db = Join-Path $work "dump-$name-boot.txt"
 
   # 真 flint 侧
-  $exeF = Join-Path $work "$name-flint.exe"
+  $exeF = Join-Path $work "$name-hlc.exe"
   Remove-Item $exeF -ErrorAction SilentlyContinue
   & $flint $src -o $exeF | Out-Null
   if ($LASTEXITCODE -ne 0) { Bad "真 flint 编译失败（exit=$LASTEXITCODE）" }

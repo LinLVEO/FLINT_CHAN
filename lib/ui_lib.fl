@@ -1,5 +1,5 @@
 // ui_lib.fl — FLINT-UI 库（2026-09-17 由 apps\m2_float\flint_ui.fl **提到 lib\**）
-//   「门面武器不该长在某个 app 里」——提法见 E:\FLINT-lab\概念池.md；原名 flint_ui.fl（v1.0.3 自 m2_float 抽出）
+//   「门面武器不该长在某个 app 里」——提法见 E:\FLINT-lab\notes\概念池.md；原名 flint_ui.fl（v1.0.3 自 m2_float 抽出）
 // 内容：自绘窗口工厂 + 通用 WNDPROC + 无边框拖动 + 数字/文本/矩形原语 + 图层表面（Surf）
 // 用法：应用顶部 `include "ui_lib.fl"`（免相对路径：先找本文件目录，再回退编译器自带 lib\ 与 ..\lib\）
 //   ⚠️ 本文件自己的 api 声明放在本文件顶部（实测可被 include 正常收集）；但 **app 专属**的 api 声明

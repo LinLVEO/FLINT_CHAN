@@ -1,3 +1,5 @@
+// ns7（负例，v2.4.0 改判）：同 ns6 —— 值字段已支持，本条改测「**嵌套 struct 数组字段**」必须被拒：
+//   boot 专码 -200（与指针数组字段同码），真 flint 报「struct 值字段暂不支持数组形态」。
 struct Q { int x; }
-struct P { struct Q q; }
+struct P { struct Q q[2]; }
 int main() { return 0; }

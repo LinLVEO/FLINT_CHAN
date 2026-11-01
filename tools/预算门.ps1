@@ -3,7 +3,8 @@
 #    purpose, so the ASCII-contract gate test\verify-all.ps1 can call it. This script builds
 #    every CJK path it needs from code points; see the path block below.)
 #
-# WHY A BASELINE GATE AND NOT AN ABSOLUTE ONE (decided by the main agent, 2026-10-13):
+# WHY TWO LAYERS (2026-10-31: layer 2 added because layer 1 alone let a real overrun through):
+#   Layer 1 -- REGRESSION vs the recorded baseline (decided by the main agent, 2026-10-13):
 #   The two budget meters (tools\ "import budget" and tools\ "boot headroom") can each be RED for
 #   a state that is not a regression:
 #     * apps\m2_float\m2_float.exe currently sits at 96/96 imports and 8/8 modules -- a freshly
@@ -36,18 +37,75 @@
 #   * the status quo is ALWAYS printed loudly: an at-cap product and a 0-headroom boot table each
 #     get a WARN line, so "we are out of budget" stays visible without being a false red.
 #
+#   Layer 2 -- ABSOLUTE over-the-soft-budget check (2026-10-31). WHY IT HAD TO EXIST: layer 1 cannot
+#   see an over-budget status quo, because a baseline merely records whatever was true when it was
+#   written. Measured on 2026-10-31: apps\studio_native\studio_win.exe = 103 imports against the
+#   96 soft budget read from src\pe.c, and this gate was GREEN -- 103 was just what the baseline had
+#   recorded on 2026-10-28. "Nobody re-defined it" is not a verdict on whether it is acceptable.
+#   So: a FLINT-family product whose imports or module count EXCEEDS MAX_IMPORTS / MAX_GROUPS (those
+#   caps come from the import meter, which reads them out of src\pe.c on every run; the numbers
+#   quoted below are dated measurements, never thresholds) is
+#   RED unless an ATTRIBUTED exception in the whitelist below covers that exact count.
+#   AT the cap (== MAX_IMPORTS, or == MAX_GROUPS) is NOT over: it stays a loud WARN. Since
+#   2026-10-24 the compiler allocates the import table by actual use, so 96 is a ledger ruler, not a
+#   wall; a product at 96/96 still compiles. Only a product that spends MORE than the ledger says it
+#   may is a violation. Module overage and import overage are treated the same way.
+#
+# THE WHITELIST -- an exception LEDGER, not a silencer:
+#   file    : test\<CJK "budget whitelist">.json   (default; override with -Whitelist <path>)
+#   schema  : { "Schema": 1,
+#               "Entries": [ { "Artifact": "apps\\x\\y.exe", "Imports": 103, "Modules": 6,
+#                              "Why":   "why it is over and why this app cannot shrink alone",
+#                              "Owner": "who owns paying it back",
+#                              "Due":   "when it is paid back (a date, or a trigger such as
+#                                        'before the next API is added to this app')",
+#                              "Evidence": "optional pointer to the measurement / memo" } ] }
+#   Artifact is the same relative path the meter prints (backslashes). Why / Owner / Due are the
+#   "attribution comment" JSON cannot carry -- they are REQUIRED, and the gate refuses the file if
+#   any of them is empty. Edit this file by hand on purpose: writing the three fields is the point.
+#   RULES (all RED, none of them silent):
+#     * an over-cap product with no entry             -> RED (the case this layer exists for).
+#     * an entry whose counts differ from the product -> RED (grew = regression; shrank = re-record,
+#       the same both-directions rule as layer 1).
+#     * an entry whose product is back inside the cap -> RED (stale exception: delete it, otherwise
+#       it silently pre-authorises the next regression up to the old ceiling).
+#     * Why / Owner / Due empty, duplicate Artifact, unreadable / non-JSON file, no Entries array
+#                                                     -> RED (gate exits 1; a broken ledger is not
+#       "no exceptions" -- it must never be read as a green).
+#     * an entry whose artifact is absent now          -> WARN only (gitignored build products come
+#       and go, exactly like the baseline's "gone" rule).
+#     * whitelist file absent                          -> treated as empty; nothing is excused by
+#       accident, so if a product is over it is RED anyway.
+#   A whitelisted product is STILL printed loudly on every run with its numbers and its Why/Owner/
+#   Due, so the debt stays visible. Adding an entry is a recorded decision: say why in the commit.
+#
 # Recording / re-recording (a re-record is a counting-rule change -- say why, and say it in the commit):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\<this file> -UpdateBaseline -Reason "why"
 #   Keep the reason ASCII if you want the baseline JSON to stay pure ASCII; non-ASCII characters
 #   are written as \uXXXX escapes (still valid JSON, still byte-ASCII on disk).
+#   Recording a baseline does NOT create a whitelist entry: a baseline says "this is the number",
+#   the whitelist says "and we accept that this number is over the ledger". They are different
+#   decisions and both must be made explicitly.
 #
-# Exit codes: 0 = every recorded number matches the baseline | 1 = a difference, a missing baseline,
-# or a recorder failure | 2 = this gate itself could not run.
+# Other switches:
+#   -Whitelist <path>   use another exception ledger (default: test\<CJK budget whitelist>.json).
+#                       Handy for the reverse self-test: point it at an empty file and the current
+#                       over-budget product must go RED.
+#   -Exe <path>...      meter only the given artifact(s) instead of every apps\**\*.exe. Use it to
+#                       ask "is THIS product over?", or to point the gate at a freshly built probe.
+#                       Products recorded in the baseline but not metered now are WARN ("gone"), and
+#                       whitelist entries for them are WARN ("unused") -- never a red.
+#
+# Exit codes: 0 = every recorded number matches the baseline AND no product is over the soft budget
+# unless whitelisted | 1 = a difference, a missing baseline, a broken whitelist, or a recorder
+# failure | 2 = this gate itself could not run.
 # ASCII only.
 
 param(
   [string]$Root = '',
   [string]$Baseline = '',
+  [string]$Whitelist = '',
+  [string[]]$Exe = @(),
   [switch]$UpdateBaseline,
   [string]$Reason = '',
   [switch]$Json
@@ -66,15 +124,18 @@ $rootFull = [IO.Path]::GetFullPath($Root)
 $importTool = Join-Path $rootFull ('tools\' + [char]0x5BFC + [char]0x5165 + [char]0x9884 + [char]0x7B97 + '.ps1')
 $bootTool = Join-Path $rootFull ('tools\boot' + [char]0x4F59 + [char]0x91CF + '.ps1')
 if ($Baseline -eq '') { $Baseline = Join-Path $rootFull ('test\' + [char]0x9884 + [char]0x7B97 + [char]0x57FA + [char]0x7EBF + '.json') }
+# whitelist = "test\" + U+9884 U+7B97 U+767D U+540D U+5355 + ".json"    (CJK: budget whitelist)
+if ($Whitelist -eq '') { $Whitelist = Join-Path $rootFull ('test\' + [char]0x9884 + [char]0x7B97 + [char]0x767D + [char]0x540D + [char]0x5355 + '.json') }
 $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File')
 
 function Write-Line([string]$s) { Write-Host $s }
 
-function Run-Instrument([string]$label, [string]$tool) {
+function Run-Instrument([string]$label, [string]$tool, [string[]]$extra = @()) {
   if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
     return [pscustomobject]@{ Label = $label; Tool = $tool; Ran = $false; Exit = -1; Json = $null; Note = "missing instrument: $tool" }
   }
-  $t = & powershell @psArgs @($tool, '-Json') 2>&1
+  $callArgs = @($tool, '-Json') + $extra
+  $t = & powershell @psArgs @callArgs 2>&1
   $c = $LASTEXITCODE
   if ($null -eq $c) { $c = 1 }
   $text = (@($t) -join [string][char]10)
@@ -85,7 +146,9 @@ function Run-Instrument([string]$label, [string]$tool) {
   return [pscustomobject]@{ Label = $label; Tool = $tool; Ran = $true; Exit = $c; Json = $obj; Note = $text }
 }
 
-$imp = Run-Instrument 'import-budget' $importTool
+$impExtra = @()
+if ($Exe.Count -gt 0) { $impExtra = @('-Exe') + @($Exe) }
+$imp = Run-Instrument 'import-budget' $importTool $impExtra
 $boot = Run-Instrument 'boot-headroom' $bootTool
 $fatal = New-Object System.Collections.ArrayList
 
@@ -117,6 +180,55 @@ if ($imp.Json -ne $null) {
   }
   $products = @($products | Sort-Object -Property Artifact)
 }
+
+# ---- layer 2 inputs: which FLINT products are OVER the soft budget, and the exception ledger ----
+$prodByArt = @{}
+foreach ($p in $products) { $prodByArt[$p.Artifact] = $p }
+$overNow = @()
+if ($maxImports -gt 0) {
+  $overNow = @($products | Where-Object { $_.Imports -gt $maxImports -or $_.Groups -gt $maxGroups })
+}
+$wlEntries = @()
+$wlByArt = @{}
+$wlPresent = Test-Path -LiteralPath $Whitelist -PathType Leaf
+if ($wlPresent) {
+  $wlRoot = $null
+  try { $wlRoot = [IO.File]::ReadAllText($Whitelist, [Text.Encoding]::UTF8) | ConvertFrom-Json } catch { }
+  if ($null -eq $wlRoot) {
+    [void]$fatal.Add('whitelist file is not valid JSON: ' + $Whitelist)
+  } elseif ($null -eq $wlRoot.Entries) {
+    [void]$fatal.Add('whitelist file has no Entries array: ' + $Whitelist)
+  } else {
+    foreach ($e in @($wlRoot.Entries)) {
+      if ($null -eq $e) { continue }
+      $art = [string]$e.Artifact
+      if ($art -eq '') { [void]$fatal.Add('whitelist has an entry with an empty Artifact'); continue }
+      if ($wlByArt.ContainsKey($art)) { [void]$fatal.Add('whitelist has two entries for ' + $art); continue }
+      $missing = @()
+      if ([string]$e.Why -eq '') { $missing += 'Why' }
+      if ([string]$e.Owner -eq '') { $missing += 'Owner' }
+      if ([string]$e.Due -eq '') { $missing += 'Due' }
+      if ($missing.Count -gt 0) {
+        [void]$fatal.Add(('whitelist entry {0} is missing {1} -- an exception must say why it is over, who owns it and when it is paid back' -f $art, ($missing -join ' / ')))
+        continue
+      }
+      if ($null -eq $e.Imports -or $null -eq $e.Modules) {
+        [void]$fatal.Add(('whitelist entry {0} needs numeric Imports and Modules (the frozen ceiling it excuses)' -f $art))
+        continue
+      }
+      $we = [pscustomobject]@{
+        Artifact = $art
+        Imports  = [int]$e.Imports
+        Modules  = [int]$e.Modules
+        Why      = [string]$e.Why
+        Owner    = [string]$e.Owner
+        Due      = [string]$e.Due
+      }
+      $wlEntries += $we
+      $wlByArt[$art] = $we
+    }
+  }
+}
 $bootNow = $null
 if ($boot.Json -ne $null) {
   $bootNow = [pscustomobject]@{
@@ -130,13 +242,22 @@ if ($boot.Json -ne $null) {
   }
 }
 
-# ---- loud status quo (never a red by itself) ----
+# ---- loud status quo (printing it never decides the verdict; the checks below do) ----
 $status = New-Object System.Collections.ArrayList
 foreach ($p in $products) {
+  $isOver = ($p.Imports -gt $maxImports -or $p.Groups -gt $maxGroups)
   $atCap = ($p.Imports -ge $maxImports -or $p.Groups -ge $maxGroups)
   $line = ('  {0,-42} imports {1,3}/{2}  modules {3}/{4}  {5}' -f $p.Artifact, $p.Imports, $maxImports, $p.Groups, $maxGroups, $p.Modules)
   [void]$status.Add($line)
-  if ($atCap) {
+  if ($isOver) {
+    $we = $wlByArt[$p.Artifact]
+    if ($null -ne $we) {
+      [void]$status.Add(('WHITELISTED OVER BUDGET {0} {1}/{2} imports, {3}/{4} modules -- why: {5}' -f $p.Artifact, $p.Imports, $maxImports, $p.Groups, $maxGroups, $we.Why))
+      [void]$status.Add(('  owner: {0}   due: {1}' -f $we.Owner, $we.Due))
+    } else {
+      [void]$status.Add(('OVER BUDGET {0} {1}/{2} imports, {3}/{4} modules -- no whitelist entry, this one is RED' -f $p.Artifact, $p.Imports, $maxImports, $p.Groups, $maxGroups))
+    }
+  } elseif ($atCap) {
     [void]$status.Add(('WARN {0} {1}/{2} imports, {3}/{4} modules -- AT LIMIT, needs attribution / budget re-layout' -f $p.Artifact, $p.Imports, $maxImports, $p.Groups, $maxGroups))
   }
 }
@@ -251,9 +372,36 @@ if (-not (Test-Path -LiteralPath $Baseline -PathType Leaf)) {
       if ([int]$bb.Func -ne $bootNow.Func) { [void]$diffs.Add(('boot table function definitions {0} -> {1}' -f [int]$bb.Func, $bootNow.Func)) }
       if ([string]$bb.App -ne $bootNow.App) { [void]$diffs.Add(('boot table target app {0} -> {1}' -f [string]$bb.App, $bootNow.App)) }
     }
-    Write-Line ''
-    Write-Line ('baseline      : {0}' -f $Baseline)
-    Write-Line ('  recorded    : {0}   reason: {1}' -f [string]$base.Recorded, [string]$base.Reason)
+    if (-not $Json) {
+      Write-Line ''
+      Write-Line ('baseline      : {0}' -f $Baseline)
+      Write-Line ('  recorded    : {0}   reason: {1}' -f [string]$base.Recorded, [string]$base.Reason)
+    }
+  }
+}
+
+# ---- layer 2: OVER the soft budget is RED unless an attributed exception covers the exact count ----
+$wlUsed = @{}
+if ($maxImports -gt 0) {
+  foreach ($p in $overNow) {
+    if ($wlByArt.ContainsKey($p.Artifact)) {
+      $we = $wlByArt[$p.Artifact]
+      $wlUsed[$p.Artifact] = $true
+      if ($we.Imports -ne $p.Imports -or $we.Modules -ne $p.Groups) {
+        [void]$diffs.Add(('{0}: {1} imports / {2} modules, but the whitelist excuses {3} / {4} -- re-justify the exception (more = regression, fewer = re-record)' -f $p.Artifact, $p.Imports, $p.Groups, $we.Imports, $we.Modules))
+      }
+    } else {
+      [void]$diffs.Add(('{0}: {1}/{2} imports, {3}/{4} modules -- OVER the soft budget (caps read from src\pe.c) and no whitelist entry; add an attributed entry to {5} or shrink the product' -f $p.Artifact, $p.Imports, $maxImports, $p.Groups, $maxGroups, $Whitelist))
+    }
+  }
+  foreach ($we in $wlEntries) {
+    if ($wlUsed.ContainsKey($we.Artifact)) { continue }
+    if (-not $prodByArt.ContainsKey($we.Artifact)) {
+      [void]$warns.Add(('whitelist entry for {0} is unused: that artifact is not present now (gitignored build product)' -f $we.Artifact))
+    } else {
+      $cp = $prodByArt[$we.Artifact]
+      [void]$diffs.Add(('{0}: the whitelist excuses {1} imports / {2} modules, but the product is now {3} imports / {4} modules -- it is not over the soft budget ({5}/{6} imports, {7}/{8} modules); delete the stale entry' -f $we.Artifact, $we.Imports, $we.Modules, $cp.Imports, $cp.Groups, $cp.Imports, $maxImports, $cp.Groups, $maxGroups))
+    }
   }
 }
 
@@ -266,6 +414,10 @@ if ($Json) {
     Diffs = @($diffs)
     Warns = @($warns)
     Products = @($products)
+    OverBudget = @($overNow)
+    WhitelistedOverBudget = @($overNow | Where-Object { $wlByArt.ContainsKey($_.Artifact) } | ForEach-Object { $_.Artifact })
+    Whitelist = $Whitelist
+    WhitelistPresent = $wlPresent
     Foreign = @($foreign | ForEach-Object { [string]$_.Artifact })
     BootTable = $bootNow
     Baseline = $Baseline
@@ -277,9 +429,9 @@ if ($Json) {
 }
 
 Write-Line ''
-Write-Line '===== budget gate (regression vs recorded baseline) ====='
+Write-Line '===== budget gate (regression vs baseline + absolute over-soft-budget check) ====='
 Write-Line ''
-Write-Line 'current status (printed loudly, never a red by itself):'
+Write-Line 'current status (the OVER BUDGET lines below are the ones layer 2 acts on):'
 foreach ($s in $status) { Write-Line $s }
 Write-Line ''
 Write-Line ('meter exits   : import-budget={0} boot-headroom={1}' -f $imp.Exit, $boot.Exit)
@@ -288,6 +440,8 @@ if ($base -ne $null) {
 } else {
   Write-Line ('baseline      : {0}  (MISSING or unreadable)' -f $Baseline)
 }
+Write-Line ('whitelist     : {0}  ({1} entries; over-cap total {2}, whitelisted {3})' -f $Whitelist, $wlEntries.Count, $overNow.Count, $wlUsed.Count)
+if (-not $wlPresent) { Write-Line 'whitelist     : file absent -- nothing is excused; any over-budget product is RED' }
 Write-Line ''
 if ($warns.Count -gt 0) {
   foreach ($w in $warns) { Write-Line ('WARN ' + $w) }
@@ -297,7 +451,7 @@ if ($fatal.Count -gt 0) {
   foreach ($f in $fatal) { Write-Line ('RED  ' + $f) }
 }
 if ($diffs.Count -gt 0) {
-  Write-Line 'RED  the budget account CHANGED vs the recorded baseline (both directions are red on purpose):'
+  Write-Line 'RED  the budget account is not acceptable (a baseline number changed, and/or a product is over the soft budget without an attributed exception):'
   foreach ($d in $diffs) { Write-Line ('       ' + $d) }
 }
 if ($red) {
@@ -305,9 +459,11 @@ if ($red) {
   Write-Line 'RED budget gate. If the change is intentional, re-record it and say why in the commit:'
   Write-Line ('  powershell -NoProfile -ExecutionPolicy Bypass -File tools\budget-gate.ps1 -UpdateBaseline -Reason "<why>"')
   Write-Line ('  baseline file: ' + $Baseline)
+  Write-Line ('If a product is OVER the soft budget on purpose, add an ATTRIBUTED entry (Why / Owner / Due) to:')
+  Write-Line ('  whitelist file: ' + $Whitelist)
   Write-Line ('budget gate: RED; boot table occupied {0} / {1}' -f $(if ($bootNow -eq $null) { '?' } else { $bootNow.Occupied }), $(if ($bootNow -eq $null) { '?' } else { $bootNow.Limit }))
   exit 1
 }
-Write-Line ('OK   budget gate: {0} products match the baseline, boot table {1}/{2} (headroom {3}).' -f $products.Count, $bootNow.Occupied, $bootNow.Limit, $bootNow.Headroom)
-Write-Line ('budget gate: GREEN; {0} products match the baseline; boot table {1} / {2}' -f $products.Count, $bootNow.Occupied, $bootNow.Limit)
+Write-Line ('OK   budget gate: {0} products match the baseline; no un-whitelisted product is over the soft budget; boot table {1}/{2} (headroom {3}).' -f $products.Count, $bootNow.Occupied, $bootNow.Limit, $bootNow.Headroom)
+Write-Line ('budget gate: GREEN; {0} products match the baseline, {1} whitelisted over-budget exception(s); boot table {2} / {3}' -f $products.Count, $wlUsed.Count, $bootNow.Occupied, $bootNow.Limit)
 exit 0

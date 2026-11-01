@@ -1,0 +1,14 @@
+// apps\audio_probe.fl -- M6 音频：PlaySoundA 异步播 apps\beep.wav
+//
+// 运行：hlc run apps\audio_probe.fl（能听见 440Hz 提示音约 0.2 秒）
+// 判据：退出码 0 = 播放+停止都成功；1 = 播放失败（文件缺失/winmm 不可用）。
+include "../lib/audio.fl"
+
+int main() {
+  int t0 = 0;
+  if (audio_play("apps/beep.wav") != 1) { return 1; }
+  t0 = GetTickCount();
+  while (GetTickCount() - t0 < 800) { }
+  audio_stop();
+  return 0;
+}

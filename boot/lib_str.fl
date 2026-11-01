@@ -1,5 +1,7 @@
 // lib_str.fl — boot 内建 str([段, ...]) 的支撑库（用到 str 时 boot 在 lib_print.fl **之后**注入）
-// 与真 flint（src/main.c 的 LIB_STR_SRC 分块）**逐条同口径**：
+//   v2.3.x（2026-10-24）：同一个文件还提供 str_into(dst[, cap], [...]) 的收尾函数 _flint_str_end_to
+//   （拼接照旧走 _flint_str_begin / _flint_str_put_*，收尾一次性拷进调用方的 dst）。
+//   与真 flint（src/main.c 的 LIB_STR_SRC 分块）**逐条同口径**：
 //   ① `_flint_str_begin()` 开一次拼接（sink=1、长度归零、超限标记清零）；重入时闩住并置失败标记。
 //   ② `_flint_str_put_*` 是段的追加器：**只调** lib_print.fl 的 _flint_out_*（⇒ 段类型分派与 print 一致）。
 //   ③ `_flint_str_end()` 关掉 sink 并把缓冲地址（失败时 0）交给表达式。
@@ -23,6 +25,31 @@ char *_flint_str_end() {
   _flint_pending = 0;
   if (_flint_bufovf != 0) { return 0; }
   return _flint_buf;
+}
+
+// v2.3.x（2026-10-24）：str_into(dst[, cap], [...]) 的收尾 —— 逐条照抄真 flint（src\main.c :440-453）。
+//   拼接仍在静态缓冲 _flint_buf 里做（begin/put_* 全套照跑），这里**一次性**拷进调用方的 dst：
+//   ① 先调 _flint_str_end() 把 sink 关掉（**无论成败都要关**；此顺序与真 flint 一致）；
+//   ② dst == 0 / cap < 1 ⇒ 返回 0（dst 不可写，当然不写 dst[0]）；
+//   ③ 拼接本身失败（r == 0）⇒ dst[0] = 0 且返回 0；
+//   ④ 放不下（内容长度 > cap-1）⇒ dst[0] = 0 且返回 0 —— **绝不静默截断**；
+//   ⑤ 成功 ⇒ 补结尾 0 并返回 dst。
+//   cap 是**含结尾 0 的总字节数**。自引用天然安全：段读的是调用方那块，写的是 _flint_buf，永不重叠。
+//   ⚠️ 位置在 _flint_str_end **之后**：boot 没有函数前向引用（真 flint 是整表预登记，故那边可以写在前面）。
+//   ⚠️ 端差（诚实记账）：真 flint 的 _flint_buf 上限是 FLINT_STRBUF_CAP，boot 这边写死 4096（见文件头）。
+char *_flint_str_end_to(char *dst, int cap) {
+  char *r = _flint_str_end();
+  int i = 0;
+  if (dst == 0) { return 0; }
+  if (cap < 1) { return 0; }
+  if (r == 0) { dst[0] = 0; return 0; }
+  while (i < _flint_buflen) {
+    if (i >= cap - 1) { dst[0] = 0; return 0; }
+    dst[i] = _flint_buf[i];
+    i = i + 1;
+  }
+  dst[i] = 0;
+  return dst;
 }
 
 int _flint_str_put_str(char *s) {

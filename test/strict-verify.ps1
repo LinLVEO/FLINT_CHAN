@@ -30,8 +30,8 @@ param(
 $ErrorActionPreference = 'Continue'
 $test = $PSScriptRoot
 $root = Split-Path $test -Parent
-if (-not $Flint) { $Flint = Join-Path $root 'flint.exe' }
-if (-not (Test-Path $Flint)) { Write-Host "[!] flint.exe not found: $Flint"; exit 2 }
+if (-not $Flint) { $Flint = Join-Path $root 'hlc.exe' }
+if (-not (Test-Path $Flint)) { Write-Host "[!] hlc.exe not found: $Flint"; exit 2 }
 $sampleDir = Join-Path $test 'strict-samples'
 $corpus    = Join-Path $test 'samples'
 $work      = Join-Path $test 'tmp\strictgate'

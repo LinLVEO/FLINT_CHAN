@@ -64,7 +64,7 @@
 //    stronger half of the pin; `contains:` names the text a human reads in the ledger)
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f026_addr_diff_print.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\SPEC.md
 //   (context pin for the same expression, byte-stepping rule: E:\FLINT-lab\test\facts\f025_ptr_arith.fl)
 //

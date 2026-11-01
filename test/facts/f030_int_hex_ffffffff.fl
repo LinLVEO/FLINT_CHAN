@@ -26,7 +26,7 @@
 //   criterion: contains -> hex=-1
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f030_int_hex_ffffffff.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\tokenize.c;E:\FLINT-lab\boot\lib_token.fl
 //
 // ASCII only, no BOM. No includes. Exits 42 when the in-language assertion holds, 7 otherwise.

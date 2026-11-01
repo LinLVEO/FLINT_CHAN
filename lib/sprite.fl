@@ -1,0 +1,109 @@
+// sprite.fl -- 精灵绘制（M2 第一版）：调色板索引表 -> GfxBuf
+//
+// 用法：include "sprite.fl"（它会带进 gfx.fl）
+// 数据来自 tools\sprite2fl.js 生成的 lib\sprite_data.fl（<name>_load(int *buf)）。
+// 约定：像素值 0 = 透明（跳过不画），1..ncol-1 = pal 索引。
+include "gfx.fl"
+
+// 填默认 6 色调色板（工单 §四，索引 0 留空/透明）。返回色数（7：0..6）。
+int sprite_pal_fill(int *pal) {
+  pal[0] = 0;
+  pal[1] = 0x000B0E1A;
+  pal[2] = 0x001B2340;
+  pal[3] = 0x00E8F0FF;
+  pal[4] = 0x007FD8E8;
+  pal[5] = 0x00E8663C;
+  pal[6] = 0x00F2C14E;
+  return 7;
+}
+
+// 把 data 里第 frame 帧画到 (x,y)。调色板索引 0 = 透明跳过。
+// 返回实际写入像素数（越界像素由 gfx_px 丢弃）。
+int sprite_blit(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol) {
+  int fx = 0;
+  int fy = 0;
+  int v = 0;
+  int n = 0;
+  int base = 0;
+  if (data == 0) { return 0; }
+  if (pal == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  base = frame * w * h;
+  while (fy < h) {
+    fx = 0;
+    while (fx < w) {
+      v = data[base + fy * w + fx];
+      if (v > 0) {
+        if (v < ncol) {
+          n = n + gfx_px(b, x + fx, y + fy, pal[v]);
+        }
+      }
+      fx = fx + 1;
+    }
+    fy = fy + 1;
+  }
+  return n;
+}
+
+// 放大 + 水平翻转（flip 非 0 时左右镜像）。x 仍是左边界，图占同一矩形。
+// 为什么单独一个函数：sprite_blit_scale 是 f089 的判据，改签名会动老探针。
+int sprite_blit_scale_flip(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol, int scale, int flip) {
+  int fx = 0;
+  int fy = 0;
+  int v = 0;
+  int n = 0;
+  int base = 0;
+  int dx = 0;
+  if (data == 0) { return 0; }
+  if (pal == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  if (scale <= 0) { return 0; }
+  base = frame * w * h;
+  while (fy < h) {
+    fx = 0;
+    while (fx < w) {
+      v = data[base + fy * w + fx];
+      if (v > 0) {
+        if (v < ncol) {
+          if (flip != 0) { dx = w - 1 - fx; } else { dx = fx; }
+          n = n + gfx_rect(b, x + dx * scale, y + fy * scale, x + (dx + 1) * scale, y + (fy + 1) * scale, pal[v]);
+        }
+      }
+      fx = fx + 1;
+    }
+    fy = fy + 1;
+  }
+  return n;
+}
+
+// 放大绘制：每个精灵像素画成 scale×scale 的方块（scale=1 等同 sprite_blit）。
+// 为什么不用 surf_alpha：游戏画面 1:1 直贴，放大是整数倍、不会糊。
+int sprite_blit_scale(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol, int scale) {
+  int fx = 0;
+  int fy = 0;
+  int v = 0;
+  int n = 0;
+  int base = 0;
+  if (data == 0) { return 0; }
+  if (pal == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  if (scale <= 0) { return 0; }
+  base = frame * w * h;
+  while (fy < h) {
+    fx = 0;
+    while (fx < w) {
+      v = data[base + fy * w + fx];
+      if (v > 0) {
+        if (v < ncol) {
+          n = n + gfx_rect(b, x + fx * scale, y + fy * scale, x + (fx + 1) * scale, y + (fy + 1) * scale, pal[v]);
+        }
+      }
+      fx = fx + 1;
+    }
+    fy = fy + 1;
+  }
+  return n;
+}

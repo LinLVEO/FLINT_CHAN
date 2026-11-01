@@ -1,0 +1,70 @@
+// f096_slashfx.fl -- 刀光特效池（2026-11-01）：多实例、寿命、两条弧时序、朝向镜像
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  slashfx_life() == 12
+//   bit1  池里空槽启动 -> f[0].t == 12
+//   bit2  第二次启动 -> f[1].t == 12
+//   bit3  池满（第 4 次）-> 顶掉 0 号，三槽都活着
+//   bit4  pool_tick 一帧 -> 三槽都 -1
+//   bit5  t=11（st=1）-> 每实例只画白弧，共 3 条
+//   bit6  t=10（st=2）-> 每实例白+青，共 6 条
+//   bit7  face=0 时镜像：所有采样点都在中心左侧（max x <= 100）
+include "../../lib/slashfx.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  struct SlashFx f[3];
+  struct Particle ps[16];
+  int mask = 0;
+  int i = 0;
+  int c = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 200; s.bh = 200; s.cw = 200; s.ch = 200;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 200, 200) == 0) { return 2; }
+
+  i = 0;
+  while (i < 3) { f[i].t = 0; f[i].x = 0; f[i].y = 0; f[i].face = 1; i = i + 1; }
+
+  if (slashfx_life() == 12) { mask = mask | 1; }
+
+  slashfx_pool_start(f, 3, 100, 100, 1);
+  if (f[0].t == 12) { mask = mask | 2; }
+  slashfx_pool_start(f, 3, 100, 100, 1);
+  if (f[1].t == 12) { mask = mask | 4; }
+  slashfx_pool_start(f, 3, 100, 100, 1);
+  slashfx_pool_start(f, 3, 100, 100, 1);
+  if (f[0].t == 12 && f[1].t == 12 && f[2].t == 12) { mask = mask | 8; }
+
+  slashfx_pool_tick(f, 3);
+  if (f[0].t == 11 && f[1].t == 11 && f[2].t == 11) { mask = mask | 16; }
+
+  gfx_clear(&b, 0x00000000);
+  c = slashfx_pool_draw(&b, f, 3, ps, 16, 0, 0);
+  if (c == 3) { mask = mask | 32; }
+
+  slashfx_pool_tick(f, 3);
+  c = slashfx_pool_draw(&b, f, 3, ps, 16, 0, 0);
+  if (c == 6) { mask = mask | 64; }
+
+  f[1].t = 0;
+  f[2].t = 0;
+  gfx_clear(&b, 0x00000000);
+  slashfx_pool_start(f, 3, 100, 100, 0);
+  slashfx_pool_draw(&b, f, 3, ps, 16, 0, 0);
+  c = 0;
+  i = 0;
+  while (i < s3_px_n) {
+    if (s3_px_x[i] > c) { c = s3_px_x[i]; }
+    i = i + 1;
+  }
+  if (c <= 100) { mask = mask | 128; }
+
+  print(["f096 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

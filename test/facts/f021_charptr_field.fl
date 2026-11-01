@@ -45,7 +45,7 @@
 //   row B: powershell -NoProfile -ExecutionPolicy Bypass -File "E:\FLINT-lab\test\facts\facts-run.ps1" -Probe f021_charptr_field -Compiler boot
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f021_charptr_field.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\boot\lib_parse.fl
 //   (the owner may also list SPEC.md, since it is the authority for "boot is the odd end"; it is left
 //    out here to keep the dependency shape identical to the existing rows)

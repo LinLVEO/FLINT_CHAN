@@ -1,0 +1,89 @@
+// slashfx.fl -- 刀光特效（NERO 引擎层，2026-11-01）
+//
+// 口径（2026-11-01 所有者）：判定要快（点了就出来）、连发间隔 0.1s，但**特效不是把长动画快放**：
+//   每次挥砍 = 一个独立的 SlashFx（生命 12 帧 ≈ 0.2s）；出现即满半径，随后分档淡出；
+//   0.1s 连发时多个实例叠着存在（池 3 个）⇒ 看起来是连续刀风，而不是闪一下就没。
+//
+//   struct SlashFx f[3];                        // 调用方建池
+//   slashfx_pool_start(f, 3, cx, cy, face);     // 释放瞬间
+//   slashfx_pool_draw(&b, f, 3, ps, 32, cam_x, 0);  // 每帧（画完再 tick）
+//   slashfx_pool_tick(f, 3);                    // 每帧末尾
+include "slash3d.fl"
+
+struct SlashFx { int t; int x; int y; int face; }
+
+int slashfx_life() { return 12; }
+
+int slashfx_start(struct SlashFx *f, int x, int y, int face) {
+  if (f == 0) { return 0; }
+  f->t = slashfx_life();
+  f->x = x;
+  f->y = y;
+  f->face = face;
+  return 1;
+}
+
+// 找空槽（t<=0）启动一个；全满则顶掉 0 号。
+int slashfx_pool_start(struct SlashFx *f, int n, int x, int y, int face) {
+  int i = 0;
+  if (f == 0) { return 0; }
+  while (i < n) {
+    if (f[i].t <= 0) { return slashfx_start(&f[i], x, y, face); }
+    i = i + 1;
+  }
+  return slashfx_start(&f[0], x, y, face);
+}
+
+int slashfx_tick(struct SlashFx *f) {
+  if (f == 0) { return 0; }
+  if (f->t > 0) { f->t = f->t - 1; }
+  return f->t;
+}
+
+int slashfx_pool_tick(struct SlashFx *f, int n) {
+  int i = 0;
+  if (f == 0) { return 0; }
+  while (i < n) { slashfx_tick(&f[i]); i = i + 1; }
+  return 0;
+}
+
+// 单实例绘制（i 是池里的下标，方便 pool 遍历时不取址）。
+int slashfx_draw_at(struct GfxBuf *b, struct SlashFx *f, int i, struct Particle *ps, int pn, int cam_x, int cam_y) {
+  int st = 0;
+  int sa = 0;
+  int n = 0;
+  if (f == 0) { return 0; }
+  if (b == 0) { return 0; }
+  if (f[i].t <= 0) { return 0; }
+  st = slashfx_life() - f[i].t;
+  // s3_arc 的弧天然画在中心右侧（角度 -88..88 的 cos>=0）⇒ face=0 时镜像到左侧。
+  if (f[i].face == 0) { s3_set_flip(1); } else { s3_set_flip(0); }
+  // 白弧：0..9 帧，前 3 帧满亮度，之后 7 帧线性淡出（不是整体快放）。
+  if (st < 10) {
+    sa = 255;
+    if (st >= 3) { sa = 255 - (st - 3) * 255 / 7; }
+    s3_arc(b, f[i].x, f[i].y - 10, 0, 48, -88, 88, 192, 0x00F0F0F0, sa, cam_x, cam_y, 0);
+    if (st < 3) { s3_emit_arc(ps, pn, 2, 3); }
+    n = n + 1;
+  }
+  // 青弧：晚 2 帧出现、0..10 帧，前 3 帧满、之后 6 帧淡出。
+  if (st >= 2 && st < 11) {
+    sa = 255;
+    if (st >= 5) { sa = 255 - (st - 5) * 255 / 6; }
+    s3_arc(b, f[i].x, f[i].y, 0, 50, -88, 88, 192, 0x007FD8E8, sa, cam_x, cam_y, 1);
+    if (st < 4) { s3_emit_arc(ps, pn, 2, 4); }
+    n = n + 1;
+  }
+  return n;
+}
+
+int slashfx_pool_draw(struct GfxBuf *b, struct SlashFx *f, int n, struct Particle *ps, int pn, int cam_x, int cam_y) {
+  int i = 0;
+  int c = 0;
+  if (f == 0) { return 0; }
+  while (i < n) {
+    c = c + slashfx_draw_at(b, f, i, ps, pn, cam_x, cam_y);
+    i = i + 1;
+  }
+  return c;
+}

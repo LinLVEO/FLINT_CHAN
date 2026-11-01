@@ -17,7 +17,7 @@
 #
 #   -Probe     <name>            probe base name in this directory (".fl" optional)
 #   -Compiler  flint|boot|oldboot
-#                                flint   = E:\FLINT-lab\flint.exe            (the real compiler)
+#                                flint   = E:\FLINT-lab\hlc.exe            (the real compiler)
 #                                boot    = E:\FLINT-lab\boot\b1_emit.exe       (the current bootstrap)
 #                                oldboot = a bootstrap built from an OLDER git revision
 #                                          (default cc06233~1 = the commit before v1.5.0);
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 
 $factsDir = $PSScriptRoot
 $lab      = Split-Path (Split-Path $factsDir -Parent) -Parent          # E:\FLINT-lab
-$flintExe = Join-Path $lab 'flint.exe'
+$flintExe = Join-Path $lab 'hlc.exe'
 $bootExe  = Join-Path $lab 'boot\b1_emit.exe'
 $libDir   = Join-Path $lab 'lib'
 $tmpRoot  = Join-Path $env:TEMP 'dsh-assert'
@@ -95,7 +95,7 @@ function Ensure-OldBoot() {
     if ($r.Code -ne 0) { Fail ('oldboot: worktree add failed: ' + $r.Err.Trim()); return '' }
     $oldSrc = Join-Path $wt 'boot\b1_emit.fl'
     if (-not (Test-Path $oldSrc)) { Fail 'oldboot: boot\b1_emit.fl missing in worktree'; return '' }
-    Say ("oldboot: compiling " + $oldSrc + " with the current flint.exe")
+    Say ("oldboot: compiling " + $oldSrc + " with the current hlc.exe")
     $r2 = Invoke-Cap $flintExe @($oldSrc)
     Say ("oldboot: flint exit=" + $r2.Code)
     if ($r2.Code -ne 0) { Fail ('oldboot: build failed: ' + $r2.Out.Trim()); return '' }

@@ -1,0 +1,71 @@
+// f082_save.fl -- M7 第一版：存档二进制序列化 + 校验 + 文件往返
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  pack 2 个 int -> 12 字节
+//   bit1  unpack 回来元素数 2 且值一致（7 与 -12345）
+//   bit2  魔数错（'F' 改 'X'）-> -1
+//   bit3  版本错（1 改 2）-> -1
+//   bit4  cap 不够（8 < 12）-> pack 返回 -1
+//   bit5  负数小端字节：-12345 = C7 CF FF FF（buf[8..11]）
+//   bit6  写文件 -> 读文件 -> unpack 一致
+//   bit7  截断 len=3 -> -1
+include "../../lib/save.fl"
+
+int main() {
+  int mask = 0;
+  int data[4];
+  int out[4];
+  char buf[64];
+  int len = 0;
+  int n = 0;
+
+  data[0] = 7;
+  data[1] = 0 - 12345;
+  data[2] = 999999;
+  data[3] = 0;
+
+  len = save_pack(buf, 64, data, 2);
+  if (len == 12) { mask = mask | 1; }
+
+  n = save_unpack(buf, len, out, 4);
+  if (n == 2) {
+    if (out[0] == 7) {
+      if (out[1] == -12345) { mask = mask | 2; }
+    }
+  }
+
+  buf[0] = 88;
+  if (save_unpack(buf, len, out, 4) == -1) { mask = mask | 4; }
+  buf[0] = 70;
+
+  buf[2] = 2;
+  if (save_unpack(buf, len, out, 4) == -1) { mask = mask | 8; }
+  buf[2] = 1;
+
+  if (save_pack(buf, 8, data, 2) == -1) { mask = mask | 16; }
+
+  if ((buf[8] & 255) == 199) {
+    if ((buf[9] & 255) == 207) {
+      if ((buf[10] & 255) == 255) {
+        if ((buf[11] & 255) == 255) { mask = mask | 32; }
+      }
+    }
+  }
+
+  len = save_pack(buf, 64, data, 2);
+  if (std::file_write("test/tmp/f082.sav", buf, len) == 1) {
+    n = std::file_read("test/tmp/f082.sav", buf, 64);
+    if (n == len) {
+      n = save_unpack(buf, n, out, 4);
+      if (n == 2) {
+        if (out[0] == 7) { mask = mask | 64; }
+      }
+    }
+  }
+
+  if (save_unpack(buf, 3, out, 4) == -1) { mask = mask | 128; }
+
+  print(["f082 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

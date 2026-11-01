@@ -1,0 +1,159 @@
+// apps\inserter\main.fl —— 万能插入板 v0.3：片段 = MC 常用指令
+// 交互：按住 Alt+Q（PostMessage）/ Alt+W（SendInput）→ 面板出现（不抢焦点）
+//       滚轮切换 → 松开 Alt 插入到唤起时的前台窗口 → 中键取消
+api kernel32 ptr GetModuleHandleA(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 int FillRect(int, int, int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api kernel32 void Sleep(int);
+api user32 int RegisterHotKey(int, int, int, int);
+api user32 int UnregisterHotKey(int, int);
+api user32 int GetForegroundWindow();
+api user32 int GetAsyncKeyState(int);
+api user32 int PostMessageW(int, int, int, int);
+api user32 int SendInput(int, int, int);
+api user32 int SetWindowPos(int, int, int, int, int, int, int);
+api user32 int SetLayeredWindowAttributes(int, int, int, int);
+
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct RECT { int l; int t; int r; int b; }
+
+int FRAGN = 5;
+int g_sel = 0;
+int g_last = -1;
+int g_visible = 0;
+int g_target = 0;
+int g_mode = 0;
+
+char *frag(int i) {
+  if (i == 0) { return "/gamemode creative"; }
+  if (i == 1) { return "/time set day"; }
+  if (i == 2) { return "/weather clear"; }
+  if (i == 3) { return "/give @s diamond 64"; }
+  if (i == 4) { return "/gamerule keepInventory true"; }
+  return "";
+}
+
+int slen(char *s) {
+  int n = 0;
+  while (s[n] != 0) { n = n + 1; }
+  return n;
+}
+
+int send_one(int target, int mode, int cp) {
+  if (mode == 0) { return PostMessageW(target, 0x0102, cp, 1); }
+  int buf[20];
+  buf[0] = 1; buf[1] = 0; buf[2] = cp << 16; buf[3] = 4;
+  buf[4] = 0; buf[5] = 0; buf[6] = 0; buf[7] = 0; buf[8] = 0; buf[9] = 0;
+  buf[10] = 1; buf[11] = 0; buf[12] = cp << 16; buf[13] = 6;
+  buf[14] = 0; buf[15] = 0; buf[16] = 0; buf[17] = 0; buf[18] = 0; buf[19] = 0;
+  return SendInput(2, &buf[0], 40);
+}
+
+int inject(int target, int mode, int sel) {
+  if (target == 0) { return 0; }
+  char *s = frag(sel);
+  int n = slen(s);
+  int i = 0;
+  while (i < n) {
+    send_one(target, mode, s[i]);
+    i = i + 1;
+  }
+  return 1;
+}
+
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x0F) { ValidateRect(hwnd, 0); return 0; }
+  if (msg == 0x207) { g_visible = 0; ShowWindow(hwnd, 0); return 0; }
+  if (msg == 0x20A) {
+    int d = (wp >> 16) & 0xFFFF;
+    if (d >= 0x8000) { d = d - 0x10000; }
+    if (d < 0) { g_sel = g_sel + 1; } else { g_sel = g_sel - 1; }
+    if (g_sel < 0) { g_sel = FRAGN - 1; }
+    if (g_sel >= FRAGN) { g_sel = 0; }
+    return 0;
+  }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int draw(int *h, int sel) {
+  struct RECT bg; bg.l = 0; bg.t = 0; bg.r = 360; bg.b = 260;
+  int *dc = GetDC(h);
+  FillRect(dc, &bg, GetStockObject(0));
+  int i = 0;
+  while (i < FRAGN) {
+    struct RECT r; r.l = 6; r.t = 6 + i * 44; r.r = 354; r.b = r.t + 40;
+    if (i == sel) { FillRect(dc, &r, GetStockObject(2)); }
+    char *s = frag(i);
+    TextOutA(dc, 14, r.t + 12, s, slen(s));
+    i = i + 1;
+  }
+  TextOutA(dc, 10, 236, "scroll select / release Alt insert / middle-click cancel", 55);
+  ReleaseDC(h, dc);
+  return 0;
+}
+
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = 0; wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTINSERT";
+  if (RegisterClassA(&wc) == 0) { return 90; }
+  // 0x8=TOPMOST | 0x8000000=NOACTIVATE | 0x80000=LAYERED（浮窗同款，盖全屏的关键） | 0x80=TOOLWINDOW
+  int exs = 0x8 + 0x8000000 + 0x80000 + 0x80;
+  int *h = CreateWindowExA(exs, "FLINTINSERT", "insert", 0x80000000, 700, 380, 360, 260, 0, 0, 0, 0);
+  if (h == 0) { return 91; }
+  SetLayeredWindowAttributes(h, 0, 255, 2);   // LWA_ALPHA：255 = 不透明
+  RegisterHotKey(0, 1, 0x4001, 0x51);
+  RegisterHotKey(0, 2, 0x4001, 0x57);
+  struct MSG m;
+  int running = 1;
+  int frames = 0;
+  while (running) {
+    while (PeekMessageA(&m, 0, 0, 0, 1) > 0) {
+      if (m.message == 0x10) { running = 0; }
+      if (m.message == 0x312) {
+        if (m.wparam == 2) { g_mode = 1; } else { g_mode = 0; }
+        g_target = GetForegroundWindow();
+        g_sel = 0;
+        g_last = -1;
+        g_visible = 1;
+        ShowWindow(h, 4);
+        SetWindowPos(h, -1, 0, 0, 0, 0, 0x13);   // HWND_TOPMOST | NOMOVE|NOSIZE|NOACTIVATE
+      }
+      DispatchMessageA(&m);
+    }
+    if (g_visible == 1) {
+      if ((GetAsyncKeyState(0x12) & 0x8000) == 0) {
+        inject(g_target, g_mode, g_sel);
+        g_visible = 0;
+        ShowWindow(h, 0);
+      } else if ((frames & 31) == 0) {
+        SetWindowPos(h, -1, 0, 0, 0, 0, 0x13);   // 每 32 帧再抢一次顶
+      }
+      if (g_sel != g_last) {
+        draw(h, g_sel);
+        g_last = g_sel;
+      }
+    }
+    frames++;
+    if (frames > 800000) { running = 0; }
+    Sleep(4);
+  }
+  UnregisterHotKey(0, 1);
+  UnregisterHotKey(0, 2);
+  return 0;
+}

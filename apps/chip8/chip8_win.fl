@@ -1,0 +1,152 @@
+// chip8_win.fl — CHIP-8 真窗前端（第二刀）：64×32 帧缓冲 ×10 放大上屏
+//   · 核心在 chip8_core.fl（无头自测在 chip8.fl，10 项位掩码 ⇒ 42）
+//   · ROM：优先读 `roms\demo.ch8`（相对工作目录）；读不到就用代码里内置的同一份演示程序
+//   · 键盘：1 2 3 4 / Q W E R / A S D F / Z X C V 对应 CHIP-8 的 16 键
+//   · 帧率 30（60fps 实测烧 ~45% 单核，30 只要 ~18%；大头是 ULW 上屏）
+include "chip8_core.fl"
+include "../../lib/flgui_win32.fl"
+include "../../lib/flgui_ai.fl"
+
+// 字符 → CHIP-8 键号（0..15；-1 = 不是键）
+int c8_char_key(int ch) {
+  if (ch == 0x31) { return 1; }
+  if (ch == 0x32) { return 2; }
+  if (ch == 0x33) { return 3; }
+  if (ch == 0x34) { return 0xC; }
+  if (ch == 0x71) { return 4; }      // q
+  if (ch == 0x77) { return 5; }      // w
+  if (ch == 0x65) { return 6; }      // e
+  if (ch == 0x72) { return 0xD; }    // r
+  if (ch == 0x61) { return 7; }      // a
+  if (ch == 0x73) { return 8; }      // s
+  if (ch == 0x64) { return 9; }      // d
+  if (ch == 0x66) { return 0xE; }    // f
+  if (ch == 0x7A) { return 0xA; }    // z
+  if (ch == 0x78) { return 0; }      // x
+  if (ch == 0x63) { return 0xB; }    // c
+  if (ch == 0x76) { return 0xF; }    // v
+  return -1;
+}
+
+// 演示程序（与 roms\demo.ch8 同字节）：清屏 → 画两行精灵 → 两轴各 +1 → 回跳
+int c8_demo_rom(char *mem) {
+  c8_poke2(mem, 0x200, 0x6000);      // V0 = 0
+  c8_poke2(mem, 0x202, 0x6100);      // V1 = 0
+  c8_poke2(mem, 0x204, 0xA300);      // I  = 0x300
+  c8_poke2(mem, 0x206, 0x00E0);      // cls
+  c8_poke2(mem, 0x208, 0xD012);      // draw V0,V1 2 行
+  c8_poke2(mem, 0x20A, 0x7001);      // V0 += 1
+  c8_poke2(mem, 0x20C, 0x7101);      // V1 += 1
+  c8_poke2(mem, 0x20E, 0x1206);      // jp 0x206
+  c8_wr(mem, 0x300, 0xC0);
+  c8_wr(mem, 0x301, 0x30);
+  return 0;
+}
+
+int main() {
+  struct GuiCtx c;
+  struct GuiInput in;
+  struct GuiWin g;
+  struct Surf sf;
+  struct C8 ch;
+  char mem[4096];
+  int fb[2048];
+  int *brw = 0;
+  int *brk = 0;
+  int S = 10;
+  int k = 0;
+  int y = 0;
+  int x = 0;
+  int kk = 0;
+  int nrom = 0;
+  int lasttick = 0;
+  int nowtick = 0;
+  int fc = 0;
+  int keyhold = 0;
+  int dtacc = 0;
+  int lastkk = -1;
+  char kb[8];
+  char st[8];
+
+  gui_init(&c);
+  gui_frame_set(&c, 30);
+  g.cls = "CHIP8SCR";
+  g.x = 260;
+  g.y = 160;
+  g.w = 64 * S;
+  g.h = 32 * S;
+  g.alpha = 255;
+  if (!gui_win_make_kbd(&g)) { return 90; }     // 键盘档：只有这一档真按键才翻得出 WM_CHAR
+  if (!gui_win_surf(&sf, &g, 0)) { return 91; }
+  gui_win_dpi_apply(&c);
+
+  brw = CreateSolidBrush(0x00E8F0FF);
+  brk = CreateSolidBrush(0x00080808);
+
+  c8_reset(&ch, mem, fb);
+  nrom = std::file_read("roms\\catch.ch8", mem + 0x200, 3584);   // 默认装载可玩的 catch 游戏
+  if (nrom <= 0) { nrom = std::file_read("roms\\demo.ch8", mem + 0x200, 3584); }
+  if (nrom <= 0) { c8_demo_rom(mem); }
+  lasttick = GetTickCount();
+
+  while (1) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }
+    gui_win_input(&g, &in);
+
+    // 键位走**物理轮询**（GetAsyncKeyState）：不依赖窗口是否拿到键盘焦点 ——
+    //   实测 ULW 窗口的 WM_CHAR 在真键盘下时有时无，轮询这条路才稳（同 FLGUI 自己的输入口径）。
+    if ((GetAsyncKeyState(0x41) & 0x8000) != 0) { ch.key = 7; keyhold = 2; }        // A
+    else if ((GetAsyncKeyState(0x44) & 0x8000) != 0) { ch.key = 9; keyhold = 2; }   // D
+    else if ((GetAsyncKeyState(0x51) & 0x8000) != 0) { ch.key = 4; keyhold = 2; }   // Q
+    else if ((GetAsyncKeyState(0x45) & 0x8000) != 0) { ch.key = 6; keyhold = 2; }   // E
+    if (ch.key != lastkk) { ai_ev(1, ch.key, keyhold); lastkk = ch.key; }
+
+    if (in.key != 0) {                          // 消费掉本帧字符（in.key 不清零会重复触发）
+      kk = c8_char_key(in.key);
+      if (kk >= 0) { ch.key = kk; ch.keynew = 1; keyhold = 6; }
+      in.key = 0;
+    }
+
+    // 定时器按**真实经过时间**扣：DT/ST 每 16ms 减 1。
+    //   原来"每帧减 1"会让帧速一变游戏速度就跟着变（按键盘时的抖动直接变成加速）。
+    nowtick = GetTickCount();
+    dtacc = dtacc + (nowtick - lasttick);
+    lasttick = nowtick;
+    while (dtacc >= 16) {
+      dtacc = dtacc - 16;
+      if (ch.dt > 0) { ch.dt = ch.dt - 1; }
+      if (ch.st > 0) { ch.st = ch.st - 1; }
+    }
+
+    // 每帧 30 条指令（30fps ⇒ ~900 条/秒，接近真 CHIP-8 的 500~700）；
+    //   预算给小了才是对的：ROM 里"等 DT"的循环会把预算烧完 ⇒ 一帧只走游戏循环一小步
+    k = 0;
+    while (k < 30) { c8_exec(&ch, mem, fb); k = k + 1; }
+
+    gwb_rect_fill(&sf, 0, 0, 64 * S, 32 * S, 0x00080808, 255, brk);
+    y = 0;
+    while (y < 32) {
+      x = 0;
+      while (x < 64) {
+        if (fb[y * 64 + x] != 0) {
+          gwb_rect_fill(&sf, x * S, y * S, x * S + S, y * S + S, 0x00E8F0FF, 255, brw);
+        }
+        x = x + 1;
+      }
+      y = y + 1;
+    }
+    // AI 可观测性：状态每帧、帧缓冲每 30 帧；抓帧交给外部工具（tools\flgui-ai.ps1 -Shot，
+    //   它抓的是玩家真看到的窗口；DIB 抓帧对走渲染管线的 app 无效，见 lib\flgui_ai.fl 头注释）。
+    ai_state(ch.v[0], ch.v[2], ch.v[3], ch.pc, ch.i, ch.dt, fc);
+    if (fc % 30 == 0) { ai_fb(fb, 64, 32); }
+    fc = fc + 1;
+
+    gui_win_show(&sf);
+    gui_win_frame_wait(&c);
+    if (keyhold > 0) {                          // 按住窗口：到期才松开（否则 ROM 那一拍读不到键）
+      keyhold = keyhold - 1;
+      if (keyhold == 0) { ch.key = -1; }
+    }
+  }
+  return 0;
+}

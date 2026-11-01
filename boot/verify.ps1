@@ -102,7 +102,7 @@
 $ErrorActionPreference = 'Stop'
 $bootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $bootDir
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $boot = Join-Path $bootDir 'b1_emit.exe'
 $parseExe = Join-Path $bootDir 'b1_parse.exe'
 $samples = Join-Path $bootDir 'samples'

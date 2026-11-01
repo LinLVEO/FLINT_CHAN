@@ -1,10 +1,10 @@
 // main.c — FLINT 编译器驱动（v0.2 野路子：源码 → 自产机器码 exe）
 // 用法：
-//   flint.exe -t <源文件>            词法分析，打印 token 流
-//   flint.exe <源文件>               编译成 exe（输出：同目录同名 .exe）
-//   flint.exe [-o 输出.exe] 文件1.fl [文件2.fl ...]   多文件编译（v1.0.3）
-//   flint.exe -safe <源>             安全模式（v0.9）：内存所有权强制——new 必须由 own/share 接管
-//   flint.exe --help                 用法
+//   hlc.exe -t <源文件>            词法分析，打印 token 流
+//   hlc.exe <源文件>               编译成 exe（输出：同目录同名 .exe）
+//   hlc.exe [-o 输出.exe] 文件1.fl [文件2.fl ...]   多文件编译（v1.0.3）
+//   hlc.exe -safe <源>             安全模式（v0.9）：内存所有权强制——new 必须由 own/share 接管
+//   hlc.exe --help                 用法
 //
 // v1.0.3 多文件编译 / include：
 //   - 命令行可传多个 .fl 文件，按序合并成一个编译单元（函数可跨文件调用/前向调用；
@@ -20,7 +20,50 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <windows.h>
+
 #include "flint.h"
+#include "slotmap.h"
+
+// v1.10.2（A2 最小切片）：-run —— 编译成功后立即运行产物，返回**程序自己的退出码**。
+//   开发者循环用：`hlc -run game.fl` 一条命令 编译+运行；脚本里可用退出码判成败。
+//   只读开关：不加 -run 时行为与从前逐字节相同（不改产物、不改退出码）。
+static int run_program(const char *exe_path) {
+  char cmd[4096];
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  ZeroMemory(&pi, sizeof(pi));
+  snprintf(cmd, sizeof(cmd), "\"%s\"", exe_path);
+  if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    fprintf(stderr, "hlc: 无法运行 %s（错误码 %lu）\n", exe_path, (unsigned long)GetLastError());
+    return -1;
+  }
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return (int)code;
+}
+
+// v1.10.5（A2 收尾，方案 B）：`hlc build` / `hlc run` 的产物路径 —— `build\<源文件基名>.exe`
+//   （相对**当前目录**；目录不存在就建）。`-o` 仍然覆盖这里。
+//   只影响显式写了 build/run 子命令时；普通 `hlc x.fl` 行为不变。
+static char *build_out_path(const char *src) {
+  static char buf[1024];
+  const char *base = src;
+  for (const char *q = src; *q; q++)
+    if (*q == '\\' || *q == '/') base = q + 1;
+  char name[512];
+  snprintf(name, sizeof(name), "%s", base);
+  size_t n = strlen(name);
+  if (n > 3 && strcmp(name + n - 3, ".fl") == 0) name[n - 3] = '\0';
+  CreateDirectoryA("build", NULL);   // 已存在则忽略
+  snprintf(buf, sizeof(buf), "build\\%s.exe", name);
+  return buf;
+}
 
 // 读整个文件到字符串。失败返回 NULL。
 static char *read_file(char *path) {
@@ -80,11 +123,13 @@ static char *default_out(char *src_path) {
 }
 
 static void usage(void) {
-  fprintf(stderr, "FLINT %s\n", FLINT_VERSION);
+  fprintf(stderr, "hlc %s\n", FLINT_VERSION);
   fprintf(stderr, "用法: flint [-t] [-safe] [-o 输出.exe] <源文件> [源文件...]\n");
   fprintf(stderr, "  -t         只做词法分析，打印 token 流\n");
   fprintf(stderr, "  -safe      安全模式：内存所有权强制——new 结果必须由 own/share 接管\n");
   fprintf(stderr, "  -o <路径>  指定输出 exe 路径\n");
+  fprintf(stderr, "  -run       编译成功后立即运行产物，hlc 返回程序自己的退出码（开发循环用）\n");
+  fprintf(stderr, "  子命令 build / run：hlc build <源> → build\\<名>.exe；hlc run <源> = build 后立即运行\n");
   fprintf(stderr, "  -admin     产物内嵌 manifest（requireAdministrator）：双击即请求管理员权限（用于读 MSR 这类要提权的程序）\n");
   fprintf(stderr, "  -gui       产物为 GUI 子系统（Subsystem=2）：双击不弹控制台黑窗；默认 3=CONSOLE\n");
   fprintf(stderr, "  -stats     打印按函数的发射统计（账本：指令数/栈槽访问/调用；不改产物）\n");
@@ -99,8 +144,10 @@ static void usage(void) {
   fprintf(stderr, "  -debug     产物携带「源码行 → 机器码地址」对照：\n");
   fprintf(stderr, "             ① 标准腿 = 三个 DWARF5 节（.debug_line + 最小 CU 的 .debug_info/.debug_abbrev）\n");
   fprintf(stderr, "                → objdump --dwarf=decodedline / addr2line / gdb 直接能读；\n");
-  fprintf(stderr, "             ② 私有腿 = 同源的 <输出>.tsv（补标准不提供的「字节区间 / 文件偏移 / 所属节」）。\n");
-  fprintf(stderr, "             默认关：不加节，产物与现在逐字节相同。\n");
+  fprintf(stderr, "             ② 私有腿 = 同源的 <输出>.tsv（补标准不提供的「字节区间 / 文件偏移 / 所属节」）；\n");
+  fprintf(stderr, "             ③ 变量/帧腿 = 同源的 <输出>.dbg.json（D-1 变量位置表 + D-3 帧表：\n");
+  fprintf(stderr, "                帧大小/返回地址偏移/保存寄存器/序言·尾声区间 + 局部量与形参的帧内槽位）。\n");
+  fprintf(stderr, "             默认关：不加节、不写旁文件，产物与现在逐字节相同。\n");
   fprintf(stderr, "  多文件     多个 .fl 合并编译；源文件可用 include \"路径.fl\" 拼接（相对本文件目录）\n");
 }
 
@@ -329,6 +376,60 @@ static const char *LIB_I64_STR_SRC =
   "  return 0;\n"
   "}\n";
 
+// ===== v1.9.0：无符号十进制格式化器（**按需注入**，同 D4 口径）=====
+// 与 _flint_out_int 的差别：**没有 neg 分支**（无符号永远非负），且取位是**无符号**除法/取模
+//   —— 这正是 `_flint_out_u32(uint_32 n)` 敢写 `n % 10` 的原因：形参类型无符号 ⇒
+//   本编译器把 `%` 发射成 `xor edx,edx; div`（而不是 cdq; idiv）。
+// 口径：十进制、无前导 0、无符号；0 → "0"。64 位缓冲 24 字节（20 位数字 + 余量）。
+static const char *LIB_U32_OUT_SRC =
+  "int _flint_out_u32(uint_32 n) {\n"
+  "  char tmp[12];\n"
+  "  char out[12];\n"
+  "  int i = 0;\n"
+  "  int j = 0;\n"
+  "  if (n == 0) { tmp[0] = '0'; i = 1; }\n"
+  "  while (n != 0) {\n"
+  "    int d = n % 10;\n"                 // uint_32 % int ⇒ uint_32（无符号取模，0..9）
+  "    tmp[i] = '0' + d;\n"
+  "    n = n / 10;\n"                     // uint_32 / int ⇒ 无符号除法
+  "    i = i + 1;\n"
+  "  }\n"
+  "  while (i > 0) { i = i - 1; out[j] = tmp[i]; j = j + 1; }\n"
+  "  return _flint_out_bytes(out, j);\n"
+  "}\n";
+static const char *LIB_U64_OUT_SRC =
+  "int _flint_out_u64(uint_64 n) {\n"
+  "  char tmp[24];\n"
+  "  char out[24];\n"
+  "  int i = 0;\n"
+  "  int j = 0;\n"
+  "  if (n == 0) { tmp[0] = '0'; i = 1; }\n"
+  "  while (n != 0) {\n"
+  "    int d = (int)(n % 10);\n"          // uint_64 % int ⇒ uint_64；显式收窄（0..9 无损）
+  "    tmp[i] = '0' + d;\n"
+  "    n = n / 10;\n"                     // uint_64 / int ⇒ 无符号 64 位除法（xor rdx,rdx; div rcx）
+  "    i = i + 1;\n"
+  "  }\n"
+  "  while (i > 0) { i = i - 1; out[j] = tmp[i]; j = j + 1; }\n"
+  "  return _flint_out_bytes(out, j);\n"
+  "}\n";
+static const char *LIB_U32_STR_SRC =
+  "int _flint_str_put_u32(uint_32 n) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_u32(n);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n";
+static const char *LIB_U64_STR_SRC =
+  "int _flint_str_put_u64(uint_64 n) {\n"
+  "  if (_flint_nest > 0) { return 0; }\n"
+  "  _flint_pending = _flint_pending + 1;\n"
+  "  _flint_out_u64(n);\n"
+  "  _flint_pending = _flint_pending - 1;\n"
+  "  return 0;\n"
+  "}\n";
+
 // —— v1.5.0 str 腿的注入片段（只在用到 str([...]) 时拼接进注入源码）——
 // 缓冲全局放在**最前**：注入库自己的函数体在后面引用它（FLINT 是按 token 顺序解析的）。
 // 上限常量取自 flint.h 的 FLINT_STRBUF_CAP_S（字符串形式）——单点定义，main() 有同步自检。
@@ -374,6 +475,26 @@ static const char *LIB_STR_SRC =
   "  _flint_buf[0] = 0;\n"
   "  return _flint_buf;\n"
   "}\n"
+  // v2.3.0 str_into：**拼接仍在静态缓冲里做，收尾时把结果拷进调用方给的 dst**。
+  //   为什么不把 dst 存全局：FLINT 的全局不许存指针（句柄/地址一律走局部 int* 传参），
+  //   所以"写入目标"没法跨函数记。绕法 = 老 str 的 begin/put 全套照跑，最后一次性拷出去
+  //   —— 多一次 ≤4KB 的拷贝，换来：① 零全局指针 ② 零格式化分叉（还是那一套 _flint_out_*）
+  //   ③ 自引用天然安全（拼进的是 _flint_buf，段读的是调用方那块，两者永远不重叠）。
+  // cap 是**含结尾 0 的总字节数**；放不下 ⇒ dst 清零 + 返回 0（绝不静默截断）。
+  "char *_flint_str_end_to(char *dst, int cap) {\n"
+  "  char *r = _flint_str_end();\n"
+  "  int i = 0;\n"
+  "  if (dst == 0) { return 0; }\n"
+  "  if (cap < 1) { return 0; }\n"
+  "  if (r == 0) { dst[0] = 0; return 0; }\n"
+  "  while (i < _flint_buflen) {\n"
+  "    if (i >= cap - 1) { dst[0] = 0; return 0; }\n"
+  "    dst[i] = _flint_buf[i];\n"
+  "    i = i + 1;\n"
+  "  }\n"
+  "  dst[i] = 0;\n"
+  "  return dst;\n"
+  "}\n"
   "char *_flint_str_end() {\n"
   "  if (_flint_nest > 0) { _flint_nest = _flint_nest - 1; return 0; }\n"
   "  _flint_sink = 0;\n"
@@ -415,16 +536,21 @@ static const char *LIB_STR_SRC =
 // —— v1.7.0（D4）：int_64 的格式化器**按需注入**（with_i64），且只在真的用到 int_64 时 ——
 //   无条件塞 ⇒ 每一个用 print 的程序注入源都变 ⇒ 等价门指纹整批位移
 //   （main.c 上面那条"with_str=0 时逐字节等于老注入库"的不变量正是为此立的）。
-static char *lib_src_build(bool with_str, bool with_i64) {
+static char *lib_src_build(bool with_str, bool with_i64, bool with_u32, bool with_u64) {
   const char *g = with_str ? LIB_STR_GLOBALS_SRC : "";
   const char *h = with_str ? LIB_SINK_HOOK_SRC : "";
   const char *e = with_str ? LIB_STR_SRC : "";
   const char *i64 = with_i64 ? LIB_I64_OUT_SRC : "";
   const char *i64s = (with_i64 && with_str) ? LIB_I64_STR_SRC : "";
+  const char *u32 = with_u32 ? LIB_U32_OUT_SRC : "";
+  const char *u32s = (with_u32 && with_str) ? LIB_U32_STR_SRC : "";
+  const char *u64 = with_u64 ? LIB_U64_OUT_SRC : "";
+  const char *u64s = (with_u64 && with_str) ? LIB_U64_STR_SRC : "";
   size_t n = strlen(g) + strlen(LIB_HEAD_SRC) + strlen(h) + strlen(LIB_TAIL_SRC) + strlen(e)
-           + strlen(i64) + strlen(i64s) + 1;
+           + strlen(i64) + strlen(i64s) + strlen(u32) + strlen(u32s) + strlen(u64) + strlen(u64s) + 1;
   char *s = malloc(n);
-  snprintf(s, n, "%s%s%s%s%s%s%s", g, LIB_HEAD_SRC, h, LIB_TAIL_SRC, e, i64, i64s);
+  snprintf(s, n, "%s%s%s%s%s%s%s%s%s%s%s", g, LIB_HEAD_SRC, h, LIB_TAIL_SRC, e, i64, i64s,
+           u32, u32s, u64, u64s);
   return s;
 }
 
@@ -444,6 +570,9 @@ static bool uses_str(Token *head) {
     if (is_ident_tok(t, "str") && t->next && is_punct_tok(t->next, '(')
         && t->next->next && is_punct_tok(t->next->next, '['))
       return true;
+    // v2.3.0：str_into(dst, cap, [...]) 与 str 共用整套注入库（begin/put/end_to）
+    if (is_ident_tok(t, "str_into") && t->next && is_punct_tok(t->next, '('))
+      return true;
   }
   return false;
 }
@@ -458,12 +587,26 @@ static bool uses_int64(Token *head) {
   }
   return false;
 }
+// v1.9.0：是否用了无符号类型（决定注入 u32/u64 格式化器）——
+//   uint_8 / uint_32 共用 32 位无符号器（uint_8 的值域 0..255 在 eax 里，同一条腿）；
+//   uint_64 单独一条。**不能**只判 uint_64 就以为覆盖了 uint_8/uint_32。
+static bool uses_uint32(Token *head) {
+  for (Token *t = head; t->kind != TK_EOF; t = t->next)
+    if (is_ident_tok(t, "uint_8") || is_ident_tok(t, "uint_32")) return true;
+  return false;
+}
+static bool uses_uint64(Token *head) {
+  for (Token *t = head; t->kind != TK_EOF; t = t->next)
+    if (is_ident_tok(t, "uint_64")) return true;
+  return false;
+}
 
 // 注入：把内置输出库源码 token 化后插到 token 流头部。
 // collect_funcs 预扫即登记 _flint_out_*/_flint_str_*（展开出的 ND_CALL 能找到）；
 // api 声明在注入源码最前，collect_apis 扫头部可见。
-static Token *inject_print_lib(Token *head, bool with_str, bool with_i64) {
-  Token *lib = tokenize(lib_src_build(with_str, with_i64), with_str ? "<builtin print+str>" : "<builtin print>");
+static Token *inject_print_lib(Token *head, bool with_str, bool with_i64, bool with_u32, bool with_u64) {
+  Token *lib = tokenize(lib_src_build(with_str, with_i64, with_u32, with_u64),
+                        with_str ? "<builtin print+str>" : "<builtin print>");
   Token *tail = lib;
   while (tail->next->kind != TK_EOF) tail = tail->next;   // tail = EOF 前一节点
   tail->next = head;      // 内置库（去 EOF）接原流（原流以 EOF 收尾）
@@ -528,7 +671,7 @@ static Token *expand_includes(Token *head, const char *path, IncStack *st, int d
 // 加载一个编译单元（读文件 → 词法 → include 展开 → 末尾补 EOF 节点）
 static Token *load_unit(const char *path, IncStack *st) {
   char *src = read_file((char *)path);
-  if (!src) error("FLINT: 无法打开文件 %s", path);
+  if (!src) error("hlc: 无法打开文件 %s", path);
   Token *tok = tokenize(src, (char *)path);
 
   // 先取原链末尾 EOF 节点（expand_includes 会改写/重建链，须在展开前定位）
@@ -592,7 +735,7 @@ int main(int argc, char **argv) {
   if (argc < 2) { usage(); return 1; }
   // v1.5.0 自检：str 缓冲上限的「数值宏 vs 字面量宏」必须同步（单点定义的防漂移哨兵）
   if (atoi(FLINT_STRBUF_CAP_S) != FLINT_STRBUF_CAP) {
-    fprintf(stderr, "FLINT: 内部错误：FLINT_STRBUF_CAP(%d) 与 FLINT_STRBUF_CAP_S(\"%s\") 不同步\n",
+    fprintf(stderr, "hlc: 内部错误：FLINT_STRBUF_CAP(%d) 与 FLINT_STRBUF_CAP_S(\"%s\") 不同步\n",
             FLINT_STRBUF_CAP, FLINT_STRBUF_CAP_S);
     return 1;
   }
@@ -603,33 +746,45 @@ int main(int argc, char **argv) {
   bool want_gui = false;     // v1.4.28：-gui → 产物子系统 = 2 (WINDOWS_GUI)，双击不弹控制台黑窗
   bool want_debug = false;   // v1.4.11：-debug → 产物携带 DWARF5 行表 + 同源 TSV
   bool want_stats = false;   // v1.4.19：-stats → 打印按函数的发射统计（账本；不改产物）
+  bool want_run = false;     // v1.10.2：-run → 编译成功后运行产物，返回程序退出码
   char *files[32];
   int nfiles = 0;
   char *out_path = NULL;
 
-  for (int i = 1; i < argc; i++) {
+  // v1.10.5（A2 收尾，方案 B）：子命令 `hlc build <源...>` / `hlc run <源...>`
+  //   只在「第一个参数是 build/run 且后面还有参数」时识别 —— 普通源文件/选项路径完全不变。
+  bool sub_build = false, sub_run = false;
+  int first_arg = 1;
+  if (argc >= 3 && (strcmp(argv[1], "build") == 0 || strcmp(argv[1], "run") == 0)) {
+    sub_build = true;
+    sub_run = (strcmp(argv[1], "run") == 0);
+    first_arg = 2;
+  }
+
+  for (int i = first_arg; i < argc; i++) {
     if (strcmp(argv[i], "-t") == 0) tok_only = true;
     else if (strcmp(argv[i], "-safe") == 0) mode_safe = true;
     else if (strcmp(argv[i], "-admin") == 0) want_admin = true;
     else if (strcmp(argv[i], "-gui") == 0) want_gui = true;
     else if (strcmp(argv[i], "-debug") == 0) want_debug = true;
     else if (strcmp(argv[i], "-stats") == 0) { want_stats = true; flint_stats = true; }
+    else if (strcmp(argv[i], "-run") == 0) want_run = true;
     // v1.4.25：-strict 严格诊断档——把四类"静默"当编译错误拦下；默认关（关着时产物逐字节不变）
     else if (strcmp(argv[i], "-strict") == 0) flint_strict = true;
     else if (strcmp(argv[i], "-mode") == 0 && i + 1 < argc) {
       if (strcmp(argv[++i], "safe") == 0) mode_safe = true;
-      else { fprintf(stderr, "FLINT: 未知模式 %s（v0.9 支持 safe）\n", argv[i]); return 1; }
+      else { fprintf(stderr, "hlc: 未知模式 %s（v0.9 支持 safe）\n", argv[i]); return 1; }
     }
     else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
     else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) { usage(); return 0; }
     else {
-      if (nfiles >= 32) { fprintf(stderr, "FLINT: 源文件最多 32 个\n"); return 1; }
+      if (nfiles >= 32) { fprintf(stderr, "hlc: 源文件最多 32 个\n"); return 1; }
       files[nfiles++] = argv[i];
     }
   }
   if (nfiles == 0) { usage(); return 1; }
 
-  // B2x：编译器自带库目录 = flint.exe 所在目录（include 找不到相对路径时回退到这里）
+  // B2x：编译器自带库目录 = hlc.exe 所在目录（include 找不到相对路径时回退到这里）
   compiler_dir = strdup(dir_of(argv[0]));
 
   // —— 阶段 1：逐文件加载（词法 + include 展开），合并成一个 token 流 ——
@@ -654,7 +809,7 @@ int main(int argc, char **argv) {
   // 注入的函数定义会把用户源码自己的 api 声明（如 CreateFileA）隔到"函数之后"→ parse 报
   // "api 声明必须放在文件最顶部"。hoist 前注入则注入 api 与用户 api 一起被前移。
   if (uses_print(all) || uses_str(all))
-    all = inject_print_lib(all, uses_str(all), uses_int64(all));
+    all = inject_print_lib(all, uses_str(all), uses_int64(all), uses_uint32(all), uses_uint64(all));
 
   // api 声明统一前移（多文件合并后 parse 前置条件）
   all = hoist_apis(all);
@@ -666,6 +821,8 @@ int main(int argc, char **argv) {
   flint_safe_mode = mode_safe;
   // v1.4.11：可审计发射层开关必须在 codegen **之前**置位（codegen 是"记录方"，拿不到 GenResult）
   flint_debug_info = want_debug;
+  // D-2：调试版关掉寄存器驻留（否则调试器读到的帧槽是旧值，见 slotmap.h 的说明）
+  slotmap_set_no_regs(want_debug ? 1 : 0);
   Program prog = parse(all);
 
   // —— 阶段 3：代码生成（自写机器码编码器）——
@@ -681,13 +838,14 @@ int main(int argc, char **argv) {
   char *err = NULL;
   Buf exe;
   if (pe_build(&gen, &exe, &err) != 0) {
-    fprintf(stderr, "FLINT: PE 打包失败: %s\n", err ? err : "未知原因");
+    fprintf(stderr, "hlc: PE 打包失败: %s\n", err ? err : "未知原因");
     return 1;
   }
 
-  char *out = out_path ? out_path : default_out(files[0]);
+  char *out = out_path ? out_path
+                       : (sub_build ? build_out_path(files[0]) : default_out(files[0]));
   if (!write_file(out, exe.data, exe.len)) {
-    fprintf(stderr, "FLINT: 无法写入 %s\n", out);
+    fprintf(stderr, "hlc: 无法写入 %s\n", out);
     return 1;
   }
 
@@ -695,22 +853,41 @@ int main(int argc, char **argv) {
   //   （补标准不提供的三个维度：字节区间 / 文件偏移 / 所属节；两腿同一张表 ⇒ 不会出现两套真值）
   if (want_stats) flint_stats_dump();
   if (want_debug) {
+    // .text 的文件偏移（RawPtr）：TSV 与 JSON 共用**同一份**算式 ⇒ 三条腿的地址换算只有一处
+    uint32_t text_raw = pe_headers_size(pe_nsec_all(gen.data_size > 0 ? 1 : 0,
+                                                    gen.want_admin != 0, gen.want_debug != 0));
     Buf tsv;
-    char tpath[1024];
+    char tpath[2048];
     snprintf(tpath, sizeof(tpath), "%s.tsv", out);
-    debug_build_tsv(&gen, FLINT_TEXT_RVA,
-                    pe_headers_size(pe_nsec_all(gen.data_size > 0 ? 1 : 0,
-                                                gen.want_admin != 0, gen.want_debug != 0)),
-                    out, &tsv);
+    debug_build_tsv(&gen, FLINT_TEXT_RVA, text_raw, out, &tsv);
     if (!write_file(tpath, tsv.data, tsv.len)) {
-      fprintf(stderr, "FLINT: 无法写入 %s\n", tpath);
+      fprintf(stderr, "hlc: 无法写入 %s\n", tpath);
       return 1;
     }
     printf("   行对照表 → %s （%zu 条语句记录）\n", tpath, gen.ndbg_rows);
+
+    // ===== v5（D-1 + D-3）：第三份调试信息 —— 帧表 + 变量位置表（调试器唯一可用的依据）=====
+    // 与 TSV 并列写在 <输出>.exe 旁；同源（同一张 dbg_funcs 表），地址换算与 TSV 完全相同。
+    // 只在 `-debug` 时写 ⇒ 普通产物连一个旁文件都不会多出来（debug 门 [8].9 守着）。
+    Buf map;
+    char mpath[2048];
+    snprintf(mpath, sizeof(mpath), "%s.dbg.json", out);
+    debug_build_map(&gen, FLINT_TEXT_RVA, text_raw, out, &map);
+    if (!write_file(mpath, map.data, map.len)) {
+      fprintf(stderr, "hlc: 无法写入 %s\n", mpath);
+      return 1;
+    }
+    printf("   变量/帧表 → %s （%d 个函数）\n", mpath, gen.ndbg_funcs);
   }
 
   printf("✅");
   for (int i = 0; i < nfiles; i++) printf(" %s", files[i]);
   printf(" → %s （%zu 字节，纯自产机器码 PE，未借汇编器/链接器）\n", out, exe.len);
+  if (want_run || sub_run) {
+    int rc = run_program(out);
+    if (rc < 0) return 1;
+    printf("▶ %s 退出码 %d\n", out, rc);
+    return rc;
+  }
   return 0;
 }

@@ -63,7 +63,7 @@
 //    turns red now: both legs exit 0 and their bytes are equal.)
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f024_print_intmin.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\main.c;E:\FLINT-lab\boot\lib_print.fl
 //
 // ASCII only, no BOM; prints no pointer value -- three int values and fixed literal text.

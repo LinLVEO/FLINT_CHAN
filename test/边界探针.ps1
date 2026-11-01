@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Continue'
 
 $test  = $PSScriptRoot
 $root  = Split-Path $test -Parent
-$flint = Join-Path $root 'flint.exe'
+$flint = Join-Path $root 'hlc.exe'
 $work  = Join-Path $test 'tmp\边界探针'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 if (-not (Test-Path -LiteralPath $flint)) { Write-Host "!! 找不到编译器: $flint"; exit 2 }
@@ -89,7 +89,7 @@ $cases = @(
   #   而 2026-10-18 的「标量槽 4 字节」受控实验结案 = **不做、保留 8**（docs\设计决策.md D10 的同日条）。
   #   结论原来只活在文档里 ⇒ 这里用**地址差**把它钉成可跑的真值：
   #   · FLINT 的裸指针按**字节**步进（决策 40）⇒ `(&b) - (&a)` 直接给出字节距离，不按元素缩放；
-  #   · 实测（本机 flint.exe，2026-10-18）= **−8**：后声明的槽在**更低**地址（第 3 个同样 −8）；
+  #   · 实测（本机 hlc.exe，2026-10-18）= **−8**：后声明的槽在**更低**地址（第 3 个同样 −8）；
   #     测两对（a→b、b→c）而不是一对，是为了排除"这两个变量碰巧隔 8"（对齐填充等）——两对同距才叫**槽步长**；
   #   · 退出码 = 4 位掩码 1+2+4+8 = **15**：bit0 = d 是 −8、bit1 = e 是 −8、bit2 = 两对相等、bit3 = 三块槽互不踩踏；
   #   · 定位口径：若哪天槽被压回 **4 字节**（或指针被按元素缩放），实测会退 **12**（bit0/bit1 丢、bit2 仍过），
@@ -161,7 +161,7 @@ int main() {
   #     末段仍是 `kernel32`）—— 这类名字含 `/` ⇒ 出端**不补** `.dll`。产物必须真能加载并跑出 42，
   #     否则"上限是 63"就只是嘴上说（本机实测：63 能跑、64 编译期被拒）。
   #   · 外侧 = 64 字节：改前**编译 exit 0**、产物里是"半个路径"、启动期 0xC0000135（这就是工单说的
-  #     "半个路径导入表"的真实形态；`"改前会红"取证`：拿本刀之前的 flint.exe 跑本用例 ⇒ 会红成"竟然编译通过了"）。
+  #     "半个路径导入表"的真实形态；`"改前会红"取证`：拿本刀之前的 hlc.exe 跑本用例 ⇒ 会红成"竟然编译通过了"）。
   #   · ⚠️ 本用例的路径是本机 `C:/Windows/System32`（与 api_str_abs_path 同族假设：Windows 装在 C:）。
   @{ n='api_modname_63_ok'; kind='ok'; code=42; note='模块名写出名 **63 字节**（上限内侧）必须编过**且产物能加载**：`C:/Windows/System32//` ＋ 17×`./` ＋ `kernel32` = 63 字节（含 `/` ⇒ 不补后缀），导入名原样烧进产物、由 loader 解析';
      src='api "C:/Windows/System32//' + ('./'*17) + 'kernel32" int GetTickCount();' + "`n" + 'int main() { if (GetTickCount() > 0) { return 42; } return 7; }' }
@@ -244,6 +244,76 @@ int main() {
      src='int main() { int a[3]; return (int[3])a; }' }
   @{ n='cast_char_from_double_wall'; kind='wall'; err='不支持 (char)double'; note='(char)double 未列入 v1 口径（只给了 (int)/(int_64) 的 double 截断）⇒ 编译期硬错，让两步写清而不是猜越界规则';
      src='int main() { return (char)1.5; }' }
+
+  # ---------- v1.9.0：三种无符号整数 uint_8 / uint_32 / uint_64（语义表见 SPEC「uint_* 无符号整数」节）----------
+  #   ok 两条：① 求值语义（回绕/无符号除模/逻辑右移/无符号比较/混合提升的结果类型）
+  #            ② 声明位置 + 打印（struct 字段 / 定长数组字段 / 形参 / 返回 / 指针 / for 头 / 全局 / print / str）
+  #   wall 五条：隐式收窄、跨浮点、引用、new、switch/^^、api —— 每条都是"编译过、静默错值"的同族
+  @{ n='uint_eval_semantics'; kind='ok'; code=42; note='uint_32/uint_64 的回绕、无符号除模、逻辑右移、无符号比较、混合提升（uint_32+int→uint_32 / uint_32+int_64→int_64 / int_64+uint_64→uint_64）、uint_8 存储回绕';
+     src=@(
+       'int main() {'
+       '  uint_32 a = 0; a = a - 1;'
+       '  uint_64 b = 0; b = b - 1;'
+       '  uint_8 c = 255; c = c + 1;'
+       '  int i = 0 - 1;'
+       '  int_64 i64 = 0 - 1;'
+       '  uint_64 u64 = 0; u64 = u64 - 2;'
+       '  int bad = 0;'
+       '  if (a / 2 != 2147483647) { bad = 1; }'
+       '  if (a % 10 != 5) { bad = 1; }'
+       '  if (a >> 1 != 2147483647) { bad = 1; }'
+       '  if (!(a > 1)) { bad = 1; }'
+       '  if (a < 1) { bad = 1; }'
+       '  if (b / 10 != 1844674407370955161) { bad = 1; }'
+       '  if (b % 3 != 0) { bad = 1; }'
+       '  if (b >> 1 != 9223372036854775807) { bad = 1; }'
+       '  if (c != 0) { bad = 1; }'
+       '  if (a + i != 4294967294) { bad = 1; }'
+       '  if (i64 + u64 != (uint_64)0 - 3) { bad = 1; }'
+       '  if (!((i64 + u64) > 0)) { bad = 1; }'
+       '  if (a + i64 != 4294967294) { bad = 1; }'
+       '  if (bad == 0) { return 42; }'
+       '  return 7;'
+       '}'
+     ) -join "`n" }
+  @{ n='uint_decl_and_print'; kind='ok'; code=42; note='uint_* 的声明位置（全局/局部/形参/返回/数组/struct 字段/struct 定长数组字段/指针/for 头）+ print 与 str 两条腿的无符号十进制';
+     src=@(
+       'struct US { uint_64 f; uint_8 buf[4]; }'
+       'uint_32 gu = 7;'
+       'uint_64 gbig(uint_64 x) { return x + 1; }'
+       'int main() {'
+       '  struct US s;'
+       '  s.f = 0; s.f = s.f - 1;'
+       '  s.buf[3] = 7;'
+       '  uint_64 a[2]; a[1] = 5;'
+       '  char *cp = (char *)a;'
+       '  uint_64 v = 42; uint_64 *p = &v;'
+       '  uint_32 s32 = 0;'
+       '  for (uint_32 k = 0; k < 5; k = k + 1) { s32 = s32 + k; }'
+       '  char *t = str(["<", (uint_32)0 - 1, "|", (uint_64)0 - 1, ">"]);'
+       '  int bad = 0;'
+       '  if (cp[8] != 5) { bad = 1; }'
+       '  if (s.buf[3] != 7) { bad = 1; }'
+       '  if (*p != 42) { bad = 1; }'
+       '  if (s32 != 10) { bad = 1; }'
+       '  if (gu - 8 != (uint_32)0 - 1) { bad = 1; }'
+       '  if (gbig((uint_64)0 - 1) != 0) { bad = 1; }'
+       '  print([t, "\n"]);'
+       '  print(["P", (uint_32)0 - 1, "Q", (uint_64)0 - 1, "R", (uint_8)300, "S\n"]);'
+       '  if (bad == 0) { return 42; }'
+       '  return 7;'
+       '}'
+     ) -join "`n" }
+  @{ n='uint_narrow_assign_wall'; kind='wall'; err='不能把 uint_64 赋给 int'; note='uint_64 → int 隐式收窄：会静默丢掉高 32 位 ⇒ 编译期硬错（要收窄请显式 (int)值）';
+     src='int main() { uint_64 u = 0 - 1; int i = u; return i; }' }
+  @{ n='uint_from_double_wall'; kind='wall'; err='不能把 double 赋给 uint_32'; note='double → uint_* 隐式转换：跨浮点只走显式转型（(uint_32)d 走 int 截断再取模）⇒ 编译期硬错';
+     src='int main() { double d = 1.5; uint_32 u = d; return u; }' }
+  @{ n='uint_to_double_wall'; kind='wall'; err='无符号整数不能隐式转 double'; note='uint_32 → double 隐式：跨浮点必须显式转型（显式 (double)u 已实现正确转换：uint_32 零扩展、uint_64 高位分支）⇒ 按 SPEC 口径硬错';
+     src='int main() { uint_32 u = 1; double d = u; return 0; }' }
+  @{ n='uint_new_wall'; kind='wall'; err="暂不支持"; note='new uint_64：堆负载按类型分派还没做（与 new int_64 同一道墙）⇒ 编译期硬错';
+     src='int main() { uint_64 *p = new uint_64; return 0; }' }
+  @{ n='uint_switch_wall'; kind='wall'; err='switch 的条件暂不支持 64 位'; note='switch 条件是 uint_64：跳转表是 32 位比较 ⇒ 编译期硬错（uint_32 允许）';
+     src='int main() { uint_64 u = 1; switch (u) { case 1: return 1; } return 0; }' }
 )
 
 # ---------------------------------------------------------------- 跑

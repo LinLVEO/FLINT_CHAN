@@ -1,0 +1,63 @@
+// f055_str_into.fl —— v2.3.0：`str_into(dst, cap, [...])` 调用方给缓冲的字符串拼接
+//
+// 为什么要这个内建：`str([...])` 的产物指向**唯一一块静态缓冲**，所以
+//   `a = str(["P","Q"]); b = str(["X", a]);` 里 begin 会先把 a 指向的缓冲清零 ⇒ b 静默变 "XX"。
+// 这是"C 的 strtok 式共享缓冲"（SPEC 的别名语义），修不掉；`str_into` 把缓冲交给调用方，
+// 从根上没有别名。判据：8 位掩码全亮 → 退 42。
+int main() {
+  int mask = 0;
+
+  // ① 基本拼接：字面量 + int + 字面量
+  char b1[32];
+  char *s1 = str_into(b1, 32, ["A", 7, "B"]);
+  if (s1 != 0 && s1 == b1 && b1[0] == 'A' && b1[1] == '7' && b1[2] == 'B' && b1[3] == 0) mask = mask | 1;
+
+  // ② cap 恰好够（"A7B" 3 字节 + 结尾 0 = 4）
+  char b2[4];
+  char *s2 = str_into(b2, 4, ["A", 7, "B"]);
+  if (s2 == b2 && b2[3] == 0) mask = mask | 2;
+
+  // ③ cap 差 1 ⇒ 响亮失败：返回 0，dst 保持"空串"（不截断成 "A7"）
+  char b3[4];
+  char *s3 = str_into(b3, 3, ["A", 7, "B"]);
+  if (s3 == 0 && b3[0] == 0) mask = mask | 4;
+
+  // ④ 段是普通 char 数组（不是 str 的产物）—— 老 str() 能做对的那格，str_into 也要对
+  char src[8];
+  src[0] = 'H'; src[1] = 'i'; src[2] = 0;
+  char b4[16];
+  char *s4 = str_into(b4, 16, ["<", src, ">"]);
+  if (s4 == b4 && b4[0] == '<' && b4[1] == 'H' && b4[2] == 'i' && b4[3] == '>' && b4[4] == 0) mask = mask | 8;
+
+  // ⑤ 自引用**安全**：段指向 dst 自己也不出错 —— 拼接在静态缓冲里做，dst 只在收尾时被写一次
+  char b5[16];
+  b5[0] = 'Z'; b5[1] = 0;
+  char *s5 = str_into(b5, 16, [b5]);
+  if (s5 == b5 && b5[0] == 'Z' && b5[1] == 0) mask = mask | 16;
+
+  // ⑥ 两次 str_into 的结果互不影响（各自的缓冲）
+  char c1[16];
+  char c2[16];
+  char *t1 = str_into(c1, 16, ["one"]);
+  char *t2 = str_into(c2, 16, ["two"]);
+  if (t1 == c1 && t2 == c2 && c1[0] == 'o' && c2[0] == 't' && c1[3] == 0 && c2[3] == 0) mask = mask | 32;
+
+  // ⑦ str_into 之后老 str() 还能正常用（共用 sink 标记不串）
+  char *old = str(["o", "k"]);
+  if (old != 0 && old[0] == 'o' && old[1] == 'k' && old[2] == 0) mask = mask | 64;
+
+  // ⑧ dst == 0 / cap < 1 一律响亮失败（不解引用空指针）
+  char *s8 = str_into(0, 8, ["x"]);
+  char b8[8];
+  char *s9 = str_into(b8, 0, ["x"]);
+  if (s8 == 0 && s9 == 0) mask = mask | 128;
+
+  // ⑨ v2.3.1 两参数形态：cap 由**数组声明**推出来（char b9[16] ⇒ cap = 16）
+  char b9[16];
+  char *s9c = str_into(b9, ["x", 9, "y"]);
+  if (s9c == b9 && b9[0] == 'x' && b9[1] == '9' && b9[2] == 'y' && b9[3] == 0) mask = mask | 256;
+
+  print(["mask=", mask, "\n"]);
+  if (mask == 511) return 42;
+  return mask;
+}

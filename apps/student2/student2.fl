@@ -12,7 +12,7 @@
 //   · 没有 switch    → if / else if 链
 //   · 没有 scanf     → 自己从 stdin 读一行（一次 ReadFile 可能读到多行，要自己缓冲）
 //
-// 编译：E:\FLINT-lab\flint.exe apps\student2\student2.fl -o apps\student2\student2.exe
+// 编译：E:\FLINT-lab\hlc.exe apps\student2\student2.fl -o apps\student2\student2.exe
 // 运行：student2.exe（数据落在当前目录 students2.txt）
 
 include "io_lib.fl"

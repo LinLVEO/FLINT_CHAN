@@ -1,0 +1,93 @@
+// f078_hitfx.fl -- M4 第一版：hitstop / 震屏 / 闪白 状态机
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  freeze 每 tick 减 1：3 -> 2 -> 1 -> 0
+//   bit1  flash 每 tick 减 1：2 -> 1 -> 0
+//   bit2  freeze 到 0 后保持 0（再 tick 不变负）
+//   bit3  shake 偏移在 [-2, 2] 内（shake=2，跑 20 次全部命中）
+//   bit4  确定性：同 seed 两次序列逐位相同
+//   bit5  hitfx_start 重置：改过的 freeze 被重新设成初值
+//   bit6  shake<=0 时偏移恒 0
+//   bit7  tick 不改 shake 字段（只减 freeze/flash）
+include "../../lib/hitfx.fl"
+
+int shake_sum(int n) {
+  struct HitFx h;
+  int i = 0;
+  int s = 0;
+  int v = 0;
+  hitfx_start(&h, 0, 2, 0);
+  i = 0;
+  while (i < n) {
+    v = hitfx_shake_x(&h);
+    s = s * 10 + (v + 10);
+    i = i + 1;
+  }
+  return s;
+}
+
+int main() {
+  struct HitFx h;
+  int mask = 0;
+  int i = 0;
+  int ok = 0;
+  int v = 0;
+  int s1 = 0;
+  int s2 = 0;
+
+  hitfx_start(&h, 3, 2, 2);
+
+  // bit0
+  hitfx_tick(&h);
+  if (h.freeze == 2) { mask = mask | 1; }
+  hitfx_tick(&h);
+  hitfx_tick(&h);
+
+  // bit1
+  hitfx_start(&h, 3, 2, 2);
+  hitfx_tick(&h);
+  if (h.flash == 1) { mask = mask | 2; }
+
+  // bit2
+  i = 0;
+  while (i < 10) { hitfx_tick(&h); i = i + 1; }
+  if (h.freeze == 0) { mask = mask | 4; }
+
+  // bit3
+  hitfx_start(&h, 0, 2, 0);
+  ok = 1;
+  i = 0;
+  while (i < 20) {
+    v = hitfx_shake_x(&h);
+    if (v < -2) { ok = 0; }
+    if (v > 2) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 8; }
+
+  // bit4
+  s1 = shake_sum(6);
+  s2 = shake_sum(6);
+  if (s1 == s2) { mask = mask | 16; }
+
+  // bit5
+  hitfx_start(&h, 9, 1, 9);
+  if (h.freeze == 9) {
+    if (h.flash == 9) { mask = mask | 32; }
+  }
+
+  // bit6
+  hitfx_start(&h, 0, 0, 0);
+  if (hitfx_shake_x(&h) == 0) {
+    if (hitfx_shake_y(&h) == 0) { mask = mask | 64; }
+  }
+
+  // bit7
+  hitfx_start(&h, 5, 3, 5);
+  hitfx_tick(&h);
+  if (h.shake == 3) { mask = mask | 128; }
+
+  print(["f078 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

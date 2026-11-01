@@ -1,0 +1,80 @@
+// f056_str_into.fl -- v2.3.x str_into(dst[, cap], [...]) probe (bitmask, all lit => exit 42)
+//   Each bit is one case; failure prints the mask so a red run says which case broke.
+//   This probe pins the FULL flint semantics (it includes an int_64 segment, which boot's type
+//   universe does not have) -- so boot cannot compile it.  The DUAL-END criterion is
+//   test\facts\f057_str_into_core.fl (same feature, no int_64/double/uint).
+//
+// bit0  2-arg array form: str_into(buf, [...]) -> returns dst, content + NUL correct
+// bit1  3-arg pointer form: str_into(p, cap, [...]) -> returns p, content correct
+// bit2  exact fit: cap == len+1 is enough (no truncation, no failure)
+// bit3  one byte short: cap == len -> returns 0 AND dst[0] == 0 (loud, never truncated)
+// bit4  dst == 0 -> returns 0
+// bit5  cap < 1  -> returns 0 and leaves dst UNWRITTEN (checked before any write)
+// bit6  self reference: str_into(buf, n, [buf]) reads dst safely (no overlap corruption)
+// bit7  two destinations stay independent
+// bit8  int_64 segment formats into the caller buffer
+// bit9  plain str([...]) still works after str_into calls (same segment dispatch)
+int main() {
+  int mask = 0;
+
+  // bit0: 2-arg array form
+  char b0[16];
+  char *r0 = str_into(b0, ["a=", 7]);
+  if (r0 == &b0[0] && b0[0] == 'a' && b0[1] == '=' && b0[2] == '7' && b0[3] == 0) { mask = mask | 1; }
+
+  // bit1: 3-arg pointer form
+  char b1[16];
+  char *p1 = &b1[0];
+  char *r1 = str_into(p1, 16, ["x=", 1, 2]);
+  if (r1 == p1 && b1[0] == 'x' && b1[1] == '=' && b1[2] == '1' && b1[3] == '2' && b1[4] == 0) { mask = mask | 2; }
+
+  // bit2: exact fit (cap includes the trailing NUL)
+  char b2[4];
+  char *r2 = str_into(b2, ["abc"]);
+  if (r2 == &b2[0] && b2[0] == 'a' && b2[1] == 'b' && b2[2] == 'c' && b2[3] == 0) { mask = mask | 4; }
+
+  // bit3: one byte short -> failed and cleared
+  char b3[3];
+  char *r3 = str_into(b3, ["abc"]);
+  if (r3 == 0 && b3[0] == 0) { mask = mask | 8; }
+
+  // bit4: dst == 0
+  char *nul = 0;
+  char *r4 = str_into(nul, 8, ["zz"]);
+  if (r4 == 0) { mask = mask | 16; }
+
+  // bit5: cap < 1 -> returns 0 and leaves dst UNWRITTEN (src checks dst/cap before writing)
+  char b5[8];
+  char *p5 = &b5[0];
+  b5[0] = 'X';
+  char *r5 = str_into(p5, 0, ["q"]);
+  if (r5 == 0 && b5[0] == 'X') { mask = mask | 32; }
+
+  // bit6: self reference reads dst while writing the internal buffer
+  char b6[16];
+  char *r6 = str_into(b6, ["PQ"]);
+  if (r6 == 0) { return 0 - 1; }
+  char *r6b = str_into(b6, ["X", b6]);
+  if (r6b == &b6[0] && b6[0] == 'X' && b6[1] == 'P' && b6[2] == 'Q' && b6[3] == 0) { mask = mask | 64; }
+
+  // bit7: two destinations are independent
+  char d1[16];
+  char d2[16];
+  char *t1 = str_into(d1, ["one"]);
+  char *t2 = str_into(d2, ["two"]);
+  if (t1 == &d1[0] && t2 == &d2[0] && d1[0] == 'o' && d1[2] == 'e' && d1[3] == 0 && d2[0] == 't' && d2[2] == 'o' && d2[3] == 0) { mask = mask | 128; }
+
+  // bit8: int_64 segment
+  char b8[32];
+  int_64 big = (int_64)2000000000 * 2;
+  char *r8 = str_into(b8, ["v=", big]);
+  if (r8 == &b8[0] && b8[0] == 'v' && b8[1] == '=' && b8[2] == '4') { mask = mask | 256; }
+
+  // bit9: plain str() unchanged after str_into
+  char *s9 = str(["ok", 9]);
+  if (s9 != 0 && s9[0] == 'o' && s9[1] == 'k' && s9[2] == '9' && s9[3] == 0) { mask = mask | 512; }
+
+  if (mask != 1023) { print(["mask=", mask, "\n"]); }
+  if (mask == 1023) { return 42; }
+  return mask;
+}

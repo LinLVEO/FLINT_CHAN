@@ -1,0 +1,11 @@
+// spec6_tmax.fl -- ty6 T at its cap: struct S0 { int a; } * 99999 elements = 99999 slots
+// sid=0 here; the point is T must not carry into the sid segment.
+struct S0 { int a; }
+int main() {
+  struct S0 arr[99999];
+  arr[0].a = 5;
+  arr[99998].a = 7;
+  print(["tmax=", arr[0].a, ",", arr[99998].a, "\n"]);
+  if (arr[0].a == 5 && arr[99998].a == 7) { return 42; }
+  return 1;
+}

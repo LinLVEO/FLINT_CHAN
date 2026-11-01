@@ -17,7 +17,7 @@
 #
 # What this gate does:
 #   1. compiles apps\m2_float\main.fl (2600+ lines, 41 globals, 47 structs, real Win32/LHM imports)
-#      with flint.exe AND with the self-hosted boot\b1_emit.exe
+#      with hlc.exe AND with the self-hosted boot\b1_emit.exe
 #   2. clears the ASLR bits (DYNAMIC_BASE|HIGH_ENTROPY_VA) in both products. Reason is NOT codegen:
 #      this host has an AMD GPU and atiadlxx.dll (the vendor library the app imports) faults with
 #      0xC0000005 when the image is randomly based. Proven by a single-variable test -- flipping only
@@ -70,7 +70,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $boot    = Join-Path $root 'boot\b1_emit.exe'
 $appSrc  = Join-Path $root 'apps\m2_float\main.fl'
 $appDir  = Split-Path $appSrc -Parent
@@ -90,7 +90,7 @@ Write-Host '===== loop-verify: real application, both compilers, byte-compared d
 foreach ($p in @($flint, $boot, $appSrc)) {
   if (-not (Test-Path -LiteralPath $p)) { Write-Host "FAIL missing input: $p"; exit 2 }
 }
-Info ("flint.exe   " + (Get-Item -LiteralPath $flint).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') +
+Info ("hlc.exe   " + (Get-Item -LiteralPath $flint).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') +
       "  sha256=" + (Get-FileHash -LiteralPath $flint -Algorithm SHA256).Hash.Substring(0, 16))
 Info ("b1_emit.exe " + (Get-Item -LiteralPath $boot).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') +
       "  sha256=" + (Get-FileHash -LiteralPath $boot -Algorithm SHA256).Hash.Substring(0, 16))
@@ -173,9 +173,26 @@ function Compare-Masked([string]$pa, [string]$pb, [string]$label) {
   return $true
 }
 
+# 2026-10-20: the product is a real GUI app (apps\m2_float).  Starting it on the interactive desktop
+#   took the foreground away from the user ONCE PER RUN (three runs per gate).  Hiding the window
+#   after the fact does not help either: activation happens when the window is created, and a hidden
+#   window that owns the foreground is worse than a visible one (measured: 3 foreground handoffs).
+#   So the product is launched on a PRIVATE DESKTOP (tools\silent-gate.ps1 = CreateDesktop +
+#   CreateProcessW with lpDesktop): activation is impossible there and the dump still lands in $work
+#   because the app's working directory is unchanged.  The wrapper reports the child's PID through
+#   -PidFile, so this gate can stop the product once its dump has been stable for 300 ms (criterion
+#   unchanged from the old Stop-Process path).
 function Invoke-ProductOnce([string]$exe, [string]$tag) {
   Remove-Item -LiteralPath $dumpPath -Force -ErrorAction SilentlyContinue
-  $p = Start-Process -FilePath $exe -WorkingDirectory $work -PassThru
+  $pidFile = Join-Path $work ("app-" + $tag + ".pid")
+  $appOut  = Join-Path $work ("app-" + $tag + ".out.log")
+  $appErr  = Join-Path $work ("app-" + $tag + ".err.log")
+  Remove-Item -LiteralPath $pidFile, $appOut, $appErr -Force -ErrorAction SilentlyContinue
+  $gate = Join-Path $root 'tools\silent-gate.ps1'
+  $wrap = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $gate,
+    '-Exe', $exe, '-WorkDir', $work, '-OutFile', $appOut, '-ErrFile', $appErr,
+    '-PidFile', $pidFile, '-TimeoutSec', ([int]$TimeoutSec + 30))
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $seen = $false
   while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
@@ -188,13 +205,18 @@ function Invoke-ProductOnce([string]$exe, [string]$tag) {
     }
   }
   $sw.Stop()
+  $appPid = 0
+  if (Test-Path -LiteralPath $pidFile) {
+    try { $appPid = [int]((Get-Content -LiteralPath $pidFile -Raw).Trim()) } catch { $appPid = 0 }
+  }
   $code = $null
-  if ($p.HasExited) { $code = $p.ExitCode }
-  else {
-    # dump mode keeps the message loop alive: give it a moment to exit on its own, then stop it
-    for ($w = 0; $w -lt 10; $w++) { if ($p.HasExited) { break }; Start-Sleep -Milliseconds 500 }
-    if ($p.HasExited) { $code = $p.ExitCode }
-    else { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; $code = 'stopped-after-dump' }
+  if ($appPid -gt 0) {
+    Stop-Process -Id $appPid -Force -ErrorAction SilentlyContinue
+    $code = 'stopped-after-dump'
+    if (-not $wrap.HasExited) { if (-not $wrap.WaitForExit(20000)) { try { $wrap.Kill() } catch {} } }
+  } else {
+    if (-not $wrap.WaitForExit(20000)) { try { $wrap.Kill() } catch {} }
+    if ($wrap.HasExited) { $code = $wrap.ExitCode }
   }
   $rc = if ($null -eq $code) { 'n/a' } else { "$code" }
   if (-not $seen) { return $null }
@@ -229,7 +251,7 @@ function Invoke-Product([string]$exe, [string]$tag) {
 
 # ---------------------------------------------------------------- compile both products
 Push-Location $root
-$flintExe = Join-Path $work 'app_flint.exe'
+$flintExe = Join-Path $work 'app_hlc.exe'
 & $flint $appSrc -o $flintExe 2>&1 | Out-Null
 $cFlint = $LASTEXITCODE
 if ($cFlint -eq 0 -and (Test-Path -LiteralPath $flintExe)) { Ok "flint compiled the app (exit=0)" }

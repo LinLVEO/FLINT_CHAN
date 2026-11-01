@@ -1,0 +1,63 @@
+// f091_fx.fl -- M4 第三刀：粒子 + 月牙
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  空池 emit 返回槽 0
+//   bit1  第二次 emit 返回槽 1
+//   bit2  粒子坐标正确（10,20）
+//   bit3  update 后 x = 10+2 = 12
+//   bit4  update 后 life 5->4
+//   bit5  life 到期后槽可复用（emit 返回 0）
+//   bit6  满池 emit 返回 -1
+//   bit7  slash_draw t=3 -> 3 个 2x2 = 12 像素
+include "../../lib/fx.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  struct Particle ps[4];
+  int mask = 0;
+  int i = 0;
+  int idx = 0;
+  int n = 0;
+
+  i = 0;
+  while (i < 4) {
+    ps[i].x = 0; ps[i].y = 0; ps[i].vx = 0; ps[i].vy = 0; ps[i].life = 0;
+    i = i + 1;
+  }
+
+  idx = fx_emit(ps, 4, 10, 20, 2, -1, 5);
+  if (idx == 0) { mask = mask | 1; }
+  idx = fx_emit(ps, 4, 30, 40, 0, 0, 3);
+  if (idx == 1) { mask = mask | 2; }
+  if (ps[0].x == 10) {
+    if (ps[0].y == 20) { mask = mask | 4; }
+  }
+
+  fx_update(ps, 4);
+  if (ps[0].x == 12) { mask = mask | 8; }
+  if (ps[0].life == 4) { mask = mask | 16; }
+
+  i = 0;
+  while (i < 5) { fx_update(ps, 4); i = i + 1; }
+  idx = fx_emit(ps, 4, 0, 0, 0, 0, 9);
+  if (idx == 0) { mask = mask | 32; }
+
+  i = 0;
+  while (i < 4) { fx_emit(ps, 4, 0, 0, 0, 0, 9); i = i + 1; }
+  if (fx_emit(ps, 4, 0, 0, 0, 0, 9) == -1) { mask = mask | 64; }
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 64; s.cw = 64; s.ch = 64;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 64, 64) == 0) { return 2; }
+  gfx_clear(&b, 0x00000000);
+  n = slash_draw(&b, 32, 32, 16, 3, 0x00FF0000);
+  if (n == 12) { mask = mask | 128; }
+
+  print(["f091 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

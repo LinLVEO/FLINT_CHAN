@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $name    = 'filecount'
 $here    = $PSScriptRoot
 $root    = Split-Path -Parent (Split-Path -Parent $here)
-$flint   = Join-Path $root 'flint.exe'
+$flint   = Join-Path $root 'hlc.exe'
 $src     = Join-Path $here 'main.fl'
 $exe     = Join-Path $here "$name.exe"
 $inSrc   = Join-Path $here 'sample.txt'
@@ -26,8 +26,8 @@ $copyFile = "$inFile.copy"
 $stdout  = Join-Path ([System.IO.Path]::GetTempPath()) "${name}.stdout.bin"
 
 if (-not (Test-Path $flint)) {
-  Write-Host "FAIL: flint.exe not found at $flint"
-  Write-Host "      build it first: cmd /c `"gcc -O2 src\*.c -o flint.exe`"   (run from the repo root)"
+  Write-Host "FAIL: hlc.exe not found at $flint"
+  Write-Host "      build it first: cmd /c `"gcc -O2 src\*.c -o hlc.exe`"   (run from the repo root)"
   exit 1
 }
 
@@ -39,7 +39,7 @@ function Test-BytesEqual([byte[]]$a, [byte[]]$b) {
 
 # ---- 1) compile --------------------------------------------------------------------------
 & $flint $src -o $exe
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: flint.exe exit=$LASTEXITCODE"; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: hlc.exe exit=$LASTEXITCODE"; exit 1 }
 if (-not (Test-Path $exe)) { Write-Host "FAIL: no $exe produced"; exit 1 }
 Write-Host ("[{0}] compiled: {1} bytes" -f $name, (Get-Item $exe).Length)
 

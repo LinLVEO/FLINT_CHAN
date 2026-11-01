@@ -1,0 +1,66 @@
+// f052_uint_layout.fl -- v1.9.0 declaration positions + representation widths that must match the
+// same-width signed type exactly: struct fields (uint_64 / uint_32 / uint_8 buf[4]), array element
+// strides (8 / 4 / 1), function parameters & returns, pointer deref, global variable.
+//
+// WHY THIS PROBE EXISTS: "same representation" is an assertion about *bytes*, so it is checked
+// through byte views, not through the compiler's own idea of the size:
+//   ((char*)arr)[8] == 5  proves uint_64 elements are 8 bytes apart (value width == stride == slot)
+//   ((char*)arr)[4] == 5  proves uint_32 elements are 4 bytes apart (value 4 / slot 8)
+//   ((char*)arr)[1] == 5  proves uint_8 elements are 1 byte apart
+// If uint_64 had been left at the 32-bit stride the byte at [8] would read 0.
+//
+// HOW THE EXPECTED VALUES WERE COMPUTED (never hand-typed):
+//   node test\facts\uint-exp.js        (section "== f052")
+//
+// SENTINEL: one bit per check; exit 42 only when the mask is 1023 (all ten bits).
+// ASCII only, no BOM. No includes.
+struct US {
+  uint_64 f;
+  uint_32 w;
+  uint_8 buf[4];
+}
+
+uint_32 g_u32 = 7;
+
+uint_64 big(uint_64 x) { return x + 1; }
+uint_32 add1(uint_32 x) { return x + 1; }
+
+int main() {
+  struct US s;
+  s.f = 0; s.f = s.f - 1;
+  s.w = 0; s.w = s.w - 1;
+  s.buf[0] = 1; s.buf[1] = 2; s.buf[2] = 3; s.buf[3] = 7;
+
+  uint_64 a64[2];
+  a64[0] = 1; a64[1] = 5;
+  char *c64 = (char *)a64;
+
+  uint_32 a32[2];
+  a32[0] = 1; a32[1] = 5;
+  char *c32 = (char *)a32;
+
+  uint_8 a8[2];
+  a8[0] = 1; a8[1] = 5;
+  char *c8 = (char *)a8;
+
+  uint_64 pv = 42;
+  uint_64 *pp = &pv;
+
+  g_u32 = g_u32 - 8;               // 7 - 8 wraps to 2^32-1
+
+  int m = 0;
+  if (s.f == (uint_64)0 - 1) { m = m + 1; }
+  if (s.w == 4294967295) { m = m + 2; }
+  if (s.buf[3] == 7) { m = m + 4; }
+  if (c64[8] == 5) { m = m + 8; }
+  if (c32[4] == 5) { m = m + 16; }
+  if (c8[1] == 5) { m = m + 32; }
+  if (big((uint_64)0 - 1) == 0) { m = m + 64; }
+  if (add1((uint_32)0 - 1) == 0) { m = m + 128; }
+  if (*pp == 42) { m = m + 256; }
+  if (g_u32 == 4294967295) { m = m + 512; }
+
+  print(["s.f=", s.f, " s.w=", s.w, " g=", g_u32, " mask=", m, " expect=1023\n"]);
+  if (m == 1023) { return 42; }
+  return 7;
+}

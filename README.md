@@ -1,6 +1,6 @@
 # FLINT_CHAN
 
-> 名字：**FLINT_CHAN**（叫法：**FLINT**，简称 **FL**）
+> 名字：**FLINT_CHAN**（中文名：**打火石**；简称 **FLC**；编译器叫 **hlc**／火镰）
 
 > 🧭 元信息（机检）：类型=对外 ｜ 快照=否
 > 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`（本文数字都是「事实标记」，值由取数器现算，不手抄）
@@ -15,8 +15,9 @@
 |---|---|
 | 编译器版本 | v<!--fact:version-->0.1.0<!--/fact--> |
 | 产物 | 纯自产机器码 PE，无 CRT ／ 无运行时依赖；`hello` = <!--fact:product-hello-->3072<!--/fact--> B |
-| 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己，产物与真 flint 逐字节一致） |
-| 门（可自己跑） | 总门 <!--fact:gate-steps-->14<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->51<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->210/210<!--/fact--> |
+| 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己：两代产物 <!--fact:selfhost-fixedpoint-->same<!--/fact-->。它和 gcc 编出的 `hlc.exe` 不是同一个文件，两边一致性由差分门按**行为**判） |
+| 产物可复现性 | `hello` 重编 <!--fact:rebuild-hello-->same<!--/fact-->；面板 <!--fact:rebuild-winpanel-->differs<!--/fact-->、画廊 <!--fact:rebuild-uigallery-->differs<!--/fact-->（GUI 产物目前不保证字节稳定，判据看门不看 sha） |
+| 门（可自己跑） | 总门 <!--fact:gate-steps-->15<!--/fact--> 步 ｜ 语言边界探针 <!--fact:probe-cases-->58<!--/fact--> 条 ｜ FLGUI 门 <!--fact:flgui-checks-->213/213<!--/fact--> |
 | 平台 | Windows 10 x64（明确放弃 Win7）；单目标、单平台 |
 | 参与方式 | **暂时只收工单（issue），不接受外部 PR** —— 语言大到能给别人开口子之前，方向不摊开 |
 | 许可 | 源码 **MIT**（`LICENSE`）；文档 **CC BY 4.0** |
@@ -24,7 +25,7 @@
 
 ## Abstract (English)
 
-FLINT_CHAN, called FLINT for short, is an in-development language that is, for now,
+FLINT_CHAN (Chinese: 打火石, abbreviated FLC), is an in-development language that is, for now,
 centered on Windows desktop development, aiming at Zig, C++, and Rust. Today it is a
 compiler that emits raw x86-64 machine code and PE files by itself — no LLVM, no
 assembler, no linker, no C runtime — plus FLGUI, an immediate-mode GUI library drawn by
@@ -40,10 +41,10 @@ yet. Technical docs live in `docs/`; process notes are not published.
 
 ```cmd
 :: 1) 构建编译器（约 9 秒）
-cmd /c "gcc -O2 src\*.c -o flint.exe"
+cmd /c "gcc -O2 src\*.c -o hlc.exe"
 
 :: 2) 编译并运行第一个程序
-.\flint.exe examples\hello\hello.fl
+.\hlc.exe examples\hello\hello.fl
 .\examples\hello\hello.exe
 ```
 
@@ -56,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\边界探针.ps1
 1. **别在 PowerShell 里直接写 `gcc src\*.c`** —— PowerShell 不给原生程序展开通配符，会报 `cc1.exe: too many filenames given`。用上面的 `cmd /c`，或显式列出 `.c` 文件。
 2. **编译器要放仓库根目录**（或别处但同目录要有 `lib\`）—— `include` 的解析顺序是「本文件目录 → **编译器 exe 所在目录的 `lib\`**」。
 
-最小可跑程序（注意 `print` 吃的是**数组**，不是普通函数调用）：
+最小可跑程序（注意 `print` 后面跟的是**段列表**——`[...]` 形状像数组，但它不是值，每段按类型自动选格式化器；也不是 C 的格式串）：
 
 ```
 int main() {
@@ -69,12 +70,12 @@ int main() {
 
 | 路径 | 是什么 |
 |---|---|
-| `src\` | 编译器本体（C）：词法 / 语法 / 代码生成 / PE 写出；<!--fact:src-files-->9<!--/fact--> 个源文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->12104<!--/fact--> 行 |
-| `lib\` | FLINT 标准库（`.fl` 源码库）：字符串 / 数字 / 容器 / 文件 / 数学 / FLGUI |
-| `apps\` | 用 FLINT 写的真实程序：`winpanel`（工具面板）、`m2_float`（硬件浮窗）、`ui_gallery`（控件画廊） |
+| `src\` | 编译器本体（C）：词法 / 语法 / 代码生成 / PE 写出；<!--fact:src-files-->9<!--/fact--> 个源文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->13793<!--/fact--> 行 |
+| `lib\` | FLINT_CHAN 标准库（`.fl` 源码库）：字符串 / 数字 / 容器 / 文件 / 数学 / FLGUI |
+| `apps\` | 用 FLINT_CHAN 写的真实程序：`winpanel`（工具面板）、`m2_float`（硬件浮窗）、`ui_gallery`（控件画廊） |
 | `examples\` | 五个能抄的示例：hello / 中文打印 / 退出码 / 文件 I/O / 最小窗口（`examples\run-all.ps1`） |
-| `boot\` | 自举编译器（用 FLINT 写的 FLINT）＋ `verify.ps1` |
-| `test\` | 门与判据：总门 `verify-all.ps1`（<!--fact:gate-steps-->14<!--/fact--> 步）／边界探针／FLGUI 门 |
+| `boot\` | 自举编译器（用 FLINT_CHAN 写的 FLINT_CHAN）＋ `verify.ps1` |
+| `test\` | 门与判据：总门 `verify-all.ps1`（<!--fact:gate-steps-->15<!--/fact--> 步）／边界探针／FLGUI 门 |
 | `tools\` | 仪器：预算 / 余量 / 边界对账 / 文档事实取数 |
 | `docs\` | **技术文档（重写版）**，入口 [`docs\README.md`](docs/README.md) |
 
@@ -93,15 +94,15 @@ int main() {
 ## 现在能做什么 / 还不能做什么
 
 **能做**（都有跑通的真实产物）
-- 控制台工具、系统工具：按 `api` 声明直调 Windows DLL（导入表硬上限 <!--fact:limit-imports-->96<!--/fact--> 条 API / <!--fact:limit-groups-->8<!--/fact--> 个 DLL）
+- 控制台工具、系统工具：按 `api` 声明直调 Windows DLL（导入表**软预算** <!--fact:limit-imports-->96<!--/fact--> 条 API / <!--fact:limit-groups-->8<!--/fact--> 个 DLL；2026-10-24 起**没有硬上限**，超出只记账，导入表按实际用量分配）
 - **桌面 GUI**：FLGUI 是立即模式库（自绘 ＋ 分层窗口），控件、焦点链、多字体档、透明/圆角/投影都在真实项目里用着
 - 一键出**单文件 exe**：无安装器、无运行时依赖、冷启动无初始化
 
 **不能做 / 还没有**（诚实账）
-- 语言层：无泛型、无无符号整型、无异常、无 `sizeof`（**有** C 风格转型 `(type)expr`，见 `docs\语言参考.md` §3）
+- 语言层：无泛型、无异常、无 `sizeof`（**有** 无符号整型 `uint_8`/`uint_32`/`uint_64` 与 C 风格转型 `(type)expr`，见 `docs\语言参考.md`）
 - 平台层：只有 Windows x64；无多窗口、无高 DPI、IME 只"绕过"未"支持"
 - 生态层：无包管理、无第三方库（只能直调 DLL）、无 LSP / 格式化工具
-- 边界与坑：以 `docs\语言参考.md` 和 <!--fact:probe-cases-->51<!--/fact--> 条探针为准 —— **文档与探针打架时，信探针**
+- 边界与坑：以 `docs\语言参考.md` 和 <!--fact:probe-cases-->58<!--/fact--> 条探针为准 —— **文档与探针打架时，信探针**
 
 ## 参与
 

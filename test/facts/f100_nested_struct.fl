@@ -1,0 +1,76 @@
+// f100_nested_struct.fl -- struct 嵌套 struct 值字段（v2.4.0 最小形态）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 语言形态：内层 struct 必须**已定义**；只做两级/多级 `.` 访问（a.b.x 读写）、指针 p->b.x；
+//   不做：自嵌套值字段（尺寸无穷）、嵌套数组字段（struct B b[4];）、前向/互相嵌套（都报编译期硬错）。
+//
+//   bit0  基本写读：a.b.x = 7 读回
+//   bit1  两级偏移不同、互不串：a.v / a.b.x / a.b.y 三个字段各写各的
+//   bit2  **独立裁判（C 布局）**：int *p = (int *)&a; p[0]/p[1]/p[2] 直接读原始字节
+//         ⇒ 钉死 v@0、b.x@4、b.y@8（内层 struct 按自身对齐 4 落位、占 8 字节；
+//           若把内层按 8 对齐或按字段个数分槽，这里必错）
+//   bit3  连续两次读写：右值来自自身（a.b.x = a.b.x + 100）
+//   bit4  与普通字段共存 + 覆盖写不串：a.v 不被 a.b.* 的写动到
+//   bit5  取址 & 指针形参：bump(&a.b) 里 q->x 写回、q->y 读回（两条都是内层字段）
+//   bit6  两个外层实例互不干扰：a2 的嵌套字段与 a 的完全独立
+//   bit7  指针两级访问 p->b.x / p->b.y（写回后再用 bit2 的 int* 别名核布局）+ 哨兵 guard
+struct B { int x; int y; }
+struct A { int v; struct B b; }
+
+int bump(struct B *q) {
+  q->x = q->x + 1;
+  return q->y;
+}
+
+int main() {
+  struct A a;
+  struct A a2;
+  int mask = 0;
+  int guard = 12345;
+
+  // bit0：基本写读
+  a.b.x = 7;
+  if (a.b.x == 7) { mask = mask | 1; }
+
+  // bit1：三级字段各写各的（外层的 v、内层的 x/y）
+  a.v = 1;
+  a.b.x = 2;
+  a.b.y = 3;
+  if (a.v == 1 && a.b.x == 2 && a.b.y == 3) { mask = mask | 2; }
+
+  // bit2：C 布局独立裁判（int* 别名读原始字节；不经过结构体字段通路）
+  int *p = (int *)&a;
+  if (p[0] == 1 && p[1] == 2 && p[2] == 3) { mask = mask | 4; }
+
+  // bit3：连续两次读写（右值是自身）
+  a.b.x = a.b.x + 100;
+  a.b.y = a.b.y + 200;
+  if (a.b.x == 102 && a.b.y == 203) { mask = mask | 8; }
+
+  // bit4：与普通字段共存 + 覆盖写不串
+  a.v = 42;
+  a.b.y = 333;
+  a.b.x = 444;
+  if (a.v == 42 && a.b.y == 333 && a.b.x == 444) { mask = mask | 16; }
+
+  // bit5：&a.b 传给 struct B * 形参，形参里读写内层字段
+  if (bump(&a.b) == 333 && a.b.x == 445) { mask = mask | 32; }
+
+  // bit6：另一个外层实例完全独立
+  a2.v = 9;
+  a2.b.x = 10;
+  a2.b.y = 11;
+  if (a2.v == 9 && a2.b.x == 10 && a2.b.y == 11
+      && a.v == 42 && a.b.x == 445 && a.b.y == 333) { mask = mask | 64; }
+
+  // bit7：指针两级 p->b.x / p->b.y + 别名复核 + 哨兵
+  struct A *pa = &a;
+  pa->b.x = pa->b.x + 1;
+  pa->b.y = 500;
+  if (a.b.x == 446 && a.b.y == 500 && p[1] == 446 && p[2] == 500
+      && a2.b.x == 10 && guard == 12345) { mask = mask | 128; }
+
+  print(["f100 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

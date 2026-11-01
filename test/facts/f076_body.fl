@@ -1,0 +1,95 @@
+// f076_body.fl -- M3 第二刀：刚体 + grid tile 碰撞（不穿墙、能落地、可复现）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 地图 4x4 tile（16x16）：左墙 tx=0 整列 + 底行 ty=3 整行实心，其余空。
+//   bit0  空地：角色 (32,0,8,8) 与地图不重叠
+//   bit1  底行：角色 (32,48,8,8) 与地图重叠
+//   bit2  重力下落：10 步后 y > 0
+//   bit3  落地：200 步后 onground == 1
+//   bit4  落地后 vy == 0
+//   bit5  落地后位置稳定：再 10 步 y 不变
+//   bit6  水平撞左墙：vx=-1 格/tick、gravity=0，跑 100 步后 x 不再减小且 x >= 16px
+//   bit7  确定性：同一"下落序列"跑两次，y 逐位相同
+include "../../lib/body.fl"
+
+int fall_y(struct Grid *gp) {
+  struct Body b;
+  int i = 0;
+  body_init(&b, 32, 0, 8, 8);
+  i = 0;
+  while (i < 200) {
+    body_step(gp, &b, 32768);
+    i = i + 1;
+  }
+  return b.y;
+}
+
+int main() {
+  struct Grid g;
+  int map[16];
+  int mask = 0;
+  struct Body b;
+  struct Body b2;
+  int i = 0;
+  int y0 = 0;
+  int y1 = 0;
+  int x0 = 0;
+  int x1 = 0;
+
+  map[0] = 1; map[1] = 0; map[2] = 0; map[3] = 0;
+  map[4] = 1; map[5] = 0; map[6] = 0; map[7] = 0;
+  map[8] = 1; map[9] = 0; map[10] = 0; map[11] = 0;
+  map[12] = 1; map[13] = 1; map[14] = 1; map[15] = 1;
+  if (grid_init(&g, map, 4, 4, 16, 16) == 0) { return 1; }
+
+  if (body_hit(&g, 32, 0, 8, 8) == 0) { mask = mask | 1; }
+  if (body_hit(&g, 32, 48, 8, 8) == 1) { mask = mask | 2; }
+
+  if (body_init(&b, 32, 0, 8, 8) == 0) { return 2; }
+  i = 0;
+  while (i < 10) {
+    body_step(&g, &b, 32768);
+    i = i + 1;
+  }
+  if (b.y > 0) { mask = mask | 4; }
+
+  i = 0;
+  while (i < 200) {
+    body_step(&g, &b, 32768);
+    i = i + 1;
+  }
+  if (b.onground == 1) { mask = mask | 8; }
+  if (b.vy == 0) { mask = mask | 16; }
+
+  y0 = b.y;
+  i = 0;
+  while (i < 10) {
+    body_step(&g, &b, 32768);
+    i = i + 1;
+  }
+  if (b.y == y0) { mask = mask | 32; }
+
+  if (body_init(&b2, 32, 32, 8, 8) == 0) { return 3; }
+  b2.vx = -65536;
+  i = 0;
+  while (i < 100) {
+    body_step(&g, &b2, 0);
+    i = i + 1;
+  }
+  x0 = b2.x;
+  i = 0;
+  while (i < 10) {
+    body_step(&g, &b2, 0);
+    i = i + 1;
+  }
+  x1 = b2.x;
+  if (x0 == x1) {
+    if (x0 >= 16 * 65536) { mask = mask | 64; }
+  }
+
+  if (fall_y(&g) == fall_y(&g)) { mask = mask | 128; }
+
+  print(["f076 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

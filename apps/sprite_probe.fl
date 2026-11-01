@@ -1,0 +1,73 @@
+// apps\sprite_probe.fl -- M2 精灵动画：sprite.txt -> sprite_data.fl -> sprite_blit
+//
+// 运行：hlc run apps\sprite_probe.fl
+// 判据（自动）：退出码 = 每帧毫秒×10（和 gfx_probe 同口径）；90/91/92/93/94 = 环境/加载错误。
+// 画面：480×270 深底 + 一个 16×16 角色，每 10 帧切一次站/走。
+include "../lib/flgui_win32.fl"
+include "../lib/sprite.fl"
+include "../games/huiye/sprite_data.fl"
+
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct GfxBuf b;
+  struct GuiInput in;
+  int W = 480;
+  int H = 270;
+  int buf[512];
+  int pal[7];
+  int fc = 0;
+  int t0 = 0;
+  int t1 = 0;
+  int avg10 = 0;
+  int run = 1;
+  int frame = 0;
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  g.cls = "SPRITEPROBE";
+  g.x = 120;
+  g.y = 100;
+  g.w = W;
+  g.h = H;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  if (gfx_attach(&b, &sf, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  if (sprite_hero_load(buf) == 0) { return 93; }
+  if (sprite_pal_fill(pal) != 7) { return 94; }
+
+  // —— 测速：300 帧 ——
+  t0 = GetTickCount();
+  fc = 0;
+  while (fc < 300) {
+    if (gui_win_pump(&g, &in) == 0) { return 0; }
+    frame = (fc / 10) % 2;
+    gfx_clear(&b, 0x000B0E1A);
+    sprite_blit(&b, 232, 127, buf, 16, 16, frame, pal, 7);
+    gfx_present(&sf);
+    fc = fc + 1;
+  }
+  t1 = GetTickCount();
+  avg10 = (t1 - t0) * 10 / 300;
+  if (avg10 > 200) { avg10 = 200; }
+  print(["sprite avg10=", avg10, "\n"]);
+
+  // —— 演示 ——
+  fc = 0;
+  while (run == 1) {
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      frame = (fc / 10) % 2;
+      gfx_clear(&b, 0x000B0E1A);
+      sprite_blit(&b, 232, 127, buf, 16, 16, frame, pal, 7);
+      gfx_present(&sf);
+      gui_win_frame_wait(&c);
+      fc = fc + 1;
+    }
+  }
+  return avg10;
+}

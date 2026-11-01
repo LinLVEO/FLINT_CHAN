@@ -30,7 +30,7 @@
 //   criterion: contains -> add p8d=8 p80=33 p1d=1 p4d=4 p40=22 pp1d=1
 // DEPENDENCIES:
 //   E:\FLINT-lab\test\facts\f033_ptr_add_byte_step.fl;E:\FLINT-lab\test\facts\facts-run.ps1;
-//   E:\FLINT-lab\flint.exe;E:\FLINT-lab\boot\b1_emit.exe;
+//   E:\FLINT-lab\hlc.exe;E:\FLINT-lab\boot\b1_emit.exe;
 //   E:\FLINT-lab\src\parse.c;E:\FLINT-lab\src\codegen.c;E:\FLINT-lab\boot\lib_parse.fl;
 //   E:\FLINT-lab\boot\b1_emit.fl;E:\FLINT-lab\SPEC.md;E:\FLINT-lab\PROGRESS.md;
 //   E:\FLINT-lab\test\samples\audit7.fl;E:\FLINT-lab\boot\samples\b2k4.fl

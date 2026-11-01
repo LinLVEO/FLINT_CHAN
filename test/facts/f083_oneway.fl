@@ -1,0 +1,75 @@
+// f083_oneway.fl -- M3 第四刀：单向平台（tile 9）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 地图 4x4：左右墙 tx=0/3 实心、ty=2 整行单向平台(9)、ty=3 底行实心。
+//   bit0  从 (32,0) 下落 200 步 -> 停在平台顶 y == 16（脚底 32 == ty2 顶）
+//   bit1  body_hit_solid 对 (32,32) 的 9 -> 0（不算硬实心）
+//   bit2  body_hit 对 (32,32) 的 9 -> 1（全部实心口径含平台）
+//   bit3  从 (32,20) 上跳（vy=-8 格）20 步 -> y < 16（穿过平台到上方）
+//   bit4  左墙仍挡：body_hit_solid(0,32,16,16) == 1
+//   bit5  横移不被平台挡、被右墙挡：从 (16,32) vx=+2 格 30 步 -> x == 32
+//   bit6  落地后再 10 步 y 不变
+//   bit7  确定性：同一"落-跳-落"序列跑两次，y 逐位相同
+include "../../lib/body.fl"
+
+int oneway_fall_y(struct Grid *gp) {
+  struct Body b;
+  int i = 0;
+  body_init(&b, 32, 0, 16, 16);
+  i = 0;
+  while (i < 200) { body_step(gp, &b, 32768); i = i + 1; }
+  return b.y * 4 + b.onground;
+}
+
+int main() {
+  struct Grid g;
+  int map[16];
+  int mask = 0;
+  struct Body b;
+  int i = 0;
+  int y0 = 0;
+
+  map[0] = 1; map[1] = 0; map[2] = 0; map[3] = 1;
+  map[4] = 1; map[5] = 0; map[6] = 0; map[7] = 1;
+  map[8] = 9; map[9] = 9; map[10] = 9; map[11] = 9;
+  map[12] = 1; map[13] = 1; map[14] = 1; map[15] = 1;
+  if (grid_init(&g, map, 4, 4, 16, 16) == 0) { return 1; }
+
+  if (body_init(&b, 32, 0, 16, 16) == 0) { return 2; }
+  i = 0;
+  while (i < 200) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y == 16 * 65536) {
+    if (b.onground == 1) { mask = mask | 1; }
+  }
+
+  if (body_hit_solid(&g, 32, 32, 16, 16) == 0) { mask = mask | 2; }
+  if (body_hit(&g, 32, 32, 16, 16) == 1) { mask = mask | 4; }
+
+  if (body_init(&b, 32, 20, 16, 16) == 0) { return 3; }
+  b.vy = -8 * 65536;
+  i = 0;
+  while (i < 20) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y < 16 * 65536) { mask = mask | 8; }
+
+  if (body_hit_solid(&g, 0, 0, 16, 16) == 1) { mask = mask | 16; }
+
+  if (body_init(&b, 16, 16, 16, 16) == 0) { return 4; }
+  b.vx = 2 * 65536;
+  i = 0;
+  while (i < 30) { body_step(&g, &b, 0); i = i + 1; }
+  if (b.x == 32 * 65536) { mask = mask | 32; }
+
+  if (body_init(&b, 32, 0, 16, 16) == 0) { return 5; }
+  i = 0;
+  while (i < 200) { body_step(&g, &b, 32768); i = i + 1; }
+  y0 = b.y;
+  i = 0;
+  while (i < 10) { body_step(&g, &b, 32768); i = i + 1; }
+  if (b.y == y0) { mask = mask | 64; }
+
+  if (oneway_fall_y(&g) == oneway_fall_y(&g)) { mask = mask | 128; }
+
+  print(["f083 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

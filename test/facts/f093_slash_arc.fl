@@ -1,0 +1,71 @@
+// f093_slash_arc.fl -- M4 第四刀：贝塞尔刀光弧 + 沿弧发射粒子
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  slash_arc n=16,t=16,w=3 -> 16*9 = 144 像素
+//   bit1  t=8 -> 8*9 = 72
+//   bit2  t=0 -> 0
+//   bit3  w=1 -> 16 像素
+//   bit4  fx_emit_arc 发射 14 个 -> 返回 14
+//   bit5  发射后 14 个粒子 life > 0
+//   bit6  弧起点像素落在 (x0,y0) 附近（左上角有墨）
+//   bit7  确定性：两次画弧像素数相同
+include "../../lib/fx.fl"
+
+int arc_once(struct GfxBuf *b) {
+  gfx_clear(b, 0x00000000);
+  return slash_arc(b, 8, 8, 40, 0, 50, 56, 16, 16, 3, 0x00FFFFFF);
+}
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  struct Particle ps[32];
+  int mask = 0;
+  int i = 0;
+  int n = 0;
+  int live = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 64; s.cw = 64; s.ch = 64;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 64, 64) == 0) { return 2; }
+
+  gfx_clear(&b, 0x00000000);
+  n = slash_arc(&b, 8, 8, 40, 0, 50, 56, 16, 16, 3, 0x00FFFFFF);
+  if (n == 144) { mask = mask | 1; }
+
+  gfx_clear(&b, 0x00000000);
+  n = slash_arc(&b, 8, 8, 40, 0, 50, 56, 16, 8, 3, 0x00FFFFFF);
+  if (n == 72) { mask = mask | 2; }
+
+  if (slash_arc(&b, 8, 8, 40, 0, 50, 56, 16, 0, 3, 0x00FFFFFF) == 0) { mask = mask | 4; }
+
+  gfx_clear(&b, 0x00000000);
+  n = slash_arc(&b, 8, 8, 40, 0, 50, 56, 16, 16, 1, 0x00FFFFFF);
+  if (n == 16) { mask = mask | 8; }
+
+  i = 0;
+  while (i < 32) { ps[i].life = 0; i = i + 1; }
+  n = fx_emit_arc(ps, 32, 8, 8, 40, 0, 50, 56, 14);
+  if (n == 14) { mask = mask | 16; }
+
+  i = 0;
+  live = 0;
+  while (i < 32) {
+    if (ps[i].life > 0) { live = live + 1; }
+    i = i + 1;
+  }
+  if (live == 14) { mask = mask | 32; }
+
+  gfx_clear(&b, 0x00000000);
+  slash_arc(&b, 8, 8, 40, 0, 50, 56, 16, 16, 3, 0x00FFFFFF);
+  if (gfx_get(&b, 8, 8) == 0x00FFFFFF) { mask = mask | 64; }
+
+  if (arc_once(&b) == arc_once(&b)) { mask = mask | 128; }
+
+  print(["f093 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}
