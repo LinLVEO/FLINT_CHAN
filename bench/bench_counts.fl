@@ -1,2 +1,0 @@
-// bench_counts.fl - 由 gen-counts.ps1 生成，请勿手改（与 bench_counts.h 同值）
-int BC_N = 2097152;
