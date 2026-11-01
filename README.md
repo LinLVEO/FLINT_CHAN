@@ -4,16 +4,16 @@
 
 > 🧭 元信息（机检）：类型=对外 ｜ 快照=否
 > 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`（本文数字都是「事实标记」，值由取数器现算，不手抄）
-> 引用我=—（本文是入口） ｜ 我引用=`docs\README.md`、`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md`、`test\verify-all.ps1` ｜ 最后复核=2026-10-19 `test\docgate.mjs`
+> 引用我=—（本文是入口） ｜ 我引用=`docs\README.md`、`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md`、`test\verify-all.ps1`、`test\边界探针.ps1` ｜ 最后复核=2026-11-01 `test\docgate.mjs`
 
-> **一句话**：**暂时以 Windows 桌面开发为核心的发展中语言，目标是 Zig / C++ / Rust。**
->
-> 现在的读法：**一个自己写机器码的 Windows x64 编译器 ＋ 一个自绘 GUI 库（FLGUI）**。
+> **一句话**：**一个自己写 x86-64 机器码、自己写 PE 的 Windows 编译器 ＋ 一个自绘 GUI 库（FLGUI）**。
 > 从源码到 PE 的每一步都自己做 —— 不借 LLVM、不借汇编器、不借链接器、不借 C 运行时。
+> 它已经**能编译自己**（`boot\` 里的自举编译器达不动点），语言面还在持续长。
 
 | 事实 | 数字 / 说明 |
 |---|---|
-| 编译器版本 | v<!--fact:version-->0.1.0<!--/fact--> |
+| 编译器版本 | v<!--fact:version-->0.1.0<!--/fact-->（还没到 1.0，语法还在加） |
+| 本体 | <!--fact:src-files-->9<!--/fact--> 个 C 文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->13793<!--/fact--> 行 |
 | 产物 | 纯自产机器码 PE，无 CRT ／ 无运行时依赖；`hello` = <!--fact:product-hello-->3072<!--/fact--> B |
 | 自举 | `boot\` 里的自举编译器已达**不动点**（boot 编自己：两代产物 <!--fact:selfhost-fixedpoint-->same<!--/fact-->。它和 gcc 编出的 `hlc.exe` 不是同一个文件，两边一致性由差分门按**行为**判） |
 | 产物可复现性 | `hello` 重编 <!--fact:rebuild-hello-->same<!--/fact-->；面板 <!--fact:rebuild-winpanel-->differs<!--/fact-->、画廊 <!--fact:rebuild-uigallery-->differs<!--/fact-->（GUI 产物目前不保证字节稳定，判据看门不看 sha） |
@@ -29,7 +29,8 @@ FLINT_CHAN (Chinese: 打火石, abbreviated FLC), is an in-development language 
 centered on Windows desktop development, aiming at Zig, C++, and Rust. Today it is a
 compiler that emits raw x86-64 machine code and PE files by itself — no LLVM, no
 assembler, no linker, no C runtime — plus FLGUI, an immediate-mode GUI library drawn by
-the language itself. This page is the front door: what the project is, the three
+the language itself. It already compiles itself: the bootstrap compiler under `boot/`
+reaches a fixed point. This page is the front door: what the project is, the three
 commands that build it, the repository layout, and an honest list of what it cannot do
 yet. Technical docs live in `docs/`; process notes are not published.
 
@@ -49,7 +50,7 @@ cmd /c "gcc -O2 src\*.c -o hlc.exe"
 ```
 
 ```powershell
-# 3) 自己验一遍"边界表说的是真的"（44 条语言边界用例，全绿 = 与文档一致）
+# 3) 自己验一遍"边界表说的是真的"（<!--fact:probe-cases-->58<!--/fact--> 条语言边界用例，全绿 = 与文档一致）
 powershell -NoProfile -ExecutionPolicy Bypass -File test\边界探针.ps1
 ```
 
@@ -66,13 +67,36 @@ int main() {
 }
 ```
 
+## 语言现在长什么样
+
+**底子是 C 子集**：`int` / `int_64` / `char` / `double` / `uint_8` / `uint_32` / `uint_64`、指针、`struct`、`if` / `while` / `for` / `switch` / `break` / `continue`、`print` 段列表。
+
+**已经长出来的、不在 C 子集里的东西**（都是双端：真编译器 `hlc` ＋ 自举端 `boot\` 都认）：
+
+| 特性 | 形态 |
+|---|---|
+| `enum` 具名整数常量 | `enum St { IDLE, WALK, ATK = 5, DASH };`（首项 0、自增、显式赋值、冲突硬错） |
+| 二维数组 | `int m[32][17];`（row-major；`m[i][j]` 直接可用，解析期折成 `m[i*C+j]`） |
+| struct 值字段嵌套 | `struct A { struct B b; };` → `a.b.x`（C 布局对齐；`&a.b` 可取址） |
+| 局部数组整体初始化 | `int a[3] = {1, 2, 3};`（不足补 0；标量初值仍硬错） |
+| 错误传播 | `try e = f(x);`（展开成「调用 + 非 0 就 return」） |
+| C 风格转型 | `(type)expr`（含指针/整数边界检查，不静默截断） |
+| 检查档 | `-strict`（类型/未初始化/越界/宽度四类诊断，可单独开） |
+
+**明确没有**（诚实账）：泛型、异常、`sizeof`、模块/命名空间、函数指针数组、包管理/第三方库。
+平台只有 Windows x64。
+
+> 语言边界以 <!--fact:probe-cases-->58<!--/fact--> 条探针为唯一真值源：
+> 支持 <!--fact:probe-ok-->25<!--/fact--> 条 ／ 明确拒绝 <!--fact:probe-wall-->33<!--/fact--> 条 ／ 已知静默缺口 <!--fact:probe-gap-->0<!--/fact--> 条。
+> **文档与探针打架时，信探针。**
+
 ## 仓库结构
 
 | 路径 | 是什么 |
 |---|---|
 | `src\` | 编译器本体（C）：词法 / 语法 / 代码生成 / PE 写出；<!--fact:src-files-->9<!--/fact--> 个源文件（7 `.c` ＋ 2 `.h`）／<!--fact:src-loc-->13793<!--/fact--> 行 |
 | `lib\` | FLINT_CHAN 标准库（`.fl` 源码库）：字符串 / 数字 / 容器 / 文件 / 数学 / FLGUI |
-| `apps\` | 用 FLINT_CHAN 写的真实程序：`winpanel`（工具面板）、`m2_float`（硬件浮窗）、`ui_gallery`（控件画廊） |
+| `apps\` | 用 FLINT_CHAN 写的真实程序：`winpanel`（工具面板）、`m2_float`（硬件浮窗）、`ui_gallery`（控件画廊）、游戏灰盒 |
 | `examples\` | 五个能抄的示例：hello / 中文打印 / 退出码 / 文件 I/O / 最小窗口（`examples\run-all.ps1`） |
 | `boot\` | 自举编译器（用 FLINT_CHAN 写的 FLINT_CHAN）＋ `verify.ps1` |
 | `test\` | 门与判据：总门 `verify-all.ps1`（<!--fact:gate-steps-->15<!--/fact--> 步）／边界探针／FLGUI 门 |
@@ -99,7 +123,7 @@ int main() {
 - 一键出**单文件 exe**：无安装器、无运行时依赖、冷启动无初始化
 
 **不能做 / 还没有**（诚实账）
-- 语言层：无泛型、无异常、无 `sizeof`（**有** 无符号整型 `uint_8`/`uint_32`/`uint_64` 与 C 风格转型 `(type)expr`，见 `docs\语言参考.md`）
+- 语言层：无泛型、无异常（`try` 是错误传播糖，不是异常）、无 `sizeof`、无模块/命名空间、无函数指针数组
 - 平台层：只有 Windows x64；无多窗口、无高 DPI、IME 只"绕过"未"支持"
 - 生态层：无包管理、无第三方库（只能直调 DLL）、无 LSP / 格式化工具
 - 边界与坑：以 `docs\语言参考.md` 和 <!--fact:probe-cases-->58<!--/fact--> 条探针为准 —— **文档与探针打架时，信探针**

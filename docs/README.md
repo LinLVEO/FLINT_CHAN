@@ -2,7 +2,7 @@
 
 > 🧭 元信息（机检）：类型=对外 ｜ 快照=否
 > 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`（本文数字都是事实标记，值现算）
-> 引用我=`README.md` ｜ 我引用=`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md` ｜ 最后复核=2026-10-19 `test\docgate.mjs`
+> 引用我=`README.md` ｜ 我引用=`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md` ｜ 最后复核=2026-11-01 `test\docgate.mjs`
 
 这里讲**怎么用 FLINT_CHAN**，不讲项目怎么演进。项目是什么、现在到哪了，见仓库根 `README.md`。
 
@@ -15,6 +15,15 @@ limits), a standard-library guide (the `.fl` modules under `lib/`), and a GUI gu
 FLGUI. Every number in these pages is a fact marker computed from the source tree, so the
 docs cannot silently drift from the compiler. When a page and the boundary probes
 disagree, the probes win.
+
+## 编译器现在是什么
+
+一句话：**自己写机器码、自己写 PE 的 Windows x64 编译器（`hlc`）＋ 自绘 GUI 库（FLGUI）**。
+
+- 前端到 PE 全部自产：不借 LLVM / 汇编器 / 链接器 / C 运行时；
+- **自举**：`boot\` 里的自举编译器已到不动点（两代产物逐字节相同，<!--fact:boot-verify-->304/304<!--/fact--> 项自举验证全过）；
+- **语言面**（v<!--fact:version-->0.1.0<!--/fact-->，还在加）：C 子集 ＋ `enum` 常量组、二维数组、struct 值字段嵌套、局部数组整体初始化、`try` 错误传播、C 风格转型、`-strict` 诊断档；
+- **判据**：条数见 `test\边界探针.ps1`（当前 <!--fact:probe-cases-->58<!--/fact--> 条：支持 <!--fact:probe-ok-->25<!--/fact--> ／ 明确拒绝 <!--fact:probe-wall-->33<!--/fact--> ／ 静默缺口 <!--fact:probe-gap-->0<!--/fact-->）。
 
 ## 阅读顺序
 
