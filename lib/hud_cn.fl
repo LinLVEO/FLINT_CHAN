@@ -1,0 +1,118 @@
+// hud_cn.fl -- 16x16 CJK HUD text on top of the pixel layer.
+//
+// Why: FLINT source string literals cannot contain non-ASCII bytes, so Chinese UI text
+// travels as a GBK byte sequence and is looked up in a generated 16x16 bitmap table.
+// This library only draws foreground pixels (gfx_px); background pixels are never touched,
+// so it can be layered over any existing GfxBuf just like lib\hud.fl.
+//
+// Dependencies: gfx.fl (GfxBuf / gfx_px) and the generated table lib\hud_cn_font.fl.
+// Generator: tools\font_cn.js (Windows SimSun 12pt -> 16x16, pure-ASCII output).
+//
+// Usage:
+//   hud_cn_init();                                      // once at startup
+//   int b[8]; b[0]=0xBF; b[1]=0xAA; b[2]=0;             // GBK for U+5F00
+//   hud_cn_text(&gfx, x, y, b, 0x00F2C14E, 1);          // returns next x
+//   hud_cn_width(b, 1);                                 // 16
+//
+// Unknown GBK pairs draw nothing and hud_cn_char() returns 0; text/width still advance
+// one 16px cell so mixed known/unknown strings keep their layout.
+//
+// The table is a global int array (allowed; T1 only forbids putting addresses in globals).
+// It is filled once by hud_cn_init(), then treated as read-only.
+include "hud.fl"
+include "hud_cn_font.fl"
+
+// 26 chars x 16 rows x 16 bits = 416 ints (one int per 16-pixel row).
+// The generator checks this number against its own glyph set.
+int hud_cn_buf[416];
+
+// Fill the global table once. Returns 0.
+int hud_cn_init() {
+  hud_cn_load(hud_cn_buf);
+  return 0;
+}
+
+// Find the table index for a GBK pair. Returns -1 when the pair is not in the table.
+int hud_cn_find(int hi, int lo) {
+  int i = 0;
+  int n = 0;
+  n = hud_cn_count();
+  while (i < n) {
+    if (hud_cn_gbk_hi(i) == hi) {
+      if (hud_cn_gbk_lo(i) == lo) { return i; }
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// Draw one CJK glyph. (x,y) = top-left of the 16x16 cell; scale>=1 enlarges each dot.
+// Only foreground pixels are written; out-of-screen pixels are silently clipped.
+// Returns the number of pixels written (0 = unknown pair / fully off-screen / no table hit).
+int hud_cn_char(struct GfxBuf *b, int x, int y, int hi, int lo, int col, int scale) {
+  int idx = 0;
+  int row = 0;
+  int c = 0;
+  int bits = 0;
+  int n = 0;
+  int px = 0;
+  int py = 0;
+  int i = 0;
+  int j = 0;
+  if (scale < 1) { scale = 1; }
+  if (b == 0) { return 0; }
+  idx = hud_cn_find(hi, lo);
+  if (idx < 0) { return 0; }
+  while (row < 16) {
+    bits = hud_cn_buf[idx * 16 + row];
+    c = 0;
+    while (c < 16) {
+      if ((bits & (32768 >> c)) != 0) {
+        px = x + c * scale;
+        py = y + row * scale;
+        i = 0;
+        while (i < scale) {
+          j = 0;
+          while (j < scale) {
+            n = n + gfx_px(b, px + i, py + j, col);
+            j = j + 1;
+          }
+          i = i + 1;
+        }
+      }
+      c = c + 1;
+    }
+    row = row + 1;
+  }
+  return n;
+}
+
+// Draw a GBK byte sequence (2 bytes per glyph, 0-terminated). Returns the next x.
+// A trailing lone lead byte is ignored (no out-of-bounds read).
+int hud_cn_text(struct GfxBuf *b, int x, int y, int *bytes, int col, int scale) {
+  int i = 0;
+  int cx = x;
+  if (scale < 1) { scale = 1; }
+  if (bytes == 0) { return x; }
+  while (bytes[i] != 0) {
+    if (bytes[i + 1] == 0) { break; }
+    hud_cn_char(b, cx, y, bytes[i], bytes[i + 1], col, scale);
+    cx = cx + 16 * scale;
+    i = i + 2;
+  }
+  return cx;
+}
+
+// Pixel width of a GBK byte sequence; each pair is one 16px cell (no inter-glyph gap).
+int hud_cn_width(int *bytes, int scale) {
+  int i = 0;
+  int n = 0;
+  if (scale < 1) { scale = 1; }
+  if (bytes == 0) { return 0; }
+  while (bytes[i] != 0) {
+    if (bytes[i + 1] == 0) { break; }
+    n = n + 1;
+    i = i + 2;
+  }
+  return n * 16 * scale;
+}

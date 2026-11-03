@@ -1,0 +1,70 @@
+// f130_http.fl -- http_lib §2 POST / §3 状态码与头解析探针（纯解析 + 失败路径，不依赖任何本地服务器）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  http_status("HTTP/1.1 200 OK..." , 40) == 200
+//   bit1  http_status("HTTP/1.0 404 ..." , 26) == 404
+//   bit2  http_status("garbage", 7) == -1
+//   bit3  http_header(r1, 40, "Content-Length") == "2"
+//   bit4  头名大小写不敏感：http_header(r1, 40, "content-length") == "2"
+//   bit5  http_header(r1, 40, "X-No-Such") == -1
+//   bit6  http_post("127.0.0.1", 1, ...) 非 0（连不上，失败路径；不崩）
+//   bit7  http_post(0, 80, "/x", 0, 0, ...) 非 0（参数非法）
+//
+// 响应文本一律用字节数组手工拼（\r\n = 13,10），不靠字符串字面量转义。
+include "../../lib/http_lib.fl"
+
+int main() {
+  int mask = 0;
+  char r1[48];
+  char r2[32];
+  char r3[8];
+  char out[32];
+  char hbuf[64];
+  struct HttpBuf hb;
+  int n = 0;
+
+  // r1 = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"（40 字节）
+  r1[0] = 72; r1[1] = 84; r1[2] = 84; r1[3] = 80; r1[4] = 47;
+  r1[5] = 49; r1[6] = 46; r1[7] = 49; r1[8] = 32; r1[9] = 50;
+  r1[10] = 48; r1[11] = 48; r1[12] = 32; r1[13] = 79; r1[14] = 75;
+  r1[15] = 13; r1[16] = 10; r1[17] = 67; r1[18] = 111; r1[19] = 110;
+  r1[20] = 116; r1[21] = 101; r1[22] = 110; r1[23] = 116; r1[24] = 45;
+  r1[25] = 76; r1[26] = 101; r1[27] = 110; r1[28] = 103; r1[29] = 116;
+  r1[30] = 104; r1[31] = 58; r1[32] = 32; r1[33] = 50; r1[34] = 13;
+  r1[35] = 10; r1[36] = 13; r1[37] = 10; r1[38] = 104; r1[39] = 105;
+
+  // r2 = "HTTP/1.0 404 Not Found\r\n\r\n"（26 字节）
+  r2[0] = 72; r2[1] = 84; r2[2] = 84; r2[3] = 80; r2[4] = 47;
+  r2[5] = 49; r2[6] = 46; r2[7] = 48; r2[8] = 32; r2[9] = 52;
+  r2[10] = 48; r2[11] = 52; r2[12] = 32; r2[13] = 78; r2[14] = 111;
+  r2[15] = 116; r2[16] = 32; r2[17] = 70; r2[18] = 111; r2[19] = 117;
+  r2[20] = 110; r2[21] = 100; r2[22] = 13; r2[23] = 10; r2[24] = 13;
+  r2[25] = 10;
+
+  // r3 = "garbage"（7 字节）
+  r3[0] = 103; r3[1] = 97; r3[2] = 114; r3[3] = 98; r3[4] = 97;
+  r3[5] = 103; r3[6] = 101;
+
+  if (std::http_status(r1, 40) == 200) { mask = mask | 1; }
+  if (std::http_status(r2, 26) == 404) { mask = mask | 2; }
+  if (std::http_status(r3, 7) == 0 - 1) { mask = mask | 4; }
+
+  n = std::http_header(r1, 40, "Content-Length", out, 32);
+  if (n == 1) { if (out[0] == 50 && out[1] == 0) { mask = mask | 8; } }
+
+  n = std::http_header(r1, 40, "content-length", out, 32);
+  if (n == 1) { if (out[0] == 50 && out[1] == 0) { mask = mask | 16; } }
+
+  if (std::http_header(r1, 40, "X-No-Such", out, 32) == 0 - 1) { mask = mask | 32; }
+
+  hb.b = hbuf;
+  hb.cap = 64;
+  hb.n = 0;
+  if (std::http_post("127.0.0.1", 1, "/x", "a", 1, &hb) != 0) { mask = mask | 64; }
+
+  if (std::http_post(0, 80, "/x", 0, 0, &hb) != 0) { mask = mask | 128; }
+
+  print(["f130 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

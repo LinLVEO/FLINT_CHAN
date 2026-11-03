@@ -1,0 +1,83 @@
+// f112_flgui_pace.fl -- 帧限速器：持续输入信号下不变速（库层修复的判据）
+// 判据：8 位掩码全亮 -> 42；否则退当前掩码（便于定位掉位）。
+//
+// 老问题（2026-11-02 用户在 tower 上复现）：`gui_win_frame_wait` 靠 MsgWaitForMultipleObjects 等待 ——
+//   队列里**有输入消息时立刻醒**，帧周期被截短；而游戏物理/动画是固定步长（每帧 +1）⇒ 按住键整体加速。
+// 修法：等待改成「被唤醒后继续等剩余」（gui_win_wait_full）。
+//
+// 做法：造一个只设 frame_fps 的 GuiCtx（**不建窗**），用 PostThreadMessageA 往本线程灌消息，
+//   比较「无消息 / 有消息」两种情况下 10 帧的总时长。
+// 注意：GetTickCount 粒度 ≈15.6ms；60 档 10 帧 ≈156ms，够区分「被截短」（≈0-15ms）与「没截短」。
+api kernel32 int GetCurrentThreadId();
+api user32 int PostThreadMessageA(int, int, int, int);
+include "../../lib/flgui.fl"
+include "../../lib/flgui_win32.fl"
+
+int main() {
+  struct GuiCtx c;
+  int tid = 0;
+  int m = 0;
+  int t0 = 0;
+  int t1 = 0;
+  int dtA = 0;
+  int dtB = 0;
+  int dtA2 = 0;
+  int i = 0;
+  int r = 0;
+
+  c.frame_fps = 60;
+  tid = GetCurrentThreadId();
+
+  // bit0：周期换算（60 -> 16ms）
+  if (gui_frame_ms(&c) == 16) { m = m | 1; }
+
+  // 场景 A：无消息，10 帧
+  t0 = GetTickCount();
+  i = 0;
+  while (i < 10) { r = gui_win_frame_wait(&c); i = i + 1; }
+  t1 = GetTickCount();
+  dtA = t1 - t0;
+
+  // 场景 B：每帧前灌一条消息（模拟持续输入信号），10 帧
+  t0 = GetTickCount();
+  i = 0;
+  while (i < 10) {
+    PostThreadMessageA(tid, 0x0400, 0, 0);   // WM_USER
+    r = gui_win_frame_wait(&c);
+    i = i + 1;
+  }
+  t1 = GetTickCount();
+  dtB = t1 - t0;
+
+  // 场景 A2：再测一次无消息（确定性）
+  t0 = GetTickCount();
+  i = 0;
+  while (i < 10) { r = gui_win_frame_wait(&c); i = i + 1; }
+  t1 = GetTickCount();
+  dtA2 = t1 - t0;
+
+  // bit1：无消息 10 帧 >= 100ms（至少 6 格）
+  if (dtA >= 100) { m = m | 2; }
+  // bit2：无消息 10 帧 <= 400ms（不异常慢）
+  if (dtA <= 400) { m = m | 4; }
+  // bit3：有消息 10 帧 >= 100ms（修复关键：不被截短；修复前这里 ≈0-15ms）
+  if (dtB >= 100) { m = m | 8; }
+  // bit4：A/B 时长互相不超过对方的 1.5 倍
+  if (dtB <= dtA * 3 / 2) { if (dtA <= dtB * 3 / 2) { m = m | 16; } }
+  // bit5：不限速档（fps=0）立即返回：10 帧 < 100ms
+  c.frame_fps = 0;
+  t0 = GetTickCount();
+  i = 0;
+  while (i < 10) { r = gui_win_frame_wait(&c); i = i + 1; }
+  t1 = GetTickCount();
+  if (t1 - t0 < 100) { m = m | 32; }
+  // bit6：两次无消息序列接近（差 <= 50ms）
+  if (dtA >= dtA2 - 50) { if (dtA2 >= dtA - 50) { m = m | 64; } }
+  // bit7：有限速档返回值 = 1
+  c.frame_fps = 60;
+  r = gui_win_frame_wait(&c);
+  if (r == 1) { m = m | 128; }
+
+  if (m != 255) { return m; }
+  return 42;
+}

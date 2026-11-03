@@ -1,0 +1,163 @@
+// layer.fl -- 图层：z 序 + 分数缩放 + 镜像 + 层内偏移
+//
+// 为什么需要（2026-11-02）：
+//   1) AI 素材是 64x64 高保真稿，游戏里要缩到 48/40 上屏；sprite_blit_scale 只能
+//      整数倍，做不到 3/4、5/8 ⇒ 用 sprite_blit_frac，缩放比作为图层参数。
+//   2) 一个角色拆成「上身+头发」「腿」两层后，层间偏移就能做步态/呼吸，
+//      不用为每个动作存一张整图（一次省的是一整张 64x64 的字节表）。
+//   3) z 序让背景/角色/特效按顺序压，不用手写绘制顺序。
+//
+// 用法：
+//   struct LayerSys ls;
+//   layer_start(&ls);
+//   layer_add(&ls, 0, x, y, 10, 0, 0, 3, 4, 0);      // slot0：上身，3/4 缩放
+//   layer_add(&ls, 1, x, y, 11, 0, 42, 3, 4, 0);     // slot1：腿，向下偏 42
+//   layer_pose(&ls, 1, 0, 42);                        // 走路时改腿的偏移
+//   layer_order(&ls);                                 // 按 z 排
+//   i = 0;
+//   while (i < layer_count(&ls)) {
+//     s = layer_slot(&ls, i);
+//     if (s == 0) { sprite_blit_frac(&b, layer_px(&ls, i), layer_py(&ls, i), hbufA, wA, hA, frame, pal, n, layer_snum(&ls, i), layer_sden(&ls, i), layer_flip(&ls, i)); }
+//     if (s == 1) { sprite_blit_frac(&b, layer_px(&ls, i), layer_py(&ls, i), hbufB, wB, hB, frame, pal, n, layer_snum(&ls, i), layer_sden(&ls, i), layer_flip(&ls, i)); }
+//     i = i + 1;
+//   }
+//
+// 为什么库不管「哪张像素表」：语言里 struct 存不住函数指针/多态，素材表由调用方
+// 按 slot 分发；库只负责排序和变换，这样敌人、特效、UI 都能复用同一套。
+
+struct Layer {
+  int slot;
+  int x;
+  int y;
+  int z;
+  int ox;
+  int oy;
+  int snum;
+  int sden;
+  int flip;
+  int used;
+}
+
+struct LayerSys {
+  struct Layer it[16];
+  int n;
+}
+
+int layer_start(struct LayerSys *ls) {
+  ls->n = 0;
+  ls->it[0].used = 0;
+  return 1;
+}
+
+// 加一层；返回层索引（失败返回 -1）
+int layer_add(struct LayerSys *ls, int slot, int x, int y, int z, int ox, int oy, int snum, int sden, int flip) {
+  if (ls->n >= 16) { return 0 - 1; }
+  if (snum <= 0) { return 0 - 1; }
+  if (sden <= 0) { return 0 - 1; }
+  ls->it[ls->n].slot = slot;
+  ls->it[ls->n].x = x;
+  ls->it[ls->n].y = y;
+  ls->it[ls->n].z = z;
+  ls->it[ls->n].ox = ox;
+  ls->it[ls->n].oy = oy;
+  ls->it[ls->n].snum = snum;
+  ls->it[ls->n].sden = sden;
+  ls->it[ls->n].flip = flip;
+  ls->it[ls->n].used = 1;
+  ls->n = ls->n + 1;
+  return ls->n - 1;
+}
+
+int layer_count(struct LayerSys *ls) {
+  return ls->n;
+}
+
+int layer_slot(struct LayerSys *ls, int k) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  return ls->it[k].slot;
+}
+
+int layer_px(struct LayerSys *ls, int k) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  return ls->it[k].x + ls->it[k].ox;
+}
+
+int layer_py(struct LayerSys *ls, int k) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  return ls->it[k].y + ls->it[k].oy;
+}
+
+int layer_snum(struct LayerSys *ls, int k) {
+  if (k < 0) { return 1; }
+  if (k >= ls->n) { return 1; }
+  return ls->it[k].snum;
+}
+
+int layer_sden(struct LayerSys *ls, int k) {
+  if (k < 0) { return 1; }
+  if (k >= ls->n) { return 1; }
+  return ls->it[k].sden;
+}
+
+int layer_flip(struct LayerSys *ls, int k) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  return ls->it[k].flip;
+}
+
+// 改某一层的层内偏移（步态、呼吸、头发摆动都走这里）
+int layer_pose(struct LayerSys *ls, int k, int ox, int oy) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  ls->it[k].ox = ox;
+  ls->it[k].oy = oy;
+  return 1;
+}
+
+// 改某一层的缩放（整体缩小适配：3/4 = 48/64，5/8 = 40/64）
+int layer_scale(struct LayerSys *ls, int k, int snum, int sden) {
+  if (k < 0) { return 0; }
+  if (k >= ls->n) { return 0; }
+  if (snum <= 0) { return 0; }
+  if (sden <= 0) { return 0; }
+  ls->it[k].snum = snum;
+  ls->it[k].sden = sden;
+  return 1;
+}
+
+// 交换两层（逐字段搬：struct 数组元素没有整体值语义，不能 tmp = it[i]）
+int layer_swap(struct LayerSys *ls, int a, int b) {
+  int t = 0;
+  t = ls->it[a].slot;  ls->it[a].slot = ls->it[b].slot;  ls->it[b].slot = t;
+  t = ls->it[a].x;     ls->it[a].x = ls->it[b].x;        ls->it[b].x = t;
+  t = ls->it[a].y;     ls->it[a].y = ls->it[b].y;        ls->it[b].y = t;
+  t = ls->it[a].z;     ls->it[a].z = ls->it[b].z;        ls->it[b].z = t;
+  t = ls->it[a].ox;    ls->it[a].ox = ls->it[b].ox;      ls->it[b].ox = t;
+  t = ls->it[a].oy;    ls->it[a].oy = ls->it[b].oy;      ls->it[b].oy = t;
+  t = ls->it[a].snum;  ls->it[a].snum = ls->it[b].snum;  ls->it[b].snum = t;
+  t = ls->it[a].sden;  ls->it[a].sden = ls->it[b].sden;  ls->it[b].sden = t;
+  t = ls->it[a].flip;  ls->it[a].flip = ls->it[b].flip;  ls->it[b].flip = t;
+  t = ls->it[a].used;  ls->it[a].used = ls->it[b].used;  ls->it[b].used = t;
+  return 1;
+}
+
+// 按 z 升序排（层数 ≤16，选择排序足够）
+int layer_order(struct LayerSys *ls) {
+  int i = 0;
+  int j = 0;
+  int m = 0;
+  while (i < ls->n) {
+    m = i;
+    j = i + 1;
+    while (j < ls->n) {
+      if (ls->it[j].z < ls->it[m].z) { m = j; }
+      j = j + 1;
+    }
+    if (m != i) { layer_swap(ls, i, m); }
+    i = i + 1;
+  }
+  return 1;
+}

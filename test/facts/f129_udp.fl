@@ -1,0 +1,67 @@
+// f129_udp.fl -- net_lib §2 UDP + §3 DNS 探针（本机回环，不依赖外网）
+// 判据（8 位掩码全亮 255 -> 退出 42；期望值 = 本机实测）：
+//   bit0  std::udp_open(&u, "0.0.0.0", 0) == 1（建 socket + bind 任意端口）
+//   bit1  std::udp_send(&u, "127.0.0.1", 9, "x", 1) == 1（UDP 无连接，发出去就算成功）
+//   bit2  std::udp_recv(&u, buf, 8) == -1（没人回包；本机 ICMP 端口不可达会更早报错，
+//         最坏由 SO_RCVTIMEO 500 ms 兜底返回 -1，不死等）
+//   bit3  std::udp_close(&u) == 1，再 close == 0（幂等）
+//   bit4  std::udp_send 未打开（刚关掉）返回 -1
+//   bit5  std::dns_resolve("127.0.0.1", out, 32) 得到 "127.0.0.1"（逐字符）
+//   bit6  std::dns_resolve("no_such_host_zzz.invalid", out, 32) == -1（失败不崩）
+//   bit7  std::dns_resolve("127.0.0.1", out, 4) == -1（容量不够 -> 响亮失败）
+include "../../lib/net_lib.fl"
+
+int main() {
+  struct Udp u;
+  char buf[8];
+  char out[32];
+  int mask = 0;
+  int i = 0;
+
+  u.s = 0;                                   // 局部 struct 字段不清零 -> 先赋值
+  i = 0;
+  while (i < 8) { buf[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < 32) { out[i] = 0; i = i + 1; }
+
+  if (std::udp_open(&u, "0.0.0.0", 0) == 1) { mask = mask | 1; }
+
+  if (std::udp_send(&u, "127.0.0.1", 9, "x", 1) == 1) { mask = mask | 2; }
+
+  if (std::udp_recv(&u, buf, 8) == 0 - 1) { mask = mask | 4; }
+
+  if (std::udp_close(&u) == 1) {
+    if (std::udp_close(&u) == 0) { mask = mask | 8; }
+  }
+
+  if (std::udp_send(&u, "127.0.0.1", 9, "x", 1) == 0 - 1) { mask = mask | 16; }
+
+  std::dns_resolve("127.0.0.1", out, 32);
+  if (out[0] == '1') {
+    if (out[1] == '2') {
+      if (out[2] == '7') {
+        if (out[3] == '.') {
+          if (out[4] == '0') {
+            if (out[5] == '.') {
+              if (out[6] == '0') {
+                if (out[7] == '.') {
+                  if (out[8] == '1') {
+                    if (out[9] == 0) { mask = mask | 32; }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (std::dns_resolve("no_such_host_zzz.invalid", out, 32) == 0 - 1) { mask = mask | 64; }
+
+  if (std::dns_resolve("127.0.0.1", out, 4) == 0 - 1) { mask = mask | 128; }
+
+  print(["f129 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

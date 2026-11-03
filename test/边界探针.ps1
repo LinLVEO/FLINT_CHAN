@@ -113,12 +113,14 @@ int main() {
   # ---------- wall：明确挡住的墙（断言错误关键词）----------
   @{ n='param_33';         kind='wall'; err='参数最多 32 个';    note='内部函数参数 **33**（越过 v1.4.26 新上限 32；旧口径 4 见本文件历史）';
      src=(GenParams 33) }
-  @{ n='global_ptr_var';   kind='wall'; err='指针类型的全局变量';  note='全局变量不能是指针';
-     src='int *gp;' + "`n" + 'int main() { int x = 5; gp = &x; return 42; }' }
-  @{ n='global_struct';    kind='wall'; err='struct 全局变量';     note='struct 不能当全局变量';
-     src='struct S { int a; }' + "`n" + 'struct S gs;' + "`n" + 'int main() { return 42; }' }
-  @{ n='global_struct_ptr'; kind='wall'; err='struct 全局变量';    note='⚠️ 连"全局 struct 指针"也拒（可 global_struct 的报错文案却建议用它 —— 文案误导）';
-     src='struct S { int a; }' + "`n" + 'struct S *gsp;' + "`n" + 'int main() { return 42; }' }
+  # v1.10.0（IDE 服务端）起**标量指针全局**已开放；v2.13.0 起 struct 族全局也开放 —— 下面三条用例
+  # 2026-11-02 从 wall 改判为 ok（实测：编过 + 运行时 42）。**保留原位置**，避免 §1 表出处行号整体漂移。
+  @{ n='global_ptr_var';   kind='ok'; code=42; note='全局指针变量（v1.10.0 起开放：int*/char*/double*/int_64*/uint_* 8 字节槽；v2.13.0 起 struct 指针也在内）';
+     src='int *gp;' + "`n" + 'int main() { int x = 5; gp = &x; if (*gp == 5) return 42; return 1; }' }
+  @{ n='global_struct';    kind='ok'; code=42; note='全局 struct（v2.13.0 起开放；.bss 全零语义，整体初始化仍拒）';
+     src='struct S { int a; int b; }' + "`n" + 'struct S gs;' + "`n" + 'int main() { gs.a = 7; gs.b = 8; if (gs.a == 7 && gs.b == 8) return 42; return 1; }' }
+  @{ n='global_struct_ptr'; kind='ok'; code=42; note='全局 struct 指针（v2.13.0 起开放；指针字段穿透 gsp->a 可用）';
+     src='struct S { int a; }' + "`n" + 'struct S *gsp;' + "`n" + 'int main() { struct S s; s.a = 9; gsp = &s; if (gsp->a == 9) return 42; return 1; }' }
   @{ n='char_array_init';  kind='wall'; err='数组暂不支持整体初始化'; note='char 数组不能整体初始化';
      src='int main() { char s[4] = "abc"; return s[0]; }' }
   @{ n='adjacent_strings'; kind='wall'; err="期望 ';'";           note='相邻字符串字面量不拼接';

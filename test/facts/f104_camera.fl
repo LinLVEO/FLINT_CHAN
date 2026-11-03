@@ -1,0 +1,135 @@
+// f104_camera.fl -- 2D 相机：死区跟随 + 世界边界 clamp
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 口径：x/y = 视口左上角；vw/vh = 视口；dx/dy = 死区半径（半宽/半高）。
+// 相机中心 = x + vw/2（整数除法）；死区含边界；世界比视口小时固定 0。
+//   bit0  非法参数拒：c==0 / vw<=0 / vh<=0 / dx<0 / dy<0 返回 0；合法 init 返回 1 且字段落位
+//   bit1  死区内不跟：目标在中心、正好贴四边（含边界）时相机不动（另测中心读值）
+//   bit2  右移越死区：相机正好把目标按在右死区边（x = tx - dx - vw/2）
+//   bit3  左移越死区：同上（左，x = tx + dx - vw/2）
+//   bit4  上下越死区：目标向下越界追上、向上越界追上
+//   bit5  横向 clamp：世界右端 x = ww - vw、左端 x = 0
+//   bit6  纵向 clamp：世界底端 y = wh - vh、顶端 y = 0
+//   bit7  世界小于视口固定 0 + 多步连续跟随逐点位置确定（两次同序列一致）
+include "../../lib/camera.fl"
+
+int main() {
+  struct Camera c;
+  struct Camera c2;
+  struct Camera *np;
+  int mask = 0;
+  int ok = 0;
+
+  // ---- bit0：非法参数拒 + 合法 init ----
+  np = 0;
+  ok = 1;
+  if (camera_init(np, 320, 180, 40, 30) != 0) { ok = 0; }
+  if (camera_init(&c, 0, 180, 40, 30) != 0) { ok = 0; }
+  if (camera_init(&c, 320, 0, 40, 30) != 0) { ok = 0; }
+  if (camera_init(&c, 320, 180, -1, 30) != 0) { ok = 0; }
+  if (camera_init(&c, 320, 180, 40, -1) != 0) { ok = 0; }
+  if (camera_init(&c, 320, 180, 40, 30) != 1) { ok = 0; }
+  if (c.x != 0) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+  if (c.vw != 320) { ok = 0; }
+  if (c.vh != 180) { ok = 0; }
+  if (c.dx != 40) { ok = 0; }
+  if (c.dy != 30) { ok = 0; }
+  if (camera_cx(&c) != 160) { ok = 0; }
+  if (camera_cy(&c) != 90) { ok = 0; }
+  if (ok == 1) { mask = mask | 1; }
+
+  // ---- bit1：死区内不跟（中心 + 四条边）----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 100; c.y = 50;                          // 中心 (260,140)
+  camera_follow(&c, 260, 140, 1000, 600);       // 正中
+  camera_follow(&c, 300, 170, 1000, 600);       // 右/下正好贴边（含边界）
+  camera_follow(&c, 220, 110, 1000, 600);       // 左/上正好贴边
+  if (c.x == 100) { if (c.y == 50) { mask = mask | 2; } }
+
+  // ---- bit2：右移越死区 10px -> x = 310 - 40 - 160 = 110 ----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 100; c.y = 50;                          // 中心 (260,140)
+  camera_follow(&c, 310, 140, 1000, 600);
+  if (c.x == 110) { if (c.y == 50) { mask = mask | 4; } }
+
+  // ---- bit3：左移越死区 10px -> x = 310 + 40 - 160 = 190 ----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 200; c.y = 50;                          // 中心 (360,140)
+  camera_follow(&c, 310, 140, 1000, 600);
+  if (c.x == 190) { if (c.y == 50) { mask = mask | 8; } }
+
+  // ---- bit4：上下越死区 ----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 100; c.y = 50;                          // 中心 (260,140)
+  camera_follow(&c, 260, 180, 1000, 600);       // 下越 10px -> y = 180 - 30 - 90 = 60
+  ok = 0;
+  if (c.y == 60) { ok = 1; }
+  c.x = 100; c.y = 200;                         // 中心 (260,290)
+  camera_follow(&c, 260, 250, 1000, 600);       // 上越 10px -> y = 250 + 30 - 90 = 190
+  if (ok == 1) { if (c.y == 190) { mask = mask | 16; } }
+
+  // ---- bit5：横向 clamp（世界 1000 宽，视口 320 -> [0,680]）----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 0; c.y = 0;
+  camera_follow(&c, 1000, 90, 1000, 600);       // 算得 800 -> clamp 680
+  ok = 0;
+  if (c.x == 680) { if (c.y == 0) { ok = 1; } }
+  camera_follow(&c, 0, 90, 1000, 600);          // 算得 -120 -> clamp 0
+  if (ok == 1) { if (c.x == 0) { mask = mask | 32; } }
+
+  // ---- bit6：纵向 clamp（世界 600 高，视口 180 -> [0,420]）----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 0; c.y = 0;
+  camera_follow(&c, 160, 600, 1000, 600);       // 算得 480 -> clamp 420
+  ok = 0;
+  if (c.y == 420) { if (c.x == 0) { ok = 1; } }
+  camera_follow(&c, 160, 0, 1000, 600);         // 算得 -60 -> clamp 0
+  if (ok == 1) { if (c.y == 0) { mask = mask | 64; } }
+
+  // ---- bit7：世界小于视口固定 0 + 多步连续跟随 ----
+  camera_init(&c, 320, 180, 40, 30);
+  c.x = 50; c.y = 20;
+  camera_follow(&c, 5000, 5000, 200, 100);      // 世界 200x100 比视口小 -> 固定 0
+  ok = 0;
+  if (c.x == 0) { if (c.y == 0) { ok = 1; } }
+  camera_follow(&c, 0, 0, 200, 100);
+  if (c.x != 0) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+
+  // 多步序列（起点 (0,0)，世界 1000x600）：
+  //   (500,300) -> (300,180)；(500,300) 不动；(700,500) -> (500,380)；
+  //   (0,0) -> (0,0)；(1000,600) -> clamp (680,420)
+  camera_init(&c, 320, 180, 40, 30);
+  camera_init(&c2, 320, 180, 40, 30);
+  camera_follow(&c, 500, 300, 1000, 600);
+  if (c.x != 300) { ok = 0; }
+  if (c.y != 180) { ok = 0; }
+  camera_follow(&c, 500, 300, 1000, 600);
+  if (c.x != 300) { ok = 0; }
+  if (c.y != 180) { ok = 0; }
+  camera_follow(&c, 700, 500, 1000, 600);
+  if (c.x != 500) { ok = 0; }
+  if (c.y != 380) { ok = 0; }
+  camera_follow(&c, 0, 0, 1000, 600);
+  if (c.x != 0) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+  camera_follow(&c, 1000, 600, 1000, 600);
+  if (c.x != 680) { ok = 0; }
+  if (c.y != 420) { ok = 0; }
+
+  // 同一序列跑第二台相机，逐位一致
+  camera_follow(&c2, 500, 300, 1000, 600);
+  camera_follow(&c2, 500, 300, 1000, 600);
+  camera_follow(&c2, 700, 500, 1000, 600);
+  camera_follow(&c2, 0, 0, 1000, 600);
+  camera_follow(&c2, 1000, 600, 1000, 600);
+  if (c2.x != c.x) { ok = 0; }
+  if (c2.y != c.y) { ok = 0; }
+
+  if (ok == 1) { mask = mask | 128; }
+
+  print(["f104 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

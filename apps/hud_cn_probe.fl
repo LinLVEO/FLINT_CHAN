@@ -1,0 +1,89 @@
+// hud_cn_probe.fl -- logic smoke test for lib\hud_cn.fl (no window, memory DIB only).
+//
+// Draws the game title and a few UI words in 16x16 CJK glyphs, mixes them with the
+// existing 5x7 ASCII HUD (lib\hud.fl), and checks known foreground / background pixels.
+// Build: tmp\hlc_stable.exe -o tmp\hud_cn_probe.exe apps\hud_cn_probe.fl
+// Exit 0 = all checks passed (this is a smoke sample, not the 42-mask probe).
+include "../lib/hud_cn.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int bg = 0x00112233;
+  int fg = 0x00F2C14E;
+  int title[16];
+  int menu[8];
+  int pause[8];
+  int miss[4];
+  int cx = 0;
+  int n = 0;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 160; s.bh = 64; s.cw = 160; s.ch = 64;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 160, 64) == 0) { return 2; }
+  if (hud_init() != 0) { return 3; }
+  if (hud_cn_init() != 0) { return 4; }
+
+  // GBK byte sequences for U+865A U+5984 U+4E4B U+5854, U+5F00 U+59CB,
+  // U+6682 U+505C and uncollected U+9F8D.  All literals stay ASCII.
+  title[0] = 0xD0; title[1] = 0xE9; title[2] = 0xCD; title[3] = 0xFD;
+  title[4] = 0xD6; title[5] = 0xAE; title[6] = 0xCB; title[7] = 0xFE;
+  title[8] = 0; title[9] = 0; title[10] = 0; title[11] = 0;
+  title[12] = 0; title[13] = 0; title[14] = 0; title[15] = 0;
+  menu[0] = 0xBF; menu[1] = 0xAA; menu[2] = 0xCA; menu[3] = 0xBC; menu[4] = 0;
+  menu[5] = 0; menu[6] = 0; menu[7] = 0;
+  pause[0] = 0xD4; pause[1] = 0xDD; pause[2] = 0xCD; pause[3] = 0xA3; pause[4] = 0;
+  pause[5] = 0; pause[6] = 0; pause[7] = 0;
+  miss[0] = 0xFD; miss[1] = 0x88; miss[2] = 0; miss[3] = 0;
+
+  gfx_clear(&b, bg);
+
+  // Title: 4 glyphs at 16 px each; next pen = 8 + 64 = 72.
+  if (hud_cn_width(title, 1) != 64) { return 5; }
+  cx = hud_cn_text(&b, 8, 4, title, fg, 1);
+  if (cx != 72) { return 6; }
+  if (gfx_get(&b, 15, 4) != fg) { return 7; }        // U+865A row 0 col 7 => (8+7, 4)
+  if (gfx_get(&b, 30, 4) != fg) { return 8; }        // U+5984 row 0 col 6 => (8+16+6, 4)
+  if (gfx_get(&b, 8, 4) != bg) { return 9; }         // leading blank column
+  if (gfx_get(&b, 0, 0) != bg) { return 10; }        // background untouched
+
+  // UI word U+5F00 U+59CB at (8,24); U+5F00 row 1 col 1 => (9,25).
+  if (hud_cn_width(menu, 1) != 32) { return 11; }
+  cx = hud_cn_text(&b, 8, 24, menu, fg, 1);
+  if (cx != 40) { return 12; }
+  if (gfx_get(&b, 9, 25) != fg) { return 13; }
+  if (gfx_get(&b, 27, 24) != fg) { return 14; }      // U+59CB row 0 col 3 => 8+16+3
+
+  // UI word U+6682 U+505C at (8,44).
+  cx = hud_cn_text(&b, 8, 44, pause, fg, 1);
+  if (cx != 40) { return 15; }
+  if (gfx_get(&b, 8 + 3, 44) != fg) { return 16; }   // U+6682 row 0 col 3
+
+  // Coexistence with the 5x7 ASCII HUD: "HP" at (80,4), number 42 at (80,24).
+  if (hud_text(&b, 80, 4, "HP", fg, 1) != 92) { return 17; }
+  if (gfx_get(&b, 80, 4) != fg) { return 18; }       // 'H' row 0 col 0
+  if (hud_num(&b, 80, 24, 42, fg, 1) != 92) { return 19; }
+  if (gfx_get(&b, 83, 24) != fg) { return 20; }      // '4' row 0 col 3 => (80+3, 24)
+
+  // Unknown pair: blank, no crash.
+  n = hud_cn_char(&b, 8, 44, 0xFD, 0x88, fg, 1);
+  if (n != 0) { return 21; }
+  if (hud_cn_text(&b, 8, 44, miss, fg, 1) != 24) { return 22; }
+
+  // Out of bounds: does not crash; fully off-screen is a no-op.
+  if (hud_cn_char(&b, 200, 80, 0xD0, 0xE9, fg, 1) != 0) { return 23; }
+
+  // scale=2 title fits 4*32=128 px; pen = 8 + 128 = 136.
+  gfx_clear(&b, bg);
+  if (hud_cn_text(&b, 8, 8, title, fg, 2) != 136) { return 24; }
+  if (gfx_get(&b, 8 + 14, 8) != fg) { return 25; }   // U+865A row 0 col 7 => 8+7*2
+  if (gfx_get(&b, 8 + 15, 9) != fg) { return 26; }   // 2x2 block
+  if (gfx_get(&b, 8 + 13, 8) != bg) { return 27; }
+  if (gfx_get(&b, 0, 0) != bg) { return 28; }
+
+  print(["hud_cn_probe OK\n"]);
+  return 0;
+}

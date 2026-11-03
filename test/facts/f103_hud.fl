@@ -1,0 +1,76 @@
+// f103_hud -- 像素 HUD 文字（5x7 点阵）：hud.fl 的 init/glyph/char/text/num/width
+// 判据：本样本编译通过且退出 42（8 项位掩码全亮）。
+// 为什么不开窗：与 f070 同一套路 —— surf_init 只要内存 DC + DIB，纯进程内可判。
+// 覆盖：字库表正确 / 前景像素位置 / 背景透明 / 越界不写 / 笔位推进 / 数字形状 /
+//       scale 放大 / 宽度与大小写映射。
+include "../../lib/hud.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int bits = 0;
+  int n = 0;
+  int cx = 0;
+  int bg = 0x00112233;
+  int fg = 0x00F2C14E;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 32; s.cw = 64; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+
+  n = gfx_attach(&b, &s, 64, 32);
+  if (n == 0) { return 2; }
+  if (hud_init() != 0) { return 3; }
+
+  // ---- bit0：字库表（'A' 第 0 行 = 列2 = 4；第 4 行 = 全 31；'B' 第 0 行 = 0b11110 = 30）----
+  if (hud_glyph('A', 0) == 4) { bits = bits | 1; }
+  if (hud_glyph('A', 4) != 31) { bits = bits & ~1; }
+  if (hud_glyph('B', 0) != 30) { bits = bits & ~1; }
+
+  // ---- bit1：画 'A' 到 (1,1)，第 0 行只有列2 亮；第 2 行（y=3）只有列0/4 亮 ----
+  gfx_clear(&b, bg);
+  hud_char(&b, 1, 1, 'A', fg, 1);
+  if (gfx_get(&b, 3, 1) == fg) { bits = bits | 2; }
+  if (gfx_get(&b, 1, 1) != bg) { bits = bits & ~2; }       // 列0 在第 0 行是空的
+  if (gfx_get(&b, 1, 3) != fg) { bits = bits & ~2; }       // 第 2 行列0 亮
+
+  // ---- bit2：背景透明（'A' 周围没被写的像素仍是 bg）----
+  if (gfx_get(&b, 20, 20) == bg) { bits = bits | 4; }
+  if (gfx_get(&b, 0, 0) != bg) { bits = bits & ~4; }       // 屏角没被写
+
+  // ---- bit3：越界安全（整字在屏外 = 返回 0；部分在屏内不崩）----
+  n = hud_char(&b, 100, 0, 'A', fg, 1);
+  if (n == 0) { bits = bits | 8; } else { bits = bits & ~8; }
+  n = hud_char(&b, 63, 0, 'A', fg, 1);
+  if (n < 0) { bits = bits & ~8; }
+
+  // ---- bit4：hud_text 笔位推进（"AB" 从 x=1 起，返回 1+12=13；B 第 0 行从 x=7 起）----
+  gfx_clear(&b, bg);
+  cx = hud_text(&b, 1, 1, "AB", fg, 1);
+  if (cx == 13) { bits = bits | 16; } else { bits = bits & ~16; }
+  if (gfx_get(&b, 7, 1) != fg) { bits = bits & ~16; }      // B 的列0
+  if (gfx_get(&b, 10, 1) != fg) { bits = bits & ~16; }     // B 的列3（"####."）
+
+  // ---- bit5：hud_num(1) 从 x=1 起，返回 7；第 6 行 ".###." 的列1 在 (2,7) ----
+  gfx_clear(&b, bg);
+  cx = hud_num(&b, 1, 1, 1, fg, 1);
+  if (cx == 7) { bits = bits | 32; } else { bits = bits & ~32; }
+  if (gfx_get(&b, 2, 7) != fg) { bits = bits & ~32; }
+
+  // ---- bit6：scale=2 时 'A' 第 0 行列2 变成 2x2 块（(5,1)(6,1)(5,2)(6,2)）----
+  gfx_clear(&b, bg);
+  hud_char(&b, 1, 1, 'A', fg, 2);
+  if (gfx_get(&b, 5, 1) != fg) { bits = bits & ~64; }
+  if (gfx_get(&b, 6, 2) != fg) { bits = bits & ~64; }
+  if (gfx_get(&b, 5, 3) == bg) { bits = bits | 64; } else { bits = bits & ~64; }  // 第 2 行不在 (5,3)
+
+  // ---- bit7：宽度 + 小写映射（hud_width("AB")=11；'a' 与 'A' 同形）----
+  if (hud_width("AB", 1) == 11) { bits = bits | 128; }
+  if (hud_width("", 1) != 0) { bits = bits & ~128; }
+  if (hud_glyph('a', 0) != 4) { bits = bits & ~128; }
+
+  if (bits != 255) { return 3; }
+  return 42;
+}

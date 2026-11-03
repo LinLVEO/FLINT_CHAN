@@ -1,0 +1,50 @@
+// f131_sys3.fl -- sys_lib §8 目录递归删除 + §9 文件时间探针
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+//   bit0  path_mkdir("test\\tmp\\f131_tree") == 1
+//   bit1  path_mkdir("test\\tmp\\f131_tree\\sub") == 1
+//   bit2  写 test\\tmp\\f131_tree\\sub\\a.txt 成功（内容 "x"）
+//   bit3  写 test\\tmp\\f131_tree\\b.txt 成功（内容 "y"）
+//   bit4  dir_remove_tree("test\\tmp\\f131_tree") == 1
+//   bit5  path_exists("test\\tmp\\f131_tree") == 0（删干净）
+//   bit6  dir_remove_tree 对不存在的路径返回 1（幂等）
+//   bit7  file_mtime("test\\facts\\f131_sys3.fl") == 1 且 (lo|hi) != 0
+include "../../lib/sys_lib.fl"
+api kernel32 ptr CreateFileA(int, int, int, int, int, int, int);
+api kernel32 int WriteFile(int, int, int, int, int);
+
+// 写一个小文本文件：1 = 写完；0 = 失败
+int f131_write(char *path, char *s) {
+  int *h = CreateFileA(path, 0x40000000, 0, 0, 2, 0x80, 0);
+  int wrote = 0;
+  int n = 0;
+  if (h == 0) { return 0; }
+  while (s[n] != 0) { n = n + 1; }
+  if (WriteFile(h, s, n, &wrote, 0) == 0) { CloseHandle(h); return 0; }
+  CloseHandle(h);
+  if (wrote != n) { return 0; }
+  return 1;
+}
+
+int main() {
+  int mask = 0;
+  int lo = 0;
+  int hi = 0;
+
+  if (std::path_mkdir("test\\tmp\\f131_tree") == 1) { mask = mask | 1; }
+  if (std::path_mkdir("test\\tmp\\f131_tree\\sub") == 1) { mask = mask | 2; }
+  if (f131_write("test\\tmp\\f131_tree\\sub\\a.txt", "x") == 1) { mask = mask | 4; }
+  if (f131_write("test\\tmp\\f131_tree\\b.txt", "y") == 1) { mask = mask | 8; }
+
+  if (std::dir_remove_tree("test\\tmp\\f131_tree") == 1) { mask = mask | 16; }
+  if (std::path_exists("test\\tmp\\f131_tree") == 0) { mask = mask | 32; }
+  if (std::dir_remove_tree("test\\tmp\\no_such_tree_zzz") == 1) { mask = mask | 64; }
+
+  if (std::file_mtime("test\\facts\\f131_sys3.fl", &lo, &hi) == 1) {
+    if ((lo | hi) != 0) { mask = mask | 128; }
+  }
+
+  print(["f131 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

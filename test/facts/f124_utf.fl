@@ -1,0 +1,133 @@
+// f124_utf.fl -- codec_lib §4 UTF-8 ↔ UTF-16 探针：8 位掩码全亮（255）→ 退出 42
+// 判据（全部真跑；期望值 = 临时程序 test/tmp/proto_utf.fl 实测值，不是手推）：
+//   bit0  ASCII 往返："hello" → UTF-16 → UTF-8 得到同样的 5 字节（逐字节比）
+//   bit1  长度：utf16_len("hello",5) == 12（5 个宽字符 + 结尾 0，每单位 2 字节）
+//   bit2  中文往返：UTF-8 "你好"（6 字节）→ UTF-16（4 字节）→ 回 UTF-8 得到同样 6 字节
+//   bit3  UTF-16 字节内容："你好" = 2 个码元 4 字节 96 79 125 89（U+4F60/U+597D 小端），
+//         且 utf16_len(zh,6) == 6（4 + 结尾 0），utf8_to_utf16 返回 4
+//   bit4  cap 不够：utf8_to_utf16("hello",5,out,4) == -1，且 out 4 个预填字节一个没被写
+//   bit5  非法 UTF-8（单字节 0xFF）→ -1：utf8_to_utf16 -1、utf16_len -1，且 out 没被写
+//   bit6  空串：utf8_to_utf16(_,0,out,cap) == 0，out 前 2 字节是 0（UTF-16 空串），第 3 字节不动
+//   bit7  确定性：同一输入两次转换结果逐字节相同（12 字节）
+// ⚠️ 中文测试数据一律用字节字面量装填（源码字符串里不写中文），避免源文件编码干扰。
+include "../../lib/codec_lib.fl"
+
+// 逐字节比 a[0..n) 与 b[0..n)：全同 1 / 有不同 0
+int f124_eqbytes(char *a, char *b, int n) {
+  int i = 0;
+  while (i < n) {
+    if (a[i] != b[i]) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// a[0..n) 是否全等于 v：是 1 / 否 0
+int f124_all(char *a, int n, int v) {
+  int i = 0;
+  while (i < n) {
+    if ((a[i] & 255) != v) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+int main() {
+  int mask = 0;
+  int r = 0;
+  int r2 = 0;
+  char h[8];
+  char zh[8];
+  char bad[2];
+  char u[64];
+  char u2[64];
+  char u3[64];
+  char b[64];
+  char b2[64];
+  char b3[64];
+
+  // "hello" 与 "你好" 的 UTF-8 字节（逐个装填，不用字符串字面量）
+  h[0] = 'h';
+  h[1] = 'e';
+  h[2] = 'l';
+  h[3] = 'l';
+  h[4] = 'o';
+  zh[0] = 0xE4;
+  zh[1] = 0xBD;
+  zh[2] = 0xA0;
+  zh[3] = 0xE5;
+  zh[4] = 0xA5;
+  zh[5] = 0xBD;
+
+  // bit0：ASCII 往返
+  r = std::utf8_to_utf16(h, 5, u, 64);
+  if (r == 10) {
+    r2 = std::utf16_to_utf8(u, 10, b, 64);
+    if (r2 == 5) {
+      if (f124_eqbytes(b, h, 5) == 1) { mask = mask | 1; }
+    }
+  }
+
+  // bit1：utf16_len("hello",5) == 12
+  if (std::utf16_len(h, 5) == 12) { mask = mask | 2; }
+
+  // bit2：中文往返（6 字节进、6 字节出，逐字节相同）
+  r = std::utf8_to_utf16(zh, 6, u2, 64);
+  if (r == 4) {
+    r2 = std::utf16_to_utf8(u2, 4, b2, 64);
+    if (r2 == 6) {
+      if (f124_eqbytes(b2, zh, 6) == 1) { mask = mask | 4; }
+    }
+  }
+
+  // bit3：UTF-16 字节内容（96 79 125 89）+ 长度 6
+  if (std::utf16_len(zh, 6) == 6) {
+    if ((u2[0] & 255) == 0x60 && (u2[1] & 255) == 0x4F) {
+      if ((u2[2] & 255) == 0x7D && (u2[3] & 255) == 0x59) {
+        if ((u2[4] & 255) == 0 && (u2[5] & 255) == 0) { mask = mask | 8; }
+      }
+    }
+  }
+
+  // bit4：cap 不够 → -1，且 out 不被写坏（预填 0xAA 后仍 4 个全 0xAA）
+  b[0] = 0xAA;
+  b[1] = 0xAA;
+  b[2] = 0xAA;
+  b[3] = 0xAA;
+  r = std::utf8_to_utf16(h, 5, b, 4);
+  if (r == -1) {
+    if (f124_all(b, 4, 0xAA) == 1) { mask = mask | 16; }
+  }
+
+  // bit5：非法 UTF-8 序列 0xFF → -1（utf16_len 与 utf8_to_utf16 都 -1、out 不写）
+  bad[0] = 0xFF;
+  u3[0] = 0xAA;
+  u3[1] = 0xAA;
+  r = std::utf8_to_utf16(bad, 1, u3, 64);
+  r2 = std::utf16_len(bad, 1);
+  if (r == -1 && r2 == -1) {
+    if (f124_all(u3, 2, 0xAA) == 1) { mask = mask | 32; }
+  }
+
+  // bit6：空串 → 返回 0，且 out = 2 字节 0（第 3 字节保留 0xAA，证明只写 2 字节）
+  u3[0] = 0xAA;
+  u3[1] = 0xAA;
+  u3[2] = 0xAA;
+  r = std::utf8_to_utf16(h, 0, u3, 64);
+  if (r == 0) {
+    if ((u3[0] & 255) == 0 && (u3[1] & 255) == 0) {
+      if ((u3[2] & 255) == 0xAA) { mask = mask | 64; }
+    }
+  }
+
+  // bit7：确定性（同一输入两次转换，4 字节内容 + 2 字节结尾 0 逐字节相同）
+  r = std::utf8_to_utf16(zh, 6, u2, 64);
+  r2 = std::utf8_to_utf16(zh, 6, b3, 64);
+  if (r == 4 && r2 == 4) {
+    if (f124_eqbytes(u2, b3, 6) == 1) { mask = mask | 128; }
+  }
+
+  print(["f124 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

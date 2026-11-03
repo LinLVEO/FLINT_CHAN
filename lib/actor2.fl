@@ -1,0 +1,29 @@
+// actor2.fl -- animation entry points for the second playable character (hero2).
+//
+// Reuse policy: lib\actor.fl already implements the generic stand/walk state machine
+// (state 0 = stand -> frame 0; state 1 = walk -> frames 1/2 every 8 ticks).  The only
+// thing it does not cover is a real attack frame (actor_frame(2, ...) returns the
+// placeholder frame 0), so this file includes it and adds the hero2-specific layer.
+//
+// State codes (plain int, same convention as actor.fl; no enum yet):
+//   0 = stand  -> frame 0
+//   1 = walk   -> frames 1/2 alternating every 8 ticks
+//   2 = attack -> frame 2 (hero2 sheet has exactly 3 frames: 0/1/2)
+// Attack is selected by the caller through the state argument; a single "moving" flag
+// cannot express it, so actor2_state_for only maps movement -> stand/walk.
+//
+// Frame count contract: sprites\hero2.txt has 3 frames, so every return value is in
+// 0..2 and attack == 2.  sprite_hero2_frames() (generated) returns 3.
+include "actor.fl"
+
+// moving != 0 -> walk (1), otherwise stand (0).  Delegates to the shared machine.
+int actor2_state_for(int moving) {
+  return actor_state_for(moving);
+}
+
+// state + accumulated tick -> sprite frame (0..2).
+// Stand/walk come from actor.fl; attack is the only addition (frame 2).
+int actor2_frame(int state, int tick) {
+  if (state == 2) { return 2; }
+  return actor_frame(state, tick);
+}

@@ -1,0 +1,52 @@
+// apps\camera_probe.fl -- 相机库不开窗样例：hero 横穿 1280x720 地图
+//
+// 运行（不建窗，纯逻辑）：
+//   & tmp\hlc_stable.exe -o test\tmp\camera_probe.exe apps\camera_probe.fl
+//   test\tmp\camera_probe.exe
+// 判据：退出码 0 = 相机位置自检通过；1 = 失败。
+// 看什么：死区内不动、右移硬跟随、远端 clamp、回到原点，打印每一步之后的相机位置。
+include "../lib/camera.fl"
+
+int main() {
+  struct Camera c;
+  int vw = 320;
+  int vh = 180;
+  int ww = 1280;
+  int wh = 720;
+  int hero = 160;
+  int hero_y = 90;
+  int i = 0;
+  int ok = 1;
+
+  if (camera_init(&c, vw, vh, 48, 36) != 1) { return 1; }
+
+  // 起点在相机中心 -> 死区内，不动
+  camera_follow(&c, hero, hero_y, ww, wh);
+  if (c.x != 0) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+
+  // 右移 55 步（每步 8px，160 -> 600）：相机在 hero 越过 208 后贴死区边，
+  // 末位 x = 600 - 48 - 160 = 392
+  i = 0;
+  while (i < 55) {
+    hero = hero + 8;
+    camera_follow(&c, hero, hero_y, ww, wh);
+    i = i + 1;
+  }
+  if (c.x != 392) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+
+  // 目标跳到地图外：两轴都 clamp 到 [ww-vw]/[wh-vh]
+  camera_follow(&c, 5000, 5000, ww, wh);
+  if (c.x != 960) { ok = 0; }
+  if (c.y != 540) { ok = 0; }
+
+  // 目标回到原点：两轴都 clamp 回 0
+  camera_follow(&c, 0, 0, ww, wh);
+  if (c.x != 0) { ok = 0; }
+  if (c.y != 0) { ok = 0; }
+
+  print(["camera probe x=", c.x, " y=", c.y, " ok=", ok, "\n"]);
+  if (ok == 1) { return 0; }
+  return 1;
+}

@@ -1,0 +1,83 @@
+// f116_time.fl -- time_lib 探针：时间/日期库
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+//   bit0  年份在 2020..2100（time_year 有效）
+//   bit1  月份 1..12
+//   bit2  日 1..31
+//   bit3  时 0..23 且 分 0..59 且 秒 0..59
+//   bit4  time_format(buf, 64) == 19，且 buf[4]=='-'、buf[7]=='-'、buf[10]==' '、
+//         buf[13]==':'、buf[16]==':'；负例 time_format(small, 10) == -1（cap 太小必须响亮失败）
+//   bit5  连续两次 time_ms() 单调不减（第二次 >= 第一次）
+//   bit6  time_now() > 1577836800（2020-01-01 的 Unix 秒）
+//   bit7  连续两次 time_format 的年份段（前 4 位）相同（确定性）
+include "../../lib/runtime_lib.fl"
+
+int main() {
+  int mask = 0;
+  int y = 0;
+  int mo = 0;
+  int d = 0;
+  int h = 0;
+  int mi = 0;
+  int s = 0;
+  int ok = 0;
+  int r1 = 0;
+  int r2 = 0;
+  int_64 m0 = 0;
+  int_64 m1 = 0;
+  int_64 now = 0;
+  char buf[64];
+  char a[64];
+  char b[64];
+  char small[64];
+
+  y = std::time_year();
+  mo = std::time_month();
+  d = std::time_day();
+  h = std::time_hour();
+  mi = std::time_minute();
+  s = std::time_second();
+
+  if (y >= 2020 && y <= 2100) { mask = mask | 1; }
+  if (mo >= 1 && mo <= 12) { mask = mask | 2; }
+  if (d >= 1 && d <= 31) { mask = mask | 4; }
+  if (h >= 0 && h <= 23) {
+    if (mi >= 0 && mi <= 59) {
+      if (s >= 0 && s <= 59) { mask = mask | 8; }
+    }
+  }
+
+  r1 = std::time_format(&buf[0], 64);
+  ok = 0;
+  if (r1 == 19) {
+    if (buf[4] == '-') {
+      if (buf[7] == '-') {
+        if (buf[10] == ' ') {
+          if (buf[13] == ':') {
+            if (buf[16] == ':') { ok = 1; }
+          }
+        }
+      }
+    }
+  }
+  r2 = std::time_format(&small[0], 10);       // 负例：要给 20（19 + NUL），10 必须失败
+  if (r2 == -1) { ok = ok + 1; }
+  if (ok == 2) { mask = mask | 16; }
+
+  m0 = std::time_ms();
+  m1 = std::time_ms();
+  if (m1 >= m0) { mask = mask | 32; }
+
+  now = std::time_now();
+  if (now > 1577836800) { mask = mask | 64; }
+
+  r1 = std::time_format(&a[0], 64);
+  r2 = std::time_format(&b[0], 64);
+  if (r1 == 19 && r2 == 19) {
+    if (a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3]) { mask = mask | 128; }
+  }
+
+  print(["f116 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

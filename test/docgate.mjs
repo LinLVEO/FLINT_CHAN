@@ -116,7 +116,9 @@ const SNAP_PATTERNS = [
   // 2026-10-28 补分类（这三份是过程产物，不对外；带快照 banner 即可）
   /^IDE-功能清单\.md$/, /^工业级标准\.md$/, /^流程优化提案\.md$/, /^编译器体检报告\.md$/,
 ];
-const GENERATED = ['docs/数字台账.md'];
+// 2026-11-02（v2.10.0 诊断 ID）：docs\诊断ID表.md 也是机器生成的（tools\诊断ID.mjs --gen），
+// 与 docs\数字台账.md 同类 —— 不回手工改、但要照样核标记。
+const GENERATED = ['docs/数字台账.md', 'docs/诊断ID表.md'];
 // 2026-10-31 仓库卫生：PROGRESS.md 瘦身到 800 行以内，早期交接块整段搬进
 // PROGRESS-归档-2026-10.md。与 PROGRESS-归档.md 同类（append-only 历史 ＋ 活交接块）
 // ⇒ 免快照横幅；但标记照样核（见下面 marker pass，archive 只跳过横幅/元信息，不跳过 DRIFT）。

@@ -1,0 +1,148 @@
+// f118_rand.fl -- rand_lib 探针：std::rand_next / rand_seed / rand_seed_now / rand_range
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+//   bit0  同 seed 可复现：rand_seed(12345) 取 5 个 rand_next，再 seed 一次再取 5 个，逐一相同
+//   bit1  不同 seed 序列不同：seed(12345) 与 seed(54321) 各取 5 个，至少一个不同
+//   bit2  rand_range(10,20) 连续 200 次全部落在 [10,20]
+//   bit3  rand_range(5,5) == 5（跨度 1 的边界）
+//   bit4  rand_seed_now() 之后 5 个 rand_next 不全相同（不是常数）
+//         —— 顺带覆盖 QPC 播种路径：若 seed_now 把状态弄成 0，xorshift 会永远输出 0 ⇒ 本位判负
+//   bit5  固定 seed 下连续 32 个 rand_next 全部 >= 0（输出区间 [0, 2^31)）
+//   bit6  rand_range(0,3) 连续 50 次都在 [0,3]，且至少出现 2 个不同值
+//   bit7  同 seed 下 rand_range 序列也可复现：seed(7) 取 6 个 rand_range(1,100)，两次逐一相同
+include "../../lib/runtime_lib.fl"
+
+int main() {
+  int mask = 0;
+  int i = 0;
+  int k = 0;
+  int v = 0;
+  int ok = 0;
+  int n = 0;
+  int seen[4];
+  int ra[8];
+  int rb[8];
+  int_64 a[8];
+  int_64 b[8];
+
+  // ---- bit0：同 seed 可复现（rand_next） ----
+  std::rand_seed(12345);
+  i = 0;
+  while (i < 5) {
+    a[i] = std::rand_next();
+    i = i + 1;
+  }
+  std::rand_seed(12345);
+  i = 0;
+  while (i < 5) {
+    b[i] = std::rand_next();
+    i = i + 1;
+  }
+  ok = 1;
+  i = 0;
+  while (i < 5) {
+    if (a[i] != b[i]) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 1; }
+
+  // ---- bit1：不同 seed 序列不同（a 还是 seed(12345) 的 5 个） ----
+  std::rand_seed(54321);
+  i = 0;
+  while (i < 5) {
+    b[i] = std::rand_next();
+    i = i + 1;
+  }
+  ok = 0;
+  i = 0;
+  while (i < 5) {
+    if (a[i] != b[i]) { ok = 1; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 2; }
+
+  // ---- bit2：rand_range(10,20) 连续 200 次都在 [10,20] ----
+  std::rand_seed(999);
+  ok = 1;
+  i = 0;
+  while (i < 200) {
+    v = std::rand_range(10, 20);
+    if (v < 10) { ok = 0; }
+    if (v > 20) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 4; }
+
+  // ---- bit3：rand_range(5,5) == 5 ----
+  if (std::rand_range(5, 5) == 5) { mask = mask | 8; }
+
+  // ---- bit4：rand_seed_now 之后 5 个 rand_next 不全相同 ----
+  std::rand_seed_now();
+  i = 0;
+  while (i < 5) {
+    a[i] = std::rand_next();
+    i = i + 1;
+  }
+  ok = 0;
+  i = 1;
+  while (i < 5) {
+    if (a[i] != a[0]) { ok = 1; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 16; }
+
+  // ---- bit5：32 个 rand_next 全部非负 ----
+  std::rand_seed(1);
+  ok = 1;
+  i = 0;
+  while (i < 32) {
+    if (std::rand_next() < 0) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 32; }
+
+  // ---- bit6：rand_range(0,3) 连续 50 次都在 [0,3] 且至少 2 个不同值 ----
+  std::rand_seed(77);
+  seen[0] = 0;
+  seen[1] = 0;
+  seen[2] = 0;
+  seen[3] = 0;
+  ok = 1;
+  i = 0;
+  while (i < 50) {
+    v = std::rand_range(0, 3);
+    if (v < 0 || v > 3) {
+      ok = 0;
+    } else {
+      seen[v] = 1;
+    }
+    i = i + 1;
+  }
+  n = seen[0] + seen[1] + seen[2] + seen[3];
+  if (ok == 1 && n >= 2) { mask = mask | 64; }
+
+  // ---- bit7：同 seed 下 rand_range 序列可复现（两次 seed(7)，各取 6 个 [1,100]） ----
+  std::rand_seed(7);
+  i = 0;
+  while (i < 6) {
+    ra[i] = std::rand_range(1, 100);
+    i = i + 1;
+  }
+  std::rand_seed(7);
+  i = 0;
+  while (i < 6) {
+    rb[i] = std::rand_range(1, 100);
+    i = i + 1;
+  }
+  ok = 1;
+  i = 0;
+  while (i < 6) {
+    if (ra[i] != rb[i]) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 128; }
+
+  print(["f118 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

@@ -1,0 +1,55 @@
+// apps\actor2_probe.fl -- 第 2 个可玩角色（hero2）的 blit 冒烟
+//
+// 构建：tmp\hlc_stable.exe -o tmp\actor2_probe.exe apps\actor2_probe.fl
+// 行为：离屏 64x32 GfxBuf 上分别画 站 / 走 / 攻 三帧（16x16），
+//       检查像素落点与金色角/护手的调色板颜色；全部通过 -> 退出 0。
+// 为什么离屏：冒烟要能无人值守跑完（不建窗、不等按键），退出码就是判据。
+include "../lib/sprite.fl"
+include "../lib/actor2.fl"
+include "../games/huiye/hero2_sprite_data.fl"
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int buf[768];
+  int pal[7];
+  int total = 0;
+  int n = 0;
+  int f = 0;
+  int i = 0;
+  int x = 0;
+  int y = 8;
+  int BG = 0x00202838;
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 32; s.cw = 64; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 90; }
+  if (gfx_attach(&b, &s, 64, 32) == 0) { return 91; }
+  if (sprite_pal_fill(pal) != 7) { return 92; }
+  if (sprite_hero2_load(buf) == 0) { return 93; }
+  if (sprite_hero2_frames() != 3) { return 94; }
+
+  gfx_clear(&b, BG);
+
+  i = 0;
+  while (i < 3) {
+    if (i == 0) { f = actor2_frame(0, 0); }
+    if (i == 1) { f = actor2_frame(1, 0); }
+    if (i == 2) { f = actor2_frame(2, 0); }
+    x = 4 + i * 20;
+    n = sprite_blit(&b, x, y, buf, 16, 16, f, pal, 7);
+    if (n == 0) { return 1; }
+    total = total + n;
+    i = i + 1;
+  }
+
+  // 站帧 (x=4)：第 2 行角尖 (x+2, y+1) 必须是金色 pal[6]
+  if (gfx_get(&b, 6, 9) != pal[6]) { return 2; }
+  // 攻帧 (x=44)：第 9 行右端护手 (x+13, y+8) 必须是金色 pal[6]
+  if (gfx_get(&b, 57, 16) != pal[6]) { return 3; }
+
+  print(["actor2_probe ok: frames=3 blit_px=", total, "\n"]);
+  return 0;
+}

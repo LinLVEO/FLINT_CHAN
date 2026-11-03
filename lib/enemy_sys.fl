@@ -1,0 +1,164 @@
+// enemy_sys.fl -- 敌人实体池 + 生成/回收 + 每帧 AI/移动（M5 收尾）
+//
+// 用法：include "enemy_sys.fl"
+// 为什么有这层：apps\tower\main.fl 里的 struct Ent es[4] + if 链推进是手工版；
+//   本库把「池 + 生成/回收 + 每帧 AI/物理」收成一处，app 只拿槽号，不再自己写循环。
+//
+// 口径（与既有库同一条线，不复制实现）：
+//   - 状态机：直接调 lib\enemy.fl 的 enemy_next_state（距离三档）与 enemy_patrol_dir（折返）；
+//   - 物理/撞图：直接调 lib\body.fl 的 body_init / body_step（body_step 内部就是 body_hit_solid）；
+//   - 受击：直接调 lib\hitstun.fl 的 hitstun_tick；硬直中跳过 AI、只让击退速度推着走。
+//   - 确定性：不取时间、不用随机 ⇒ 同输入序列同结果（test\facts\f105_enemy_pool.fl 钉住）。
+//   - 定长池：8 槽一次声明、帧内零分配（延续 lib\pool.fl 的 M5 硬要求）。
+//
+// 槽的语义：
+//   - 槽号 = 下标（0..cap-1），kill 只把 live 置 0、**不搬动**数据，spawn 顺序找第一个空槽复用；
+//   - 死亡不走状态机（enemy_next_state 的 3 只是保留不可逆语义），库内一律用 enemy_sys_kill；
+//   - hp 生成时 3、敌人尺寸 12x12（与 tower 同口径）；伤害规则/攻击冷却留给调用方。
+//   - tick 的 map 是**一维 int 数组** m[ty*mw+tx]，tile 固定 16x16（签名不带 tw/th，换尺寸另开库）。
+include "body.fl"      // Body / body_init / body_step；带进 phys.fl 与 grid.fl
+include "hitstun.fl"   // HitStun / hitstun_tick
+include "enemy.fl"     // enemy_next_state / enemy_patrol_dir
+
+struct EnemySys {
+  struct Body b[8];
+  struct HitStun hs[8];
+  int st[8];
+  int hp[8];
+  int live[8];
+  int tick[8];
+  int kind[8]; // 0 = 地面（重力 32768）；1 = 飞行（无重力，竖直浮动）
+  int n;      // 当前 live 数（spawn +1 / kill -1）
+  int cap;    // 本池容量，1..8
+}
+
+// 初始化：cap 必须在 1..8；八个槽（含 cap 之外的）与 n 全部清零。1=成功，0=参数非法。
+// 局部 struct 字段本来不清零，所以这里必须逐槽显式写一遍（见 docs\语言参考.md §6）。
+int enemy_sys_init(struct EnemySys *s, int cap) {
+  int i = 0;
+  if (s == 0) { return 0; }
+  if (cap <= 0) { return 0; }
+  if (cap > 8) { return 0; }
+  s->n = 0;
+  s->cap = cap;
+  i = 0;
+  while (i < 8) {
+    body_init(&s->b[i], 0, 0, 0, 0);
+    s->hs[i].stun = 0;
+    s->hs[i].vx = 0;
+    s->hs[i].vy = 0;
+    s->st[i] = 0;
+    s->hp[i] = 0;
+    s->live[i] = 0;
+    s->tick[i] = 0;
+    s->kind[i] = 0;
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 生成：顺序找第一个空槽（LIFO 之外的另一种自定策略；kill 后下一次 spawn 就回收同槽）。
+// body_init(x,y,12,12) + 状态=巡逻(0) + hp=3 + live=1。成功返回槽号，池满/参数非法返回 -1。
+int enemy_sys_spawn(struct EnemySys *s, int x, int y) {
+  return enemy_sys_spawn_ex(s, x, y, 12, 12, 3, 0);
+}
+
+// 参数化生成（v2.15.0 追加）：尺寸 / 血量 / 类型。kind 0 = 地面，1 = 飞行；满/非法返回 -1。
+int enemy_sys_spawn_ex(struct EnemySys *s, int x, int y, int w, int h, int hp, int kind) {
+  int i = 0;
+  if (s == 0) { return -1; }
+  if (kind < 0) { return -1; }
+  if (kind > 1) { return -1; }
+  while (i < s->cap) {
+    if (s->live[i] == 0) {
+      if (body_init(&s->b[i], x, y, w, h) == 0) { return -1; }
+      s->hs[i].stun = 0;
+      s->hs[i].vx = 0;
+      s->hs[i].vy = 0;
+      s->st[i] = 0;
+      s->hp[i] = hp;
+      s->tick[i] = 0;
+      s->kind[i] = kind;
+      s->live[i] = 1;
+      s->n = s->n + 1;
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// 回收：只把 live 置 0，数据原地保留（槽可复用）。1=回收成功，0=越界/本来就是空槽。
+int enemy_sys_kill(struct EnemySys *s, int i) {
+  if (s == 0) { return 0; }
+  if (i < 0) { return 0; }
+  if (i >= s->cap) { return 0; }
+  if (s->live[i] == 0) { return 0; }
+  s->live[i] = 0;
+  if (s->n > 0) { s->n = s->n - 1; }
+  return 1;
+}
+
+// 每帧推进：每个 live 槽 —— 硬直优先（跳过 AI）→ enemy_next_state 按距离换态 → 巡逻折返/
+// 追击朝玩家/攻击刹住 → body_step 走物理（撞图贴边、清该轴速度）→ 攻击态做 AABB 命中判定。
+// 返回本帧打中玩家的掩码：0 或按位或的 1<<槽号（调用方自己叠无敌帧/冷却）。
+// 玩家判定框固定 16x16（与 tower 的玩家尺寸同口径）。map 非法时直接返回 0、不推进。
+int enemy_sys_tick(struct EnemySys *s, int px, int py, int *map, int mw, int mh) {
+  struct Grid g;
+  int mask = 0;
+  int i = 0;
+  int ex = 0;
+  int dist = 0;
+  int dir = 0;
+  int stunned = 0;
+  if (s == 0) { return 0; }
+  if (map == 0) { return 0; }
+  if (grid_init(&g, map, mw, mh, 16, 16) == 0) { return 0; }
+  i = 0;
+  while (i < s->cap) {
+    if (s->live[i] != 0) {
+      s->tick[i] = s->tick[i] + 1;
+      ex = s->b[i].x / 65536;
+      dist = ex - px;
+      if (dist < 0) { dist = 0 - dist; }
+      stunned = 0;
+      if (hitstun_tick(&s->hs[i]) > 0) {
+        // 被打断：不听 AI，位置只由击退速度推（竖直交给 body_step 的重力）
+        stunned = 1;
+        s->b[i].vx = s->hs[i].vx;
+      } else {
+        s->st[i] = enemy_next_state(s->st[i], dist);
+        // v2.15.0：enum + switch（状态机第一次用上新语法；三个分支互斥，break 收尾）
+        switch (s->st[i]) {
+          case ST_PATROL:
+            dir = enemy_patrol_dir(s->tick[i], 40);
+            s->b[i].vx = dir * 65536;
+            break;
+          case ST_CHASE:
+            if (px > ex) { s->b[i].vx = 2 * 65536; } else { s->b[i].vx = 0 - 2 * 65536; }
+            break;
+          case ST_ATK:
+            s->b[i].vx = 0;
+            break;
+          default:
+            break;
+        }
+      }
+      if (s->kind[i] == 1) {
+        // 飞行：重力 0；竖直"浮动"每 60 tick 反向（撞墙由 body_step 清掉该轴速度）
+        if ((s->tick[i] / 20) % 2 == 0) { s->b[i].vy = 65536; } else { s->b[i].vy = 0 - 65536; }
+        body_step(&g, &s->b[i], 0);
+      } else {
+        body_step(&g, &s->b[i], 32768);
+      }
+      if (s->st[i] == 2 && stunned == 0) {
+        if (phys_aabb(s->b[i].x / 65536, s->b[i].y / 65536, s->b[i].w, s->b[i].h,
+                      px, py, 16, 16) != 0) {
+          mask = mask | (1 << i);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return mask;
+}

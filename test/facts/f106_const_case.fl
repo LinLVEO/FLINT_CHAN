@@ -1,0 +1,99 @@
+// f106_const_case.fl -- G5/G7 探针（2026-11-02）
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+//   bit0  enum 常量当 case 标签命中（case T_ATK:）
+//   bit1  default 分支：无 case 匹配时选中 default
+//   bit2  不命中走 default，switch 之后的语句正常继续（不贯穿、不跑错段）
+//   bit3  局部一维 int map[60*17]（常量表达式长度）
+//   bit4  局部 struct 数组长度用 enum（struct Ent es[POOL]）
+//   bit5  struct 数组字段长度用 enum（struct Grid { int cells[POOL]; }）
+//   bit6  全局数组长度用常量表达式（int gmap[POOL*2+1]）
+//   bit7  二维数组列用 enum（int grid[3][COLS]）
+enum TSt { T_PATROL, T_CHASE, T_ATK, T_DEAD }
+enum K { POOL = 4, COLS = 3 }
+
+struct Ent { int st; int id; }
+struct Grid { int tag; int cells[POOL]; }
+
+int gmap[POOL * 2 + 1];
+int gsentinel = 123;
+
+int main() {
+  int mask = 0;
+  struct Ent e;
+  struct Ent *ep;
+  ep = &e;
+  ep->st = T_ATK;
+  ep->id = 7;
+
+  // —— bit0：enum 常量作 case 标签，命中 T_ATK ——
+  switch (ep->st) {
+    case T_PATROL: ep->id = 1; break;
+    case T_ATK:    ep->id = 42; break;
+    default:       ep->id = 9; break;
+  }
+  if (ep->id == 42) { mask = mask | 1; }
+
+  // —— bit1：没有 case 命中 -> default 生效（T_DEAD 未列进 case） ——
+  ep->st = T_DEAD;
+  int d = 0;
+  switch (ep->st) {
+    case T_PATROL: d = 1; break;
+    case T_ATK:    d = 2; break;
+    default:       d = 9; break;
+  }
+  if (d == 9) { mask = mask | 2; }
+
+  // —— bit2：不命中走 default，且 case 段没被误执行、switch 后继续往下 ——
+  int d2 = 0;
+  ep->st = T_CHASE;
+  switch (ep->st) {
+    case T_PATROL: d2 = 100; break;
+    default:       d2 = 5; break;
+  }
+  d2 = d2 + 1;   // switch 之后的语句必须照常执行
+  if (d2 == 6) { mask = mask | 4; }
+
+  // —— bit3：局部一维数组，长度 = 60*17 = 1020（常量表达式） ——
+  int map[60 * 17];
+  map[0] = 5;
+  map[1019] = 77;              // 末元素（若长度被算成 60，这里会越界写坏别处）
+  int *mp = &map[0];
+  char *c0 = (char *)&map[0];
+  char *c1 = (char *)&map[1019];
+  // 独立裁判：第 1019 个 int 元素距首元素 1019*4 字节（长度真是 1020 而不是 60）
+  if (map[0] == 5 && mp[1019] == 77 && c1 - c0 == 1019 * 4) { mask = mask | 8; }
+
+  // —— bit4：局部 struct 数组长度 = enum 常量 POOL（4） ——
+  struct Ent es[POOL];
+  es[0].id = 11;
+  es[2].id = 0;
+  es[3].id = 44;
+  if (es[3].id == 44 && es[0].id == 11 && es[2].id == 0) { mask = mask | 16; }
+
+  // —— bit5：struct 数组字段长度 = enum 常量 POOL（4） ——
+  struct Grid gr;
+  gr.tag = 3;
+  gr.cells[0] = 11;
+  gr.cells[3] = 55;
+  gr.cells[1] = 0;
+  if (gr.cells[3] == 55 && gr.cells[0] == 11 && gr.cells[1] == 0 && gr.tag == 3) {
+    mask = mask | 32;
+  }
+
+  // —— bit6：全局数组长度 = POOL*2+1 = 9（常量表达式） ——
+  gmap[0] = 7;
+  gmap[8] = 88;                // 最后一个合法下标
+  if (gmap[0] == 7 && gmap[8] == 88 && gsentinel == 123) { mask = mask | 64; }
+
+  // —— bit7：二维数组列 = enum 常量 COLS（3） ——
+  int grid[3][COLS];
+  grid[0][0] = 1;
+  grid[2][2] = 42;
+  int *gg = &grid[0][0];
+  if (grid[2][2] == 42 && grid[0][0] == 1 && gg[2 * 3 + 2] == 42) { mask = mask | 128; }
+
+  print(["f106 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

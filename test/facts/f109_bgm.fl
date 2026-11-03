@@ -1,0 +1,76 @@
+// f109_bgm.fl -- BGM 封装（lib/bgm.fl）：循环播放 / 停止 / 播放状态
+// 判据：8 位位掩码全亮（255）-> 退出 42；否则退出码 = 当前掩码（便于定位掉位）。
+//
+// 素材：games/huiye/bgm.wav（tools/make_bgm.mjs 生成，120 BPM / 12.000 秒）。
+// 路径一律仓库内相对路径；探针需从仓库根目录运行（与 apps/audio_probe.fl 同口径）。
+//
+//   bit0  bgm_play 返回非 0（文件存在，PlaySound 接受）
+//   bit1  bgm_stop 返回非 0
+//   bit2  播放后 bgm_playing() == 1
+//   bit3  停止后 bgm_playing() == 0
+//   bit4  不存在文件不崩：返回 0，且不把播放状态置 1（之后还能继续播）
+//   bit5  重复播不崩：同一路径连播两次，仍返回非 0 且 playing == 1
+//   bit6  stop 后再播：第二次 bgm_play 返回非 0 且 playing 回到 1
+//   bit7  两次 stop 确定：连续两次都返回非 0 且相等，playing 保持 0
+include "../../lib/bgm.fl"
+
+int main() {
+  int mask = 0;
+  int ok = 0;
+  int p = 0;
+  int p2 = 0;
+  int s1 = 0;
+  int s2 = 0;
+
+  // ---- bit0：播放返回非 0；bit2：播放后 playing == 1 ----
+  p = bgm_play("games/huiye/bgm.wav");
+  if (p != 0) { mask = mask | 1; }
+  if (bgm_playing() == 1) { mask = mask | 4; }
+
+  // ---- bit1：停止返回非 0；bit3：停止后 playing == 0 ----
+  s1 = bgm_stop();
+  if (s1 != 0) { mask = mask | 2; }
+  if (bgm_playing() == 0) { mask = mask | 8; }
+
+  // ---- bit4：不存在文件不崩（返回 0，不进入播放态）----
+  p = bgm_play("games/huiye/__f109_no_such_bgm__.wav");
+  if (p == 0) {
+    if (bgm_playing() == 0) { mask = mask | 16; }
+  }
+  bgm_stop();
+
+  // ---- bit5：重复播不崩 ----
+  ok = 0;
+  bgm_play("games/huiye/bgm.wav");
+  p2 = bgm_play("games/huiye/bgm.wav");
+  if (p2 != 0) {
+    if (bgm_playing() == 1) { ok = 1; }
+  }
+  bgm_stop();
+  if (ok == 1) { mask = mask | 32; }
+
+  // ---- bit6：stop 后再播 ----
+  ok = 0;
+  bgm_play("games/huiye/bgm.wav");
+  s1 = bgm_stop();
+  p = bgm_play("games/huiye/bgm.wav");
+  if (s1 != 0) {
+    if (p != 0) {
+      if (bgm_playing() == 1) { ok = 1; }
+    }
+  }
+  bgm_stop();
+  if (ok == 1) { mask = mask | 64; }
+
+  // ---- bit7：两次 stop 确定（都非 0 且相等，状态仍为 0）----
+  s1 = bgm_stop();
+  s2 = bgm_stop();
+  if (s1 != 0) {
+    if (s2 == s1) { mask = mask | 128; }
+  }
+  if (bgm_playing() != 0) { mask = mask & ~128; }
+
+  print(["f109 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

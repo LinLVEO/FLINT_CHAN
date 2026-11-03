@@ -1,0 +1,129 @@
+// f122_path.fl -- 标准库 path_lib：路径与目录操作（7 个函数全跑）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  path_join("C:\a", "b.txt") == "C:\a\b.txt"（逐字符比对，长度 10）
+//   bit1  path_join("C:\a\", "b.txt") 不重复加分隔符（仍是 "C:\a\b.txt"，长度 10）
+//   bit2  path_name("C:\a\b.txt") == "b.txt"
+//   bit3  path_dir("C:\a\b.txt") == "C:\a\"（含末尾分隔符，长度 5）
+//   bit4  path_ext("C:\a\b.txt") == "txt"；path_ext("C:\a\b") 返回 0 且 out 为空串
+//   bit5  path_full("x.txt") 长度 > 0，且 == GetCurrentDirectoryA() + "\x.txt"
+//   bit6  path_exists("test\facts\f122_path.fl") == 1；path_exists("no_such_file_zzz.txt") == 0
+//   bit7  path_mkdir("test\tmp\f122_mkdir") 成功（或已存在时返回 0），随后 path_exists == 1
+//
+// 全部判据都真调库，没有桩；cap 一律给 260（本机 MAX_PATH 量级）。
+include "../../lib/sys_lib.fl"
+
+// 探针内部件：逐字符比对两个 C 串（含结尾 NUL）。相等 → 1，否则 0。
+int f122_eq(char *a, char *b) {
+  int i = 0;
+  while (1) {
+    if (a[i] != b[i]) { return 0; }
+    if (a[i] == 0) { return 1; }
+    i = i + 1;
+  }
+}
+
+// 探针内部件：a[off..] 与 b 逐字符比对（含结尾 NUL）。相等 → 1，否则 0。
+int f122_eqat(char *a, int off, char *b) {
+  int i = 0;
+  while (1) {
+    if (a[off + i] != b[i]) { return 0; }
+    if (b[i] == 0) { return 1; }
+    i = i + 1;
+  }
+}
+
+int main() {
+  int mask = 0;
+  int n = 0;
+  int nc = 0;
+  int i = 0;
+  int ok = 0;
+  int had = 0;
+  int r = 0;
+  char buf[260];
+  char cwd[260];
+
+  // bit0：a 末尾没有分隔符 -> 补一个 '\'
+  buf[0] = 0;
+  n = std::path_join("C:\\a", "b.txt", buf, 260);
+  if (n == 10) {
+    if (f122_eq(buf, "C:\\a\\b.txt") == 1) { mask = mask | 1; }
+  }
+
+  // bit1：a 末尾已有 '\' -> 不重复加
+  buf[0] = 0;
+  n = std::path_join("C:\\a\\", "b.txt", buf, 260);
+  if (n == 10) {
+    if (f122_eq(buf, "C:\\a\\b.txt") == 1) { mask = mask | 2; }
+  }
+
+  // bit2：文件名部分
+  buf[0] = 0;
+  n = std::path_name("C:\\a\\b.txt", buf, 260);
+  if (n == 5) {
+    if (f122_eq(buf, "b.txt") == 1) { mask = mask | 4; }
+  }
+
+  // bit3：目录部分（含末尾 '\'，长度 5）
+  buf[0] = 0;
+  n = std::path_dir("C:\\a\\b.txt", buf, 260);
+  if (n == 5) {
+    if (f122_eq(buf, "C:\\a\\") == 1) { mask = mask | 8; }
+  }
+
+  // bit4：扩展名；没有扩展名 -> 0 + 空串
+  buf[0] = 0;
+  n = std::path_ext("C:\\a\\b.txt", buf, 260);
+  if (n == 3) {
+    if (f122_eq(buf, "txt") == 1) {
+      buf[0] = 88;                        // 故意弄脏，验证"写空串"真的写
+      if (std::path_ext("C:\\a\\b", buf, 260) == 0) {
+        if (buf[0] == 0) { mask = mask | 16; }
+      }
+    }
+  }
+
+  // bit5：绝对路径 == 当前目录 + '\' + 文件名
+  nc = GetCurrentDirectoryA(260, cwd);
+  buf[0] = 0;
+  n = std::path_full("x.txt", buf, 260);
+  if (nc > 0 && nc < 260 && n > 0 && n < 260) {
+    if (buf[n] == 0) {
+      ok = 1;
+      i = 0;
+      while (i < nc) {
+        if (buf[i] != cwd[i]) { ok = 0; }
+        i = i + 1;
+      }
+      if (ok == 1) {
+        i = nc;
+        if (cwd[nc - 1] != 92) {           // 当前目录通常不带末尾 '\'
+          if (buf[nc] != 92) { ok = 0; }
+          i = nc + 1;
+        }
+        if (ok == 1) {
+          if (f122_eqat(buf, i, "x.txt") == 1) { mask = mask | 32; }
+        }
+      }
+    }
+  }
+
+  // bit6：存在性（仓库根下相对路径 + 必定不存在的名字）
+  if (std::path_exists("test\\facts\\f122_path.fl") == 1) {
+    if (std::path_exists("no_such_file_zzz.txt") == 0) { mask = mask | 64; }
+  }
+
+  // bit7：建目录（新建成功 -> 1；本来就存在 -> 0，两种都算过）
+  // 先兜底保证父目录在场（门会清 test\tmp；已存在时这里返回 0，忽略即可）
+  std::path_mkdir("test\\tmp");
+  had = std::path_exists("test\\tmp\\f122_mkdir");
+  r = std::path_mkdir("test\\tmp\\f122_mkdir");
+  if (std::path_exists("test\\tmp\\f122_mkdir") == 1) {
+    if (r == 1 || had == 1) { mask = mask | 128; }
+  }
+
+  print(["f122 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

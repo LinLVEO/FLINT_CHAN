@@ -756,7 +756,7 @@ static bool is_addr_expr(Node *n) {
       return n->ty == TY_PTR || n->ty == TY_ARR || n->ty == TY_STRUCT || n->ty == TY_FUNCPTR;
     case ND_ADD: case ND_SUB:
       return is_addr_expr(n->lhs) || is_addr_expr(n->rhs);
-    case ND_DEREF: return n->ty == TY_PTR;      // v0.9.2：ptr 字段读回 = 指针值（地址，64 位）
+    case ND_DEREF: return n->ty == TY_PTR || n->ty == TY_FUNCPTR;   // v2.6.0：ops[i] 读出的代码地址也是地址
     case ND_CALL: return n->ty == TY_PTR;       // v1.0.6：指针返回函数调用 = 地址值（64 位 rax）
     case ND_APICALL: return n->ty == TY_PTR;    // v0.9.2：ptr 返回 API = 64 位句柄/地址
     case ND_NEW: return true;                   // v0.9.2：new 表达式值 = 负载地址
@@ -827,7 +827,7 @@ static bool is_addr_value(Node *n) {
       if (n->ty == TY_INT && !n->is_global) return slot_marked(n->offset);   // T1：装过地址的 int
       // v1.3.2：函数指针变量本身值就是地址（T1 门槛/存宽判定按 64 位）
       return n->ty == TY_PTR || n->ty == TY_ARR || n->ty == TY_STRUCT || n->ty == TY_FUNCPTR;
-    case ND_DEREF: return n->ty == TY_PTR;
+    case ND_DEREF: return n->ty == TY_PTR || n->ty == TY_FUNCPTR;   // v2.6.0：函数指针数组元素 = 地址
     case ND_CALL: case ND_APICALL: return n->ty == TY_PTR;
     // 指针的 ++/--（v1.0.6.1 A1 起值是完整 64 位地址；is_addr_expr 不含 inc/dec 节点，
     // 故 `char *q = p++;`（audit1）这类写法要在本函数里认出来，否则会被 T1 门槛误拦）
@@ -1903,6 +1903,15 @@ static void gen_call(FuncCtx *c, Node *node) {
   Node *args[FUNC_MAX_ARGS];
   int n = 0;
   for (Node *a = node->rhs; a; a = a->next) args[n++] = a;
+  // ===== v2.6.0：函数指针数组元素的间接调用 `ops[i](...)` =====
+  //   目标不是 ND_VAR ⇒ 不能像单变量那样在最后一步 `mov rax,[rbp-off]`。必须在**求实参之前**
+  //   把目标表达式算好、落进 parse 分配的匿名帧槽；实参全部就位后再从槽里装 rax。
+  //   顺序是硬约束（与 v1.3.2 间接调用同一条）：目标表达式里可能有函数调用/寄存器使用，
+  //   放在实参之后求值会改写 rcx/rdx/r8/r9 与 xmm0-3 —— 被调函数收到的就是垃圾。
+  if (node->func_index < 0 && node->fp_tmp > 0) {
+    gen_expr(c, node->lhs);                 // rax = ops[i]（函数代码地址）
+    slot_store_rax64(b, node->fp_tmp);
+  }
   // ===== v1.4.25（`-strict`）①③ ＋ v1.4.27（卡 T-20261012-210751）**默认口径** =====
   //   ① 值 → 指针形参（`-strict` 报 E-T1-INTTOPTR；默认报「地址形参需要指针」）
   //   ③ 地址值(64 位) → 值形参（`-strict` 报 E-STRICT-WIDTH；默认报「地址值不能装进 int 形参」）
@@ -1927,9 +1936,14 @@ static void gen_call(FuncCtx *c, Node *node) {
   //     `-strict` 侧仍只查 `int`（保持它既有的四类口径不变）。
   if (node->func_index >= 0 && c->prog) {
     FuncDef *cf = &c->prog->funcs[node->func_index];
-    for (int i = 0; i < n && i < cf->nargs; i++) {
+    // v2.14.0：struct 按值返回的调用，实参链第 0 个是**隐藏返回缓冲**（不是用户形参）⇒
+    //   检查从 1 开始、形参下标整体减 1（用户第 k 个形参仍是 param_*[k]，报错文案也报用户序号）。
+    int arg0 = (cf->ret_ty == TY_STRUCT) ? 1 : 0;
+    for (int i = arg0; i < n; i++) {
+      int pi = i - arg0;
+      if (pi >= cf->nargs) break;
       Node *a = args[i];
-      bool by_addr = cf->param_ref[i] || cf->param_ty[i] == TY_PTR || cf->param_ty[i] == TY_FUNCPTR;
+      bool by_addr = cf->param_ref[pi] || cf->param_ty[pi] == TY_PTR || cf->param_ty[pi] == TY_FUNCPTR;
       // ⚠️ double 形参：parse 侧已把 int 实参包了一层 ND_I2D（C 语义自动提升）⇒ 判"这是不是地址"
       //    必须**看穿那层**：否则 `f(&x)`（f 的形参是 double）会静默通过
       //    （口径核对脚本 `tmp\t1\口径核对.ps1` 实测抓到的洞，别删这层解包）。
@@ -1943,19 +1957,19 @@ static void gen_call(FuncCtx *c, Node *node) {
           error_at_nodef(node, "[E-T1-INTTOPTR] 实参只有 32 位（int 值），而第 %d 个形参是指针"
                                "——传进去的只有低 32 位，被调方当指针用会指向错地方。"
                                "请传地址（&x / 指针变量 / 数组名 / new / API 返回值），或把形参改成 int"
-                               "（-strict 诊断）", i + 1);
+                               "（-strict 诊断）", pi + 1);
         error_at_nodef(node, "地址形参需要指针——函数 '%s' 的第 %d 个形参收地址，实参却是整数/值"
-                             "（要传地址请写 &x，或把形参改成值类型）", cf->name, i + 1);
+                             "（要传地址请写 &x，或把形参改成值类型）", cf->name, pi + 1);
       }
       if (!by_addr && arg_is_addr) {
-        if (flint_strict && ty_is32(cf->param_ty[i]))
+        if (flint_strict && ty_is32(cf->param_ty[pi]))
           error_at_nodef(node, "[E-STRICT-WIDTH] 实参是**地址值**（64 位），而第 %d 个形参声明成 int/uint_32"
                                "（4 字节语义）⇒ 高 32 位会被丢掉（SPEC 记的 T1 遗留边界）。"
-                               "请把形参声明成 int *（-strict 诊断）", i + 1);
-        if (ty_isint(cf->param_ty[i]) || cf->param_ty[i] == TY_DOUBLE)
+                               "请把形参声明成 int *（-strict 诊断）", pi + 1);
+        if (ty_isint(cf->param_ty[pi]) || cf->param_ty[pi] == TY_DOUBLE)
           error_at_nodef(node, "地址值不能装进 int 形参——函数 '%s' 的第 %d 个形参是值类型"
                                "（int/char/int_64/uint_*/double），实参却是指针/地址"
-                               "（请先解引用 *p，或把形参改成指针类型）", cf->name, i + 1);
+                               "（请先解引用 *p，或把形参改成指针类型）", cf->name, pi + 1);
       }
     }
   }
@@ -2044,9 +2058,11 @@ static void gen_call(FuncCtx *c, Node *node) {
     //      → 跳到野地址（v1.3.2 的变体实验专门钉了这一条：把装载提前 = 样本必崩）。
     //   `mov rax,[rbp-off]` 只写 rax，不碰 rcx/rdx/r8/r9 与 xmm0-3（实参寄存器），故安全。
     Node *tv = node->lhs;   // 被调用的函数指针变量（parse 填：ND_VAR，指示调用目标）
-    if (!tv || tv->kind != ND_VAR)
+    if (!tv)
       error("内部错误：间接调用节点缺少函数指针目标");
-    slot_load_rax64(b, tv->offset);       // rax = fp（代码地址，64 位全宽）
+    if (tv->kind == ND_VAR) slot_load_rax64(b, tv->offset);   // 单变量：最后一步从帧槽装（老路）
+    else if (node->fp_tmp > 0) slot_load_rax64(b, node->fp_tmp);   // v2.6.0：数组元素（实参前已算好）
+    else error("内部错误：间接调用节点缺少函数指针目标（既不是变量也没有暂存槽）");
     st_call(); st_ins();
     buf_byte(b, 0xFF);
     buf_byte(b, 0xD0);                    // call rax（FF D0）
@@ -2104,6 +2120,12 @@ static void emit_load_rbp_pos(Buf *b, int disp, int kind) {
 //   → 再右→左写栈参 → 再右→左求值 push 前 4 个 → 按参数序出栈落位 → call → add 回收。
 static void gen_call_many(FuncCtx *c, Node *node, Node **args, int n) {
   Buf *b = &c->code;
+  // v2.6.0：数组元素的间接调用 —— 与 gen_call 同一条硬约束，目标值必须在**求任何实参之前**算好
+  //   并落进匿名帧槽（>4 参时实参还会写 [rsp+32+..]，更不能等最后再求目标表达式）。
+  if (node->func_index < 0 && node->fp_tmp > 0) {
+    gen_expr(c, node->lhs);
+    slot_store_rax64(b, node->fp_tmp);
+  }
   // 进入时允许 rsp≡0 或 ≡8（≡8 = 外层有未消费压栈：二元左值 / 外层调用已压参数）
   if (g_rspm != 0 && g_rspm != 8)
     error("内部 rsp 状态异常（多参调用入口 rsp≡%d，应 0 或 8）——压栈未配对，改 codegen", g_rspm);
@@ -2146,9 +2168,11 @@ static void gen_call_many(FuncCtx *c, Node *node, Node **args, int n) {
   if (node->func_index < 0) {
     // 间接调用（函数指针）：目标地址在**实参全部就位之后**才装进 rax（顺序与老路同一条硬约束）
     Node *tv = node->lhs;
-    if (!tv || tv->kind != ND_VAR)
+    if (!tv)
       error("内部错误：间接调用节点缺少函数指针目标");
-    slot_load_rax64(b, tv->offset);
+    if (tv->kind == ND_VAR) slot_load_rax64(b, tv->offset);
+    else if (node->fp_tmp > 0) slot_load_rax64(b, node->fp_tmp);   // v2.6.0：数组元素
+    else error("内部错误：间接调用节点缺少函数指针目标（既不是变量也没有暂存槽）");
     st_call(); st_ins();
     buf_byte(b, 0xFF);
     buf_byte(b, 0xD0);                          // call rax（FF D0）
@@ -2469,6 +2493,9 @@ static void gen_deref(FuncCtx *c, Node *node) {
       // v0.9.2：读写宽度随读取目标类型——ptr 字段（s.hwnd）→ 64 位；int 字段/*p/a[i] → 32 位
       // v1.0.5：char 目标（char 字段/元素/char* 解引用）→ movzx 字节读
       if (node->ty == TY_PTR) emit_deref_rax64(b);
+      // v2.6.0：函数指针数组元素读（ops[i]）—— 元素是**代码地址**，必须 64 位整读；
+      //   漏这一档会掉进下面的 32 位兜底，高半丢 → `call rax` 跳野地址（与 v1.3.2 单变量同族坑）。
+      else if (node->ty == TY_FUNCPTR) emit_deref_rax64(b);
       // v1.7.0：int_64 目标（int_64 数组元素 / 结构体 int_64 字段 / int_64* 解引用）→ 8 字节整读
       //   v1.9.0：uint_64 同宽度（8 字节整读）
       else if (ty_is64(node->ty)) emit_deref_rax64(b);
@@ -2577,8 +2604,11 @@ static void gen_assign(FuncCtx *c, Node *node) {
       // err 87（大帧换栈位置即现，v1.0.4 撞墙；小帧残留恰 0 侥幸掩盖）。
       // 判定：rhs 地址类 或 目标本身是指针字段（ND_DEREF.ty==TY_PTR）→ 64 位写。
       // v1.7.0：+ 目标本身是 int_64（数组元素/结构体字段/*p）→ 必须 64 位写（32 位写 = 只写低半）
+      // v2.6.0：+ 目标本身是 TY_FUNCPTR（函数指针数组元素 ops[i] = &fn）→ 代码地址是 64 位，
+      //   32 位写会把高半留成栈残渣，下一次 `mov rax,[…]` + call rax 就是野地址。
       bool wide = is_addr_expr(node->rhs) ||
-                  (node->lhs->kind == ND_DEREF && node->lhs->ty == TY_PTR) ||
+                  (node->lhs->kind == ND_DEREF
+                   && (node->lhs->ty == TY_PTR || node->lhs->ty == TY_FUNCPTR)) ||
                   ty_is64(node->lhs->ty);
       if (node->lhs->kind == ND_DEREF && ty_is8(node->lhs->ty)) {
         emit_store_byte_at_rdx(b);   // v1.0.5：char 目标（字段/元素/char*）88 02 字节写（不碰邻字节）
@@ -2587,6 +2617,96 @@ static void gen_assign(FuncCtx *c, Node *node) {
       else if (wide) emit_store_rax_at_rdx(b);   // 48 89 02
       else emit_store_eax_at_edx(b);        // 89 02；eax 保持新值 = 表达式值
       return;
+}
+
+// ===== v2.9.0（struct 值语义第一刀）：零初始化 `{0}` / 整体值拷贝 `b = a;` =====
+// 口径（两条发射器共用）：
+//   · 搬运单位 = **C 布局的 size 个字节**（StructDef.size，含内部 padding/数组字段/嵌套值字段，
+//     不含槽对齐多出来的尾巴）——**不自己重算布局**，也不读超出 size 的槽尾残渣；
+//   · 结构体本体在帧里的地址 = gen_lvalue_addr（基址已由 new_lvar 的 offset += 8*(slots-1) 摆好）；
+//   · 拷贝是**浅拷贝**（C 语义）：指针字段复制指针值，嵌套 struct 值字段整块覆盖；不做引用计数。
+// 为什么按字节而不是逐字段：逐字段要递归处理嵌套 struct/数组字段（字段上限 128，代码会膨胀），
+//   而字节块天然覆盖所有布局；padding 里没有字段，拷过去/清零都无害（C 也不规定 padding）。
+//   ⚠️ 写宽 = 8 字节块 + 尾部逐字节，**不多写**：越界写会踩相邻变量（帧槽是紧挨着的）。
+static void emit_mov_rcx_mem_rdx(Buf *b, int off) {   // mov rcx,[rdx+disp32]（读源 8 字节）
+  const uint8_t x[] = {0x48, 0x8B, 0x8A};
+  buf_bytes(b, x, 3);
+  buf_u32(b, (uint32_t)off);
+}
+static void emit_mov_mem_rax_rcx(Buf *b, int off) {   // mov [rax+disp32],rcx（写目标 8 字节）
+  const uint8_t x[] = {0x48, 0x89, 0x88};
+  buf_bytes(b, x, 3);
+  buf_u32(b, (uint32_t)off);
+}
+static void emit_mov_cl_mem_rdx(Buf *b, int off) {    // mov cl,[rdx+disp32]（尾部 1 字节）
+  const uint8_t x[] = {0x8A, 0x8A};
+  buf_bytes(b, x, 2);
+  buf_u32(b, (uint32_t)off);
+}
+static void emit_mov_mem_rax_cl(Buf *b, int off) {    // mov [rax+disp32],cl
+  const uint8_t x[] = {0x88, 0x88};
+  buf_bytes(b, x, 2);
+  buf_u32(b, (uint32_t)off);
+}
+
+// 把 [rdx .. rdx+size) 按字节前向搬到 [rax .. rax+size)：8 字节块 + 尾部逐字节（不越界写）。
+// v2.14.0 从 gen_struct_copy 里提出来 —— `return v;`（struct 按值返回）要的正是这同一段搬运，
+// 两处共用同一份发射（旧路径的指令序列逐字节不变，等价门钉着）。
+static void emit_struct_bytes_rdx_to_rax(Buf *b, int size) {
+  int off = 0;
+  for (; off + 8 <= size; off += 8) {      // 8 字节块
+    emit_mov_rcx_mem_rdx(b, off);
+    emit_mov_mem_rax_rcx(b, off);
+  }
+  for (; off < size; off++) {              // 尾部（size%8）逐字节
+    emit_mov_cl_mem_rdx(b, off);
+    emit_mov_mem_rax_cl(b, off);
+  }
+}
+
+// 把 [rax .. rax+size) 的 size 个字节清零（8 字节块 + 尾部逐字节，不多写）。
+// v2.14.0：`{0}` 与「struct 返回函数没写 return 就掉出来」共用这一份发射。
+static void emit_struct_zero_at_rax(Buf *b, int size) {
+  const uint8_t xor_ecx[] = {0x31, 0xC9};  // xor ecx,ecx
+  buf_bytes(b, xor_ecx, 2);
+  int off = 0;
+  for (; off + 8 <= size; off += 8) emit_mov_mem_rax_rcx(b, off);
+  for (; off < size; off++) emit_mov_mem_rax_cl(b, off);   // 尾部不足 8 字节：逐字节（不多写）
+}
+
+// {0}：目标结构体本体的 size 字节全部清零。
+//   ⚠️ 必须**显式写零**：局部槽是栈残留，不写就会把上一次调用/上一个变量留在同一帧位置的脏值
+//   静默当成"零初始化"（判据 1 就是拿"先写脏值再零初始化"钉这条的）。
+static void gen_struct_zero(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
+  int size = c->prog->structs[node->struct_idx].size;
+  if (size <= 0) return;
+  gen_lvalue_addr(c, node->lhs);          // rax = 目标本体地址
+  emit_struct_zero_at_rax(b, size);
+}
+
+// b = a：目标/来源都求成「本体基址」，再按 size 字节前向搬（同地址自拷贝也成立）。
+//   顺序：先算目标存暂存槽，再求来源 —— 暂存槽是帧底部固定的 scratch_off（与间接赋值同一套，
+//   不占用户槽、不压栈 ⇒ rsp 对齐不受影响）。
+static void gen_struct_copy(FuncCtx *c, Node *node) {
+  Buf *b = &c->code;
+  int size = c->prog->structs[node->struct_idx].size;
+  if (size <= 0) return;
+  // ===== v2.14.0：右值是「struct 按值返回的函数调用」→ 目标变量就是隐藏返回缓冲 =====
+  //   parse 已把 `&目标变量` 头插成该调用的第 1 个实参 ⇒ 被调方**直接写进目标变量**，
+  //   调用返回后 rax = 该缓冲地址。这里不需要再搬一次（也不能按老路先算目标再求来源：
+  //   被调方已经替我们把值写好了；再回拷一遍只是把同一块内存抄给它自己）。
+  if (node->rhs && node->rhs->kind == ND_CALL && node->rhs->func_index >= 0
+      && c->prog->funcs[node->rhs->func_index].ret_ty == TY_STRUCT) {
+    gen_expr(c, node->rhs);
+    return;
+  }
+  gen_lvalue_addr(c, node->lhs);           // rax = 目标本体地址
+  slot_store_rax64(b, c->scratch_off);     // [rbp-scratch] = 目标
+  gen_expr(c, node->rhs);                  // rax = 来源本体地址（变量/字段地址链；无 CALL 通路）
+  emit_mov_rdx_rax(b);                     // rdx = 来源
+  slot_load_rax64(b, c->scratch_off);      // rax = 目标
+  emit_struct_bytes_rdx_to_rax(b, size);
 }
 
 // —— v1.10.6（B2 第四族）：复合赋值（原 x op= e 那 13 个 case）——
@@ -3033,6 +3153,9 @@ static void gen_expr(FuncCtx *c, Node *node) {
     case ND_VAR: gen_var_read(c, node); return;
     case ND_DEREF: gen_deref(c, node); return;
     case ND_ASSIGN: gen_assign(c, node); return;
+    // v2.9.0：struct 值语义第一刀（语句位置；节点由 parse 的声明/赋值两条路摊平产生）
+    case ND_STRUCT_ZERO: gen_struct_zero(c, node); return;
+    case ND_STRUCT_COPY: gen_struct_copy(c, node); return;
     case ND_FUNC_ADDR: {   // v0.9.3：&函数名 → 函数代码地址（lea rax,[rip+disp32]，布局后回填）
       const uint8_t lea[] = {0x48, 0x8D, 0x05};
       buf_bytes(b, lea, 3);
@@ -3164,6 +3287,25 @@ static void gen_stmt_inner(FuncCtx *c, Node *node) {
       for (Node *s = node->rhs; s; s = s->next) gen_stmt(c, s);
       return;
     case ND_RETURN:
+      // ===== v2.14.0：struct 按值返回 =====
+      //   `return f();`（parse 已把本函数的隐藏缓冲地址补成 f 的隐藏首参）：
+      //     调用返回时 f 已把值写进**本函数的**缓冲，rax 也正好 = 该缓冲 ⇒ 直接跳出口。
+      //   `return v;` / `return q.inner;`：右值是**本体地址**（与 ND_STRUCT_COPY 的来源同形，
+      //     所以这里同样用 gen_expr 取地址，而不是 gen_lvalue_addr）；
+      //     再按 StructDef.size 字节搬到 [隐藏缓冲]，rax 回填缓冲地址（MS ABI 的 rax 约定）。
+      if (c->ret_struct >= 0) {
+        gen_expr(c, node->lhs);                       // rax = 来源本体地址（或已写好的 call）
+        if (!(node->lhs && node->lhs->kind == ND_CALL
+              && node->lhs->func_index >= 0
+              && c->prog->funcs[node->lhs->func_index].ret_ty == TY_STRUCT)) {
+          int size = c->prog->structs[c->ret_struct].size;
+          emit_mov_rdx_rax(b);                        // rdx = 来源
+          slot_load_rax64(b, c->retbuf_off);          // rax = 隐藏返回缓冲
+          emit_struct_bytes_rdx_to_rax(b, size);
+        }
+        emit_jmp_label(c, c->exit_label_id);
+        return;
+      }
       if (node->lhs) {
         // v1.4.25（`-strict`）③：地址值（64 位）从 int 返回函数里返回 = 静默截断（T1 遗留边界②）
         //   ⚠️ main 除外：main 的返回值按语言定义就是退出码（int），"把指针字段当退出码"是
@@ -3368,8 +3510,16 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   // v0.8：指针/引用形参槽里是地址 → 64 位落槽；int 值 → 32 位
   // v1.2.2：double 形参 → 从第 xi 个 XMM 寄存器 movsd 落槽；GP 侧按**整数参数序**计数
   //   （两套序列并行，纯 int 函数的 gi == i → 与旧产物完全一致）
+  // v2.14.0：struct 按值返回的函数**隐式多一个首参**（rcx = 调用者给的返回缓冲地址）——
+  //   先把它落进隐藏槽，再让用户形参的 GP 序号整体 +1（rdx/r8/r9/第 4 个起走栈参）。
+  //   `hid == 0` 的无分支路径与改动前逐条相同（等价门钉着老函数一个字节都没变）。
+  int hid = (fn->ret_ty == TY_STRUCT) ? 1 : 0;
+  if (hid) {
+    slotmap_declare(fn->retbuf_off, TY_PTR, SF_PARAM);   // 钉死内存：return 处要按槽读
+    slot_store_rcx64(&c->code, fn->retbuf_off);
+  }
   if (!fn->is_main) {
-    int gi = 0, xi = 0;
+    int gi = hid, xi = 0;
     for (int i = 0; i < fn->nargs; i++) {
       // v1.4.21（M2）：形参槽申报进"槽 → 位置"表 —— 形参一律钉死内存（M4 条件 ③）
       slotmap_declare(fn->param_offsets[i], fn->param_ty[i],
@@ -3377,8 +3527,10 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
       // ===== v1.4.26：第 5 个形参起**不在寄存器里** —— 从调用者栈区读 =====
       //   规范：前 4 个按位置进 RCX/RDX/R8/R9 与 XMM0-3（两套序列并行），**第 5 个起一律落栈**。
       //   rbp+8 = 返回地址、+16..+47 = shadow ⇒ 第 i(i≥5) 个形参在 [rbp+48+(i-5)*8]。
-      if (i >= 4) {
-        int disp = 48 + (i - 4) * 8;
+      //   v2.14.0：struct 返回时隐藏指针占掉位置 1 ⇒ 用户形参的位置 = i+hid。
+      int pos = i + hid;
+      if (pos >= 4) {
+        int disp = 48 + (pos - 4) * 8;
         bool wide2 = fn->param_ref[i] || fn->param_ty[i] == TY_PTR || fn->param_ty[i] == TY_FUNCPTR
                   || ty_is64(fn->param_ty[i]);   // v1.7.0：int_64 栈参也整 64 位落槽（v1.9.0：uint_64 同）
         if (fn->param_ty[i] == TY_DOUBLE) {
@@ -3450,6 +3602,8 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   // v1.0.13 T1：先算「装地址的 int」标记（定点收敛，最多 8 轮），body 生成时据此定存取宽度
   c->prog = prog;              // v1.4.25：-strict 在调用点要查被调函数的形参类型
   c->ret_ty = fn->ret_ty;      // v1.4.25：-strict 判"地址值经 int 返回被截断"
+  c->ret_struct = (fn->ret_ty == TY_STRUCT) ? fn->ret_struct : -1;   // v2.14.0（指针返回的 ret_struct 也是 sidx）
+  c->retbuf_off = fn->retbuf_off;
   g_nai = 0;
   for (int it = 0; it < 8; it++) if (!ai_pass(fn->body)) break;
 
@@ -3496,14 +3650,21 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   //   （maybe(2) 时 = 2.0）→ `maybe(2) == 0.0` 判假（静默错值）；而"直接打印"那条路径
   //   因为紧接着 cvttsd2si 覆盖了标志位，看起来又是对的——**同一个错值在不同上下文两种表现**。
   //   0.0 从常量区取（note_dblref/note_dbluse 自己排布 + 回填，重复登记自动去重）。
-  if (!fn->ret_void && c->ret_dbl) {
+  // v2.14.0：struct 按值返回的自然流到末尾 —— 与 int 函数的「隐式 return 0」同一条口径：
+  //   把调用者的缓冲**清零**再让 rax 指回它（绝不把没初始化过的目标变量当返回值）。
+  //   显式 `return v;`/`return f();` 都跳 exit_label，不经过这里。
+  if (fn->ret_ty == TY_STRUCT) {
+    slot_load_rax64(&c->code, fn->retbuf_off);
+    emit_struct_zero_at_rax(&c->code, prog->structs[fn->ret_struct].size);
+  }
+  else if (!fn->ret_void && c->ret_dbl) {
     size_t zidx = note_dblref(c, 0.0);
     const uint8_t movsd0[] = {0xF2, 0x0F, 0x10, 0x05};   // movsd xmm0,[rip+disp32]
     buf_bytes(&c->code, movsd0, 4);
     note_dbluse(c, zidx, c->code.len);
     buf_u32(&c->code, 0);                                // 占位（常量区排布后回填）
   }
-  if (!fn->ret_void && !c->ret_dbl) {
+  if (fn->ret_ty != TY_STRUCT && !fn->ret_void && !c->ret_dbl) {
     emit_mov_eax_imm(&c->code, 0);
     if (fn->is_main) emit_mov_ecx_eax(&c->code); // main：ExitProcess 参数
   }

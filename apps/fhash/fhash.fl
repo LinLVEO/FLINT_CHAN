@@ -1,0 +1,448 @@
+// fhash.fl — 文件指纹与对账（FLINT_CHAN 写的日常小工具）
+//   fhash <file>        单文件：size / mtime / crc32 / md5 / sha256
+//   fhash <a> <b>       比对两个文件（先比大小，再比 sha256）
+//   fhash -d <dir>      列出一层目录里每个文件的 size + sha256
+// 退出码：0 = 成功/相同；1 = 比对不同；2 = 参数或 IO 错误
+// 上限：256 MiB（整文件读入内存做摘要；更大文件响亮失败，不静默截断）
+// 用到的标准库：io_lib（整文件读）＋ codec_lib（crc32/md5/sha256）＋ sys_lib（文件时间/目录枚举/命令行）
+include "io_lib.fl"
+include "codec_lib.fl"
+include "sys_lib.fl"
+
+api kernel32 int FileTimeToLocalFileTime(int, int);
+api kernel32 int FileTimeToSystemTime(int, int);
+api kernel32 ptr VirtualAlloc(int, int, int, int);
+api kernel32 int VirtualFree(int, int, int);
+
+char fh_argv[2048];
+char fh_md[16];
+char fh_sha[32];
+int fh_crc;
+int fh_total;
+
+// ---------------- 小工具 ----------------
+
+int fh_strlen(char *s) {
+  int k = 0;
+  while (s[k] != 0) { k = k + 1; }
+  return k;
+}
+
+int fh_streq(char *a, char *b) {
+  int i = 0;
+  while (a[i] != 0 && b[i] != 0) {
+    if (a[i] != b[i]) { return 0; }
+    i = i + 1;
+  }
+  if (a[i] == 0 && b[i] == 0) { return 1; }
+  return 0;
+}
+
+int fh_eqb(char *a, char *b, int n) {
+  int i = 0;
+  while (i < n) {
+    if ((a[i] & 255) != (b[i] & 255)) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+int fh_cp(char *dst, char *src, int n) {
+  int i = 0;
+  while (i < n) { dst[i] = src[i]; i = i + 1; }
+  return 0;
+}
+
+// 参数切分：最多 3 个，去引号，写进 out（每段 NUL 结尾），返回个数
+int fh_args(char *out, int cap) {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  int n = 0;
+  int o = 0;
+  int q = 0;
+  while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+  if (cmd[i] == 34) {
+    i = i + 1;
+    while (cmd[i] != 0 && cmd[i] != 34) { i = i + 1; }
+    if (cmd[i] == 34) { i = i + 1; }
+  } else {
+    while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9) { i = i + 1; }
+  }
+  while (n < 3) {
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+    if (cmd[i] == 0) { break; }
+    q = 0;
+    if (cmd[i] == 34) { q = 1; i = i + 1; }
+    while (cmd[i] != 0 && o < cap - 2) {
+      if (q == 1) {
+        if (cmd[i] == 34) { break; }
+      } else {
+        if (cmd[i] == 32 || cmd[i] == 9) { break; }
+      }
+      out[o] = cmd[i];
+      o = o + 1;
+      i = i + 1;
+    }
+    out[o] = 0;
+    o = o + 1;
+    n = n + 1;
+    if (q == 1) { if (cmd[i] == 34) { i = i + 1; } }
+  }
+  return n;
+}
+
+int fh_nib(int v) {
+  if (v < 10) { return 48 + v; }
+  return 87 + v;
+}
+
+int fh_hex2(char *d, int at, int v) {
+  d[at] = fh_nib((v >> 4) & 15);
+  d[at + 1] = fh_nib(v & 15);
+  return at + 2;
+}
+
+int fh_hexn(char *d, int at, char *src, int n) {
+  int i = 0;
+  while (i < n) {
+    at = fh_hex2(d, at, src[i] & 255);
+    i = i + 1;
+  }
+  return at;
+}
+
+// 文件最后写入时间 → "YYYY-MM-DD HH:MM:SS"（19 字符 + NUL）；0 = 取不到
+// FILETIME 用 8 字节手工布局（小端），避免把 struct 指针传给 int 形参
+int fh_time_str(char *path, char *out, int cap) {
+  int lo = 0;
+  int hi = 0;
+  char ft[8];
+  char lt[8];
+  char st[16];
+  int i = 0;
+  int y = 0;
+  int mo = 0;
+  int d = 0;
+  int h = 0;
+  int mi = 0;
+  int s = 0;
+  if (cap < 20) { return 0; }
+  if (std::file_mtime(path, &lo, &hi) != 1) { return 0; }
+  i = 0;
+  while (i < 16) { st[i] = 0; i = i + 1; }
+  ft[0] = lo & 255;
+  ft[1] = (lo >> 8) & 255;
+  ft[2] = (lo >> 16) & 255;
+  ft[3] = (lo >> 24) & 255;
+  ft[4] = hi & 255;
+  ft[5] = (hi >> 8) & 255;
+  ft[6] = (hi >> 16) & 255;
+  ft[7] = (hi >> 24) & 255;
+  if (FileTimeToLocalFileTime(&ft[0], &lt[0]) == 0) { return 0; }
+  if (FileTimeToSystemTime(&lt[0], &st[0]) == 0) { return 0; }
+  y = (st[0] & 255) + (st[1] & 255) * 256;
+  mo = (st[2] & 255) + (st[3] & 255) * 256;
+  d = (st[6] & 255) + (st[7] & 255) * 256;
+  h = (st[8] & 255) + (st[9] & 255) * 256;
+  mi = (st[10] & 255) + (st[11] & 255) * 256;
+  s = (st[12] & 255) + (st[13] & 255) * 256;
+  out[0] = 48 + y / 1000;
+  out[1] = 48 + y / 100 % 10;
+  out[2] = 48 + y / 10 % 10;
+  out[3] = 48 + y % 10;
+  out[4] = 45;
+  out[5] = 48 + mo / 10;
+  out[6] = 48 + mo % 10;
+  out[7] = 45;
+  out[8] = 48 + d / 10;
+  out[9] = 48 + d % 10;
+  out[10] = 32;
+  out[11] = 48 + h / 10;
+  out[12] = 48 + h % 10;
+  out[13] = 58;
+  out[14] = 48 + mi / 10;
+  out[15] = 48 + mi % 10;
+  out[16] = 58;
+  out[17] = 48 + s / 10;
+  out[18] = 48 + s % 10;
+  out[19] = 0;
+  return 19;
+}
+
+// 读入并算三种摘要；返回字节数；-1 = 打不开/读失败，-2 = 超过 256 MiB，-3 = 分配失败
+// 缓冲走 VirtualAlloc（全局大数组会撞 .data 单节上限）；读完立刻还内存
+int fh_load(char *path) {
+  int sz = 0;
+  int got = 0;
+  int *mem = 0;
+  char *b = 0;
+  if (path == 0) { return -1; }
+  sz = std::file_size(path);
+  if (sz < 0) { return -1; }
+  if (sz > 268435456) { return -2; }
+  mem = VirtualAlloc(0, sz + 16, 0x3000, 4);
+  if (mem == 0) { return -3; }
+  b = mem;
+  got = std::file_read(path, b, sz + 1);
+  if (got != sz) {
+    VirtualFree(mem, 0, 0x8000);
+    return -1;
+  }
+  fh_crc = std::crc32(b, got);
+  if (std::md5(b, got, fh_md) != 16) {
+    VirtualFree(mem, 0, 0x8000);
+    return -1;
+  }
+  if (std::sha256(b, got, fh_sha) != 32) {
+    VirtualFree(mem, 0, 0x8000);
+    return -1;
+  }
+  VirtualFree(mem, 0, 0x8000);
+  return sz;
+}
+
+// 是否目录（attributes & 16）；0 = 不是目录/不存在
+int fh_isdir(char *path) {
+  int a = GetFileAttributesA(path);
+  if (a == -1) { return 0; }
+  if ((a & 16) != 0) { return 1; }
+  return 0;
+}
+
+// 单文件：key=value 每行一条（方便脚本解析）
+int fh_show(char *path) {
+  char t[20];
+  char hx[80];
+  int sz = fh_load(path);
+  if (sz == -1) {
+    if (fh_isdir(path) == 1) {
+      print(["fhash: is a directory, use: fhash -d <dir>\n"]);
+      return 2;
+    }
+    print(["fhash: cannot read ", path, "\n"]);
+    return 2;
+  }
+  if (sz == -2) { print(["fhash: file too large (limit 268435456 bytes)\n"]); return 2; }
+  if (sz == -3) { print(["fhash: out of memory\n"]); return 2; }
+  print(["path=", path, "\n"]);
+  print(["size=", sz, "\n"]);
+  if (fh_time_str(path, t, 20) > 0) { print(["mtime=", t, "\n"]); }
+  fh_hexn(hx, 0, fh_md, 16);
+  hx[32] = 0;
+  print(["md5=", hx, "\n"]);
+  fh_hexn(hx, 0, fh_sha, 32);
+  hx[64] = 0;
+  print(["sha256=", hx, "\n"]);
+  fh_hex2(hx, 0, (fh_crc >> 24) & 255);
+  fh_hex2(hx, 2, (fh_crc >> 16) & 255);
+  fh_hex2(hx, 4, (fh_crc >> 8) & 255);
+  fh_hex2(hx, 6, fh_crc & 255);
+  hx[8] = 0;
+  print(["crc32=", hx, "\n"]);
+  return 0;
+}
+
+// 两文件比对：0 = 相同；1 = 不同；2 = IO 错误
+int fh_cmp(char *a, char *b) {
+  char sa[32];
+  char sb[32];
+  char hx[80];
+  int na = 0;
+  int nb = 0;
+  int same = 0;
+  na = fh_load(a);
+  if (na < 0) { print(["fhash: cannot read ", a, "\n"]); return 2; }
+  fh_cp(sa, fh_sha, 32);
+  nb = fh_load(b);
+  if (nb < 0) { print(["fhash: cannot read ", b, "\n"]); return 2; }
+  fh_cp(sb, fh_sha, 32);
+  if (na == nb && fh_eqb(sa, sb, 32) == 1) { same = 1; }
+  print(["a=", a, "\n"]);
+  print(["a.size=", na, "\n"]);
+  fh_hexn(hx, 0, sa, 32);
+  hx[64] = 0;
+  print(["a.sha256=", hx, "\n"]);
+  print(["b=", b, "\n"]);
+  print(["b.size=", nb, "\n"]);
+  fh_hexn(hx, 0, sb, 32);
+  hx[64] = 0;
+  print(["b.sha256=", hx, "\n"]);
+  if (same == 1) {
+    print(["result=SAME\n"]);
+    return 0;
+  }
+  print(["result=DIFFER\n"]);
+  return 1;
+}
+
+// 一层目录：每个文件一行 "name  size  sha256"（目录/不可读项跳过）
+int fh_dir(char *d) {
+  struct Dir dh;
+  char name[300];
+  char pat[1024];
+  char full[1600];
+  char hx[80];
+  int i = 0;
+  int r = 0;
+  int sz = 0;
+  int cnt = 0;
+  int dl = 0;
+  dl = fh_strlen(d);
+  if (dl + 6 >= 1024) { print(["fhash: path too long\n"]); return 2; }
+  i = 0;
+  while (i < dl) { pat[i] = d[i]; i = i + 1; }
+  pat[dl] = 92;
+  pat[dl + 1] = 42;
+  pat[dl + 2] = 46;
+  pat[dl + 3] = 42;
+  pat[dl + 4] = 0;
+  if (std::dir_open(&dh, pat) != 1) {
+    print(["fhash: cannot open dir ", d, "\n"]);
+    return 2;
+  }
+  print(["dir=", d, "\n"]);
+  while (1) {
+    r = std::dir_next(&dh, name, 300);
+    if (r != 1) { break; }
+    if (fh_streq(name, ".") == 0 && fh_streq(name, "..") == 0) {
+      i = 0;
+      while (i < dl) { full[i] = d[i]; i = i + 1; }
+      full[dl] = 92;
+      i = 0;
+      while (name[i] != 0) {
+        full[dl + 1 + i] = name[i];
+        i = i + 1;
+      }
+      full[dl + 1 + i] = 0;
+      sz = fh_load(full);
+      if (sz >= 0) {
+        fh_hexn(hx, 0, fh_sha, 32);
+        hx[64] = 0;
+        print([name, "  ", sz, "  ", hx, "\n"]);
+        cnt = cnt + 1;
+      } else if (sz == -2) {
+        print([name, "  too-large\n"]);
+      }
+    }
+  }
+  std::dir_close(&dh);
+  print(["count=", cnt, "\n"]);
+  return 0;
+}
+
+// 递归遍历时跳过的目录名（提高性质：版本库/依赖树几乎从不参与对账）
+int fh_skipdir(char *name) {
+  if (fh_streq(name, ".git") == 1) { return 1; }
+  if (fh_streq(name, "node_modules") == 1) { return 1; }
+  return 0;
+}
+
+// 递归遍历：full = 绝对路径（无尾反斜杠），rel = 相对路径（"" = 根）
+// 输出 "<rel>  <size>  <sha256>"；junction/符号链接跳过（防环）；深度上限 32
+int fh_walk(char *full, char *rel, int depth) {
+  struct Dir dh;
+  char name[300];
+  char pat[2048];
+  char cf[2048];
+  char cr[1024];
+  char hx[80];
+  int fl = 0;
+  int rl = 0;
+  int i = 0;
+  int r = 0;
+  int sz = 0;
+  int a = 0;
+  if (depth > 32) { return 0; }
+  fl = fh_strlen(full);
+  rl = fh_strlen(rel);
+  if (fl + 6 >= 2048) { return 0; }
+  i = 0;
+  while (i < fl) { pat[i] = full[i]; i = i + 1; }
+  pat[fl] = 92;
+  pat[fl + 1] = 42;
+  pat[fl + 2] = 46;
+  pat[fl + 3] = 42;
+  pat[fl + 4] = 0;
+  if (std::dir_open(&dh, pat) != 1) { return 0; }
+  while (1) {
+    r = std::dir_next(&dh, name, 300);
+    if (r != 1) { break; }
+    if (fh_streq(name, ".") == 0 && fh_streq(name, "..") == 0) {
+      i = 0;
+      while (i < fl) { cf[i] = full[i]; i = i + 1; }
+      cf[fl] = 92;
+      i = 0;
+      while (name[i] != 0) {
+        cf[fl + 1 + i] = name[i];
+        i = i + 1;
+      }
+      cf[fl + 1 + i] = 0;
+      if (rl > 0) {
+        i = 0;
+        while (i < rl) { cr[i] = rel[i]; i = i + 1; }
+        cr[rl] = 92;
+        i = 0;
+        while (name[i] != 0) {
+          cr[rl + 1 + i] = name[i];
+          i = i + 1;
+        }
+        cr[rl + 1 + i] = 0;
+      } else {
+        i = 0;
+        while (name[i] != 0) { cr[i] = name[i]; i = i + 1; }
+        cr[i] = 0;
+      }
+      a = GetFileAttributesA(cf);
+      if (a != -1 && (a & 16) != 0) {
+        if ((a & 1024) == 0 && fh_skipdir(name) == 0) {
+          fh_walk(cf, cr, depth + 1);
+        }
+      } else {
+        sz = fh_load(cf);
+        if (sz >= 0) {
+          fh_hexn(hx, 0, fh_sha, 32);
+          hx[64] = 0;
+          print([cr, "  ", sz, "  ", hx, "\n"]);
+          fh_total = fh_total + 1;
+        } else if (sz == -2) {
+          print([cr, "  too-large\n"]);
+        }
+      }
+    }
+  }
+  std::dir_close(&dh);
+  return 1;
+}
+
+int fh_rwalk(char *d) {
+  fh_total = 0;
+  print(["root=", d, "\n"]);
+  fh_walk(d, "", 0);
+  print(["count=", fh_total, "\n"]);
+  return 0;
+}
+
+int main() {
+  char *a;
+  char *b;
+  int n;
+  n = fh_args(fh_argv, 2048);
+  if (n < 1) {
+    print(["usage:\n"]);
+    print(["  fhash <file>       size/mtime/crc32/md5/sha256\n"]);
+    print(["  fhash <a> <b>      compare two files\n"]);
+    print(["  fhash -d <dir>     list one folder\n"]);
+    print(["  fhash -r <dir>     walk a folder tree (relpath size sha256)\n"]);
+    return 2;
+  }
+  a = &fh_argv[0];
+  if (n == 1) { return fh_show(a); }
+  b = &fh_argv[fh_strlen(a) + 1];
+  if (n == 2) {
+    if (fh_streq(a, "-d") == 1) { return fh_dir(b); }
+    if (fh_streq(a, "-r") == 1) { return fh_rwalk(b); }
+    return fh_cmp(a, b);
+  }
+  print(["fhash: too many arguments\n"]);
+  return 2;
+}

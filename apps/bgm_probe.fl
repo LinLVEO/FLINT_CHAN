@@ -1,0 +1,24 @@
+// apps/bgm_probe.fl -- BGM 实播探针：循环播放 2 秒后停止，退出 0
+//
+// 运行（仓库根目录）：tmp\hlc_stable.exe -o tmp\bgm_probe.exe apps\bgm_probe.fl
+//                     tmp\bgm_probe.exe
+// 判据：能听见 games/huiye/bgm.wav 循环 2 秒；退出码 0。
+// 失败码：1 = 播放没起来；2 = 播放状态不对；3 = 停止失败；4 = 停止后状态没清。
+include "../lib/bgm.fl"
+
+int main() {
+  int t0 = 0;
+
+  if (bgm_play("games/huiye/bgm.wav") == 0) { return 1; }
+  if (bgm_playing() != 1) { return 2; }
+
+  print(["bgm_probe: playing 2s...\n"]);
+  t0 = GetTickCount();
+  while (GetTickCount() - t0 < 2000) { }
+
+  if (bgm_stop() == 0) { return 3; }
+  if (bgm_playing() != 0) { return 4; }
+
+  print(["bgm_probe: stopped, exit 0\n"]);
+  return 0;
+}

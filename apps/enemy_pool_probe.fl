@@ -1,0 +1,50 @@
+// apps\enemy_pool_probe.fl -- lib\enemy_sys.fl 的 app 侧冒烟（M5 收尾）
+//
+// 判据：编译 exit 0；跑起来 exit 0（失败给 1..9 的细分码）。
+// 只演示库的用法，不画窗口：init 4 槽 → 生成 2 个 → 跑 10 帧 AI/物理 →
+// kill 一个再从同槽生成 → 再跑几帧。地图 32x16、tile 16x16、第 12 行是地板。
+include "../../lib/enemy_sys.fl"
+
+int main() {
+  struct EnemySys es;
+  int map[512];
+  int i = 0;
+  int hit = 0;
+
+  i = 0;
+  while (i < 512) {
+    map[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 32) {
+    map[12 * 32 + i] = 1;
+    i = i + 1;
+  }
+
+  if (enemy_sys_init(&es, 4) != 1) { return 1; }
+  if (enemy_sys_spawn(&es, 100, 180) != 0) { return 2; }
+  if (enemy_sys_spawn(&es, 220, 180) != 1) { return 3; }
+
+  i = 0;
+  while (i < 10) {
+    hit = enemy_sys_tick(&es, 100, 180, map, 32, 16);
+    i = i + 1;
+  }
+  print(["enemy_pool_probe: n=", es.n, " st0=", es.st[0], " st1=", es.st[1],
+         " x1=", es.b[1].x / 65536, " hit=", hit, "\n"]);
+
+  // 回收槽 0（不搬动）→ 下一次生成复用同槽 0。
+  if (enemy_sys_kill(&es, 0) != 1) { return 4; }
+  if (enemy_sys_spawn(&es, 140, 180) != 0) { return 5; }
+  if (es.n != 2) { return 6; }
+
+  i = 0;
+  while (i < 5) {
+    hit = enemy_sys_tick(&es, 140, 180, map, 32, 16);
+    i = i + 1;
+  }
+  print(["enemy_pool_probe: after reuse n=", es.n, " live0=", es.live[0],
+         " live1=", es.live[1], " hit=", hit, "\n"]);
+  return 0;
+}

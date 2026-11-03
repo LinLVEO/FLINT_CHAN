@@ -1,0 +1,120 @@
+// f107_enemy_kind.fl -- 敌人类型参数化（地面 / 飞行）：enemy_sys_spawn_ex + 按 kind 分派物理
+// 判据：8 位位掩码全亮（255）-> 退出 42；否则退出码 = 当前掩码（便于定位掉位）。
+//
+// 地图：32x10 个 16x16 tile（一维 m[ty*32+tx]）；第 7 行是地板（顶 = y=112）。
+// 敌人 12x12 站地板 = y=100；飞行敌人 16x16 放空中（y=40 起，浮动 ±20px 不撞地）。
+//
+//   bit0  spawn_ex 参数落位：16x16 / hp=5 / kind=1；kind=2 与 kind=-1 拒（返回 -1）
+//   bit1  飞行浮动向下：y=40 起 tick 5 -> y=45（vy=+1px/帧，重力 0）
+//   bit2  飞行浮动反向：tick 20 起 vy=-1，tick 25 时 y 比 tick 19 小（真的换向了）
+//   bit3  地面仍落地：y=80 起 tick 30 -> y=100 且 onground=1（重力 32768）
+//   bit4  飞行追击水平：玩家在 x=50、敌 x=20（dist=30 -> 追击）-> vx=+2px，x 增加
+//   bit5  旧 spawn 兼容：enemy_sys_spawn 仍是 12x12 / hp=3 / kind=0
+//   bit6  同池混合互不干扰：槽0 飞行 y 浮动、槽1 地面落地，tick 后两槽 y 不同且各自正确
+//   bit7  飞行攻击掩码：玩家贴脸时掩码只标飞行槽（1<<0），且该槽 st=ST_ATK
+include "../../lib/enemy_sys.fl"
+
+// 造图：全 0 → 第 7 行地板 → 第 5 列 0..6 行墙。
+int build_map(int *map, int mw, int mh) {
+  int i = 0;
+  i = 0;
+  while (i < mw * mh) {
+    map[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < mw) {
+    map[7 * mw + i] = 1;
+    i = i + 1;
+  }
+  i = 0;
+  while (i <= 6) {
+    map[i * mw + 5] = 1;
+    i = i + 1;
+  }
+  return 1;
+}
+
+int main() {
+  struct EnemySys s;
+  struct EnemySys s2;
+  int map[320];
+  int mask = 0;
+  int i = 0;
+  int r = 0;
+  int y19 = 0;
+  int y25 = 0;
+  int y0 = 0;
+  int y1 = 0;
+
+  build_map(map, 32, 10);
+
+  // ---- bit0：spawn_ex 参数落位 + kind 边界 ----
+  if (enemy_sys_init(&s, 4) == 0) { return 1; }
+  r = enemy_sys_spawn_ex(&s, 20, 40, 16, 16, 5, 1);
+  if (r == 0) { mask = mask | 1; }                    // 槽 0
+  if (s.hp[0] != 5) { mask = mask & ~1; }
+  if (s.kind[0] != 1) { mask = mask & ~1; }
+  if (s.b[0].w != 16) { mask = mask & ~1; }
+  if (s.b[0].h != 16) { mask = mask & ~1; }
+  if (enemy_sys_spawn_ex(&s, 0, 0, 8, 8, 1, 2) != 0 - 1) { mask = mask & ~1; }
+  if (enemy_sys_spawn_ex(&s, 0, 0, 8, 8, 1, 0 - 1) != 0 - 1) { mask = mask & ~1; }
+
+  // ---- bit1：飞行向下浮动（tick 1..5，+1px/帧 -> y 从 40 到 45）----
+  i = 0;
+  while (i < 5) { enemy_sys_tick(&s, 0, 0, map, 32, 10); i = i + 1; }
+  if (s.b[0].y / 65536 == 45) { mask = mask | 2; } else { mask = mask & ~2; }
+
+  // ---- bit2：浮动换向（tick 19 时 y=59；tick 20 起 vy=-1；tick 25 时 y=54）----
+  i = 0;
+  while (i < 14) { enemy_sys_tick(&s, 0, 0, map, 32, 10); i = i + 1; }   // 到 tick 19
+  y19 = s.b[0].y / 65536;
+  i = 0;
+  while (i < 6) { enemy_sys_tick(&s, 0, 0, map, 32, 10); i = i + 1; }    // 到 tick 25
+  y25 = s.b[0].y / 65536;
+  if (y19 == 59) { if (y25 == 53) { mask = mask | 4; } }
+  if ((mask & 4) != 0) { } else { mask = mask & ~4; }
+
+  // ---- bit3：地面敌人仍落地（y=80 起 tick 30 -> y=100、onground=1）----
+  if (enemy_sys_init(&s2, 2) == 0) { return 2; }
+  if (enemy_sys_spawn(&s2, 100, 80) != 0) { return 3; }
+  i = 0;
+  while (i < 30) { enemy_sys_tick(&s2, 0, 0, map, 32, 10); i = i + 1; }
+  if (s2.b[0].y / 65536 == 100) { mask = mask | 8; } else { mask = mask & ~8; }
+  if (s2.b[0].onground != 1) { mask = mask & ~8; }
+
+  // ---- bit4：飞行追击水平（玩家 x=50、敌 x=20，dist=30 -> 追击 -> vx=+2px）----
+  if (enemy_sys_init(&s2, 2) == 0) { return 2; }
+  if (enemy_sys_spawn_ex(&s2, 20, 40, 16, 16, 5, 1) != 0) { return 3; }
+  i = 0;
+  while (i < 3) { enemy_sys_tick(&s2, 50, 0, map, 32, 10); i = i + 1; }
+  if (s2.b[0].x / 65536 == 26) { mask = mask | 16; } else { mask = mask & ~16; }
+
+  // ---- bit5：旧 spawn 兼容（12x12 / hp=3 / kind=0）----
+  if (enemy_sys_init(&s2, 2) == 0) { return 2; }
+  if (enemy_sys_spawn(&s2, 100, 100) != 0) { return 3; }
+  if (s2.b[0].w == 12) { if (s2.hp[0] == 3) { if (s2.kind[0] == 0) { mask = mask | 32; } } }
+  if ((mask & 32) == 0) { mask = mask & ~32; }
+
+  // ---- bit6：同池混合互不干扰（槽0 飞行 y=40；槽1 地面 y=80；tick 5 后各自位置对）----
+  if (enemy_sys_init(&s2, 2) == 0) { return 2; }
+  if (enemy_sys_spawn_ex(&s2, 20, 40, 16, 16, 5, 1) != 0) { return 3; }   // 槽 0 飞行
+  if (enemy_sys_spawn(&s2, 100, 80) != 1) { return 4; }                   // 槽 1 地面
+  i = 0;
+  while (i < 5) { enemy_sys_tick(&s2, 0, 0, map, 32, 10); i = i + 1; }
+  y0 = s2.b[0].y / 65536;
+  y1 = s2.b[1].y / 65536;
+  if (y0 == 45) { if (y1 != 45) { mask = mask | 64; } }    // 地面 y 不可能是 45
+  if ((mask & 64) == 0) { mask = mask & ~64; }
+
+  // ---- bit7：飞行攻击掩码（玩家贴脸：敌 x=20,y=40；玩家 x=20,y=40 -> AABB 重叠）----
+  if (enemy_sys_init(&s2, 2) == 0) { return 2; }
+  if (enemy_sys_spawn_ex(&s2, 20, 40, 16, 16, 5, 1) != 0) { return 3; }
+  enemy_sys_tick(&s2, 20, 40, map, 32, 10);
+  r = enemy_sys_tick(&s2, 20, 40, map, 32, 10);
+  if (r == 1) { if (s2.st[0] == ST_ATK) { mask = mask | 128; } }
+  if ((mask & 128) == 0) { mask = mask & ~128; }
+
+  if (mask != 255) { return 3; }
+  return 42;
+}

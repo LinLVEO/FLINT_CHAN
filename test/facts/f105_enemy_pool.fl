@@ -1,0 +1,213 @@
+// f105_enemy_pool.fl -- 敌人系统 M5 收尾：实体池 + 生成/回收 + 每帧 AI/移动
+// 判据：8 位位掩码全亮（255）-> 退出 42；否则退出码 = 当前掩码（便于定位掉位）。
+//
+// 地图：32x10 个 16x16 tile（一维 m[ty*32+tx]）；第 7 行是地板，第 5 列 0..6 行是墙。
+// 敌人 12x12，站在地板上 = y=100（脚底正好 112 = 第 7 行顶）。
+//
+//   bit0  init 清零：cap=4 / n=0 / 8 槽的 live·st·hp·tick·Body·HitStun 全 0；
+//         cap=9 与 cap=0 硬拒（返回 0）
+//   bit1  spawn 4 个槽号依次 0/1/2/3；live=1 / hp=3 / st=0 / n=4 / 坐标与尺寸对
+//   bit2  第 5 个 spawn 返回 -1（池满），n 与 4 个 live 都没变
+//   bit3  kill(1) 后 live=0、n=3、数据不搬动；下一次 spawn 复用同槽 1（n 回 4、字段重置）；
+//         重复 kill 同槽返回 0；邻槽 0 的坐标没被踩
+//   bit4  状态随距离推进：距 60 → 0 巡逻；距 29 → 1 追击；距 12 → 2 攻击
+//   bit5  tick 后 body 坐标按物理走：巡逻 +1px（200→201），竖直被地板托住 y 不变、onground=1
+//   bit6  撞墙回退：向右巡逻贴住墙停在 x=68（右缘=80=墙左沿）且 vx 清 0；
+//         tick 40 起折返，45 帧后 x=62、vx=-1px
+//   bit7  池内互不踩坏：槽 0 攻击（距离 1）命中掩码只有 bit0、刹住不动；槽 1 同时巡逻照走；
+//         kill/回收槽 0 不影响槽 1 的坐标/血量/状态
+include "../../lib/enemy_sys.fl"
+
+// 造图：全 0 → 第 7 行地板 → 第 5 列 0..6 行墙。
+int build_map(int *map, int mw, int mh) {
+  int i = 0;
+  i = 0;
+  while (i < mw * mh) {
+    map[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < mw) {
+    map[7 * mw + i] = 1;
+    i = i + 1;
+  }
+  i = 0;
+  while (i <= 6) {
+    map[i * mw + 5] = 1;
+    i = i + 1;
+  }
+  return 1;
+}
+
+int main() {
+  struct EnemySys s;
+  struct EnemySys s2;
+  struct EnemySys s3;
+  struct EnemySys s4;
+  int map[320];
+  int mask = 0;
+  int i = 0;
+  int r = 0;
+  int r0 = 0;
+  int r1 = 0;
+  int r2 = 0;
+  int r3 = 0;
+  int ok = 0;
+
+  build_map(map, 32, 10);
+
+  // ---- bit0：init 清零 + cap 边界 ----
+  if (enemy_sys_init(&s, 9) != 0) { return 1; }
+  if (enemy_sys_init(&s, 0) != 0) { return 1; }
+  if (enemy_sys_init(&s, 4) != 1) { return 1; }
+  if (s.cap == 4 && s.n == 0) {
+    ok = 1;
+    i = 0;
+    while (i < 8) {
+      if (s.live[i] != 0) { ok = 0; }
+      if (s.st[i] != 0) { ok = 0; }
+      if (s.hp[i] != 0) { ok = 0; }
+      if (s.tick[i] != 0) { ok = 0; }
+      if (s.b[i].x != 0) { ok = 0; }
+      if (s.b[i].y != 0) { ok = 0; }
+      if (s.b[i].vx != 0) { ok = 0; }
+      if (s.b[i].vy != 0) { ok = 0; }
+      if (s.b[i].onground != 0) { ok = 0; }
+      if (s.hs[i].stun != 0) { ok = 0; }
+      i = i + 1;
+    }
+    if (ok == 1) { mask = mask | 1; }
+  }
+
+  // ---- bit1：前 4 个 spawn 依次占 0/1/2/3 ----
+  r0 = enemy_sys_spawn(&s, 200, 100);
+  r1 = enemy_sys_spawn(&s, 240, 100);
+  r2 = enemy_sys_spawn(&s, 280, 100);
+  r3 = enemy_sys_spawn(&s, 320, 100);
+  if (r0 == 0 && r1 == 1 && r2 == 2 && r3 == 3) {
+    ok = 1;
+    if (s.n != 4) { ok = 0; }
+    i = 0;
+    while (i < 4) {
+      if (s.live[i] != 1) { ok = 0; }
+      if (s.hp[i] != 3) { ok = 0; }
+      if (s.st[i] != 0) { ok = 0; }
+      if (s.tick[i] != 0) { ok = 0; }
+      i = i + 1;
+    }
+    if (s.b[0].x != 200 * 65536) { ok = 0; }
+    if (s.b[1].x != 240 * 65536) { ok = 0; }
+    if (s.b[2].x != 280 * 65536) { ok = 0; }
+    if (s.b[3].y != 100 * 65536) { ok = 0; }
+    if (s.b[3].w != 12 || s.b[3].h != 12) { ok = 0; }
+    if (ok == 1) { mask = mask | 2; }
+  }
+
+  // ---- bit2：第 5 个 spawn 池满返回 -1，已有槽不动 ----
+  if (enemy_sys_spawn(&s, 400, 100) == -1) {
+    ok = 1;
+    if (s.n != 4) { ok = 0; }
+    i = 0;
+    while (i < 4) {
+      if (s.live[i] != 1) { ok = 0; }
+      i = i + 1;
+    }
+    if (ok == 1) { mask = mask | 4; }
+  }
+
+  // ---- bit3：kill 不搬动 + 下一次 spawn 复用同槽 + 邻槽不受伤 ----
+  if (enemy_sys_kill(&s, 1) == 1) {
+    ok = 1;
+    if (s.live[1] != 0) { ok = 0; }
+    if (s.n != 3) { ok = 0; }
+    if (s.b[1].x != 240 * 65536) { ok = 0; }
+    if (s.live[0] != 1 || s.live[2] != 1 || s.live[3] != 1) { ok = 0; }
+    if (enemy_sys_kill(&s, 1) != 0) { ok = 0; }
+    r0 = enemy_sys_spawn(&s, 100, 100);
+    if (r0 != 1) { ok = 0; }
+    if (s.n != 4) { ok = 0; }
+    if (s.live[1] != 1 || s.hp[1] != 3 || s.st[1] != 0) { ok = 0; }
+    if (s.b[1].x != 100 * 65536) { ok = 0; }
+    if (s.b[0].x != 200 * 65536) { ok = 0; }
+    if (ok == 1) { mask = mask | 8; }
+  }
+
+  // ---- bit4：距离三档推进 巡逻 -> 追击 -> 攻击 ----
+  if (enemy_sys_init(&s2, 4) != 1) { return 2; }
+  r0 = enemy_sys_spawn(&s2, 200, 100);
+  if (r0 == 0) {
+    enemy_sys_tick(&s2, 260, 100, map, 32, 10);
+    ok = 1;
+    if (s2.st[0] != 0) { ok = 0; }
+    enemy_sys_tick(&s2, 230, 100, map, 32, 10);
+    if (s2.st[0] != 1) { ok = 0; }
+    enemy_sys_tick(&s2, 215, 100, map, 32, 10);
+    if (s2.st[0] != 2) { ok = 0; }
+    if (ok == 1) { mask = mask | 16; }
+  }
+
+  // ---- bit5：tick 后坐标按物理移动（巡逻 +1px，地板托住） ----
+  if (enemy_sys_init(&s3, 4) != 1) { return 3; }
+  r0 = enemy_sys_spawn(&s3, 200, 100);
+  if (r0 == 0) {
+    enemy_sys_tick(&s3, 500, 100, map, 32, 10);
+    ok = 1;
+    if (s3.b[0].x != 201 * 65536) { ok = 0; }
+    if (s3.b[0].y != 100 * 65536) { ok = 0; }
+    if (s3.b[0].onground != 1) { ok = 0; }
+    if (s3.st[0] != 0) { ok = 0; }
+    if (ok == 1) { mask = mask | 32; }
+  }
+
+  // ---- bit6：撞墙贴边停住 + 巡逻折返回退 ----
+  enemy_sys_kill(&s3, 0);
+  r0 = enemy_sys_spawn(&s3, 60, 100);
+  if (r0 == 0) {
+    i = 0;
+    while (i < 20) {
+      enemy_sys_tick(&s3, 0, 100, map, 32, 10);
+      i = i + 1;
+    }
+    ok = 1;
+    if (s3.b[0].x != 68 * 65536) { ok = 0; }
+    if (s3.b[0].vx != 0) { ok = 0; }
+    if (s3.b[0].y != 100 * 65536) { ok = 0; }
+    i = 0;
+    while (i < 25) {
+      enemy_sys_tick(&s3, 0, 100, map, 32, 10);
+      i = i + 1;
+    }
+    if (s3.b[0].x != 62 * 65536) { ok = 0; }
+    if (s3.b[0].vx != 0 - 65536) { ok = 0; }
+    if (ok == 1) { mask = mask | 64; }
+  }
+
+  // ---- bit7：同池两实体互不踩坏 + 命中掩码只标自己 ----
+  if (enemy_sys_init(&s4, 4) != 1) { return 4; }
+  r0 = enemy_sys_spawn(&s4, 100, 100);
+  r1 = enemy_sys_spawn(&s4, 200, 100);
+  if (r0 == 0 && r1 == 1) {
+    r = enemy_sys_tick(&s4, 101, 100, map, 32, 10);
+    ok = 1;
+    if (r != 1) { ok = 0; }
+    if (s4.st[0] != 2) { ok = 0; }
+    if (s4.st[1] != 0) { ok = 0; }
+    if (s4.b[0].x != 100 * 65536) { ok = 0; }
+    if (s4.b[1].x != 201 * 65536) { ok = 0; }
+    if (s4.b[1].y != 100 * 65536) { ok = 0; }
+    if (s4.hp[0] != 3 || s4.hp[1] != 3) { ok = 0; }
+    if (enemy_sys_kill(&s4, 0) != 1) { ok = 0; }
+    if (s4.live[1] != 1) { ok = 0; }
+    if (s4.b[1].x != 201 * 65536) { ok = 0; }
+    r0 = enemy_sys_spawn(&s4, 300, 100);
+    if (r0 != 0) { ok = 0; }
+    if (s4.b[1].x != 201 * 65536) { ok = 0; }
+    if (s4.hp[1] != 3 || s4.st[1] != 0) { ok = 0; }
+    if (s4.n != 2) { ok = 0; }
+    if (ok == 1) { mask = mask | 128; }
+  }
+
+  print(["f105 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

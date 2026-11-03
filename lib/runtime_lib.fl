@@ -1,0 +1,209 @@
+// runtime_lib.fl — FLINT 标准库（运行时基础量批）：时钟 / 日期 + 伪随机数
+// 用法：include "../../lib/runtime_lib.fl"（路径相对本文件目录解析）
+// 整合：2026-11-03 由 time_lib.fl + rand_lib.fl 合并 —— 两者都是"运行时基础量"，
+//       且共用同一套系统时钟通道（QPC / GetTickCount64）；函数名与语义一字未改。
+// 自包含：不 include 其它库；api 声明集中在文件顶部（collect_apis 只认最开头连续的那批）。
+//
+// 分区：
+//   §1 时钟 / 日期  std::time_now / time_year / time_month / time_day / time_hour /
+//                    time_minute / time_second / time_format / time_ms
+//   §2 伪随机数     std::rand_next / rand_seed / rand_seed_now / rand_range
+//
+// 失败口径（响亮，不静默）：
+//   time_year/month/day/hour/minute/second → -1 = 取时钟失败 / 字段不合法；
+//   time_format → -1 = buf 为 0 / cap < 20 / 字段不合法；
+//   time_now → 0 = FILETIME 不可信（早于 1970-01-01）；
+//   rand_range(lo, hi) 在 lo > hi 时返回 lo（不交换、不夹取）。
+api kernel32 int GetSystemTimeAsFileTime(int);
+api kernel32 int GetLocalTime(int);
+api kernel32 ptr GetTickCount64();
+api kernel32 int QueryPerformanceCounter(int);
+api kernel32 int QueryPerformanceFrequency(int);
+
+// FILETIME = 自 1601-01-01 UTC 起的 100ns 计数：2 个 32 位字段（低 32 位在前，小端）
+struct Ft { int lo; int hi; }
+// SYSTEMTIME = 8 个 WORD（每 2 字节，共 16 字节）；FLINT 没有 WORD 类型 ⇒ 用 16 字节 char 缓冲接
+// 字段下标：0 wYear / 1 wMonth / 2 wDayOfWeek / 3 wDay / 4 wHour / 5 wMinute / 6 wSecond
+struct Lt { char w[16]; }
+
+// ==================== §1 时钟 / 日期 ====================
+
+// 当前 Unix 时间（秒，1970-01-01 UTC 起）；0 = 取不到 / 时钟早于 1970
+int_64 std::time_now() {
+  struct Ft ft;
+  int_64 t = 0;
+  int_64 lo = 0;
+  ft.lo = 0;
+  ft.hi = 0;
+  GetSystemTimeAsFileTime(&ft);
+  if (ft.hi <= 0) { return 0; }
+  lo = (int_64)ft.lo;
+  if (lo < 0) { lo = lo + 4294967296; }
+  t = (int_64)ft.hi * 4294967296 + lo;
+  if (t <= 116444736000000000) { return 0; }
+  return (t - 116444736000000000) / 10000000;
+}
+
+// 本年（4 位）；-1 = 取时钟失败/字段不合法
+int std::time_year() {
+  struct Lt lt = {0};
+  int y = 0;
+  GetLocalTime(&lt.w[0]);
+  y = lt.w[0] + lt.w[1] * 256;
+  if (y < 1601 || y > 9999) { return -1; }
+  return y;
+}
+
+// 本月（1..12）；-1 = 失败
+int std::time_month() {
+  struct Lt lt = {0};
+  int mo = 0;
+  GetLocalTime(&lt.w[0]);
+  mo = lt.w[2] + lt.w[3] * 256;
+  if (mo < 1 || mo > 12) { return -1; }
+  return mo;
+}
+
+// 本日（1..31）；-1 = 失败
+int std::time_day() {
+  struct Lt lt = {0};
+  int d = 0;
+  GetLocalTime(&lt.w[0]);
+  d = lt.w[6] + lt.w[7] * 256;
+  if (d < 1 || d > 31) { return -1; }
+  return d;
+}
+
+// 本小时（0..23）；-1 = 失败
+int std::time_hour() {
+  struct Lt lt = {0};
+  int h = 0;
+  GetLocalTime(&lt.w[0]);
+  h = lt.w[8] + lt.w[9] * 256;
+  if (h < 0 || h > 23) { return -1; }
+  return h;
+}
+
+// 本分钟（0..59）；-1 = 失败
+int std::time_minute() {
+  struct Lt lt = {0};
+  int mi = 0;
+  GetLocalTime(&lt.w[0]);
+  mi = lt.w[10] + lt.w[11] * 256;
+  if (mi < 0 || mi > 59) { return -1; }
+  return mi;
+}
+
+// 本秒（0..59）；-1 = 失败
+int std::time_second() {
+  struct Lt lt = {0};
+  int s = 0;
+  GetLocalTime(&lt.w[0]);
+  s = lt.w[12] + lt.w[13] * 256;
+  if (s < 0 || s > 59) { return -1; }
+  return s;
+}
+
+// 格式化本机时间为 "YYYY-MM-DD HH:MM:SS"（19 字符 + NUL）；返回 19；失败 -1
+int std::time_format(char *buf, int cap) {
+  struct Lt lt = {0};
+  int y = 0;
+  int mo = 0;
+  int d = 0;
+  int h = 0;
+  int mi = 0;
+  int s = 0;
+  if (buf == 0) { return -1; }
+  if (cap < 20) { return -1; }
+  GetLocalTime(&lt.w[0]);
+  y = lt.w[0] + lt.w[1] * 256;
+  mo = lt.w[2] + lt.w[3] * 256;
+  d = lt.w[6] + lt.w[7] * 256;
+  h = lt.w[8] + lt.w[9] * 256;
+  mi = lt.w[10] + lt.w[11] * 256;
+  s = lt.w[12] + lt.w[13] * 256;
+  if (y < 1601 || y > 9999) { return -1; }
+  if (mo < 1 || mo > 12) { return -1; }
+  if (d < 1 || d > 31) { return -1; }
+  if (h < 0 || h > 23) { return -1; }
+  if (mi < 0 || mi > 59) { return -1; }
+  if (s < 0 || s > 59) { return -1; }
+  buf[0] = '0' + y / 1000;
+  buf[1] = '0' + y / 100 % 10;
+  buf[2] = '0' + y / 10 % 10;
+  buf[3] = '0' + y % 10;
+  buf[4] = '-';
+  buf[5] = '0' + mo / 10;
+  buf[6] = '0' + mo % 10;
+  buf[7] = '-';
+  buf[8] = '0' + d / 10;
+  buf[9] = '0' + d % 10;
+  buf[10] = ' ';
+  buf[11] = '0' + h / 10;
+  buf[12] = '0' + h % 10;
+  buf[13] = ':';
+  buf[14] = '0' + mi / 10;
+  buf[15] = '0' + mi % 10;
+  buf[16] = ':';
+  buf[17] = '0' + s / 10;
+  buf[18] = '0' + s % 10;
+  buf[19] = 0;
+  return 19;
+}
+
+// 开机毫秒数（GetTickCount64，64 位、不回绕）；0 = 开机不到 1ms
+int_64 std::time_ms() {
+  return GetTickCount64();
+}
+
+// ==================== §2 伪随机数 ====================
+// xorshift64*（12/25/27 + 64 位乘法 0x2545F4914F6CDD1D）；输出取乘法高 31 位。
+// ⚠️ 状态必须用 uint_64：FLINT 的 >> 对 int_64 是算术右移（实测 -1>>1 == -1），
+//    对 uint_64 才是逻辑右移（(uint_64)0-1 >> 1 == 2^63-1）；xorshift 的移位必须逻辑右移。
+// 状态全 0 会永远为 0 ⇒ 初值、rand_seed(0)、rand_seed_now 兜底三处都钉非零常量。
+// 只有 rand_seed_now() 读硬件时钟；给定 seed 后序列逐位可复现。
+
+uint_64 g_rand_state = 0x9E3779B97F4A7C15;
+
+// 下一个随机数，范围 [0, 2^31)，非负
+int_64 std::rand_next() {
+  uint_64 x = g_rand_state;
+  x = x ^ (x >> 12);
+  x = x ^ (x << 25);
+  x = x ^ (x >> 27);
+  g_rand_state = x;
+  return (int_64)((x * 0x2545F4914F6CDD1D) >> 32) & 0x7FFFFFFF;
+}
+
+// 播种；s == 0 时用固定非零常量
+void std::rand_seed(int_64 s) {
+  if (s == 0) { g_rand_state = 0x9E3779B97F4A7C15; }
+  else { g_rand_state = (uint_64)s; }
+}
+
+// 用 QPC 播种（每次启动不同）；splitmix64 收尾混合
+void std::rand_seed_now() {
+  int_64 q = 0;
+  int_64 f = 0;
+  uint_64 s = 0;
+  QueryPerformanceCounter(&q);
+  QueryPerformanceFrequency(&f);
+  s = (uint_64)q ^ ((uint_64)f * 0x9E3779B97F4A7C15);
+  s = s ^ (s >> 30);
+  s = s * 0xBF58476D1CE4E5B9;
+  s = s ^ (s >> 27);
+  s = s * 0x94D049BB133111EB;
+  s = s ^ (s >> 31);
+  if (s == 0) { s = 0x9E3779B97F4A7C15; }
+  g_rand_state = s;
+}
+
+// 闭区间 [lo, hi] 内的整数；lo > hi 时返回 lo
+int std::rand_range(int lo, int hi) {
+  int_64 span = 0;
+  int_64 r = 0;
+  if (lo > hi) { return lo; }
+  span = (int_64)hi - (int_64)lo + 1;
+  r = std::rand_next() % span;
+  return lo + (int)r;
+}

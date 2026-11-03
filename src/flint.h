@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <setjmp.h>   // C1：函数级错误恢复（error_at/error → longjmp 回解析恢复点）
 
 // v0.9：-safe 编译模式开关（main.c 置位；parse 做内存所有权强制检查）
 extern bool flint_safe_mode;
@@ -63,6 +64,16 @@ int src_file_count(void);        // 本次编译登记过的源文件数（含 i
 char *src_file_name(int i);      // i 越界返回 NULL
 void error_at(char *loc, char *fmt, ...);
 void error(char *fmt, ...);
+
+// ===== C1 阶段：函数级错误恢复（一次运行报出多个错误）=====
+// 语义：error_at / error 先按原格式打印，然后 g_err_count++；
+//   若 g_err_recovering = 1（正处在 parse_funcdef 的可恢复窗口里）→ longjmp 回恢复点，
+//   否则保持旧行为 exit(1)（预扫描、顶层结构等"无处可恢复"的错误）。
+// 为什么是函数级而不是语句级：语句级恢复容易在坏 AST 上级联出错、甚至死循环；
+//   函数级恢复点少、前进性容易保证（见 parse.c 的 skip_past_brace_group）。
+extern int g_err_count;        // 已报错误总数（main 用它决定"进不进 codegen"）
+extern int g_err_recovering;   // 1 = 可恢复解析中（error_at/error 该 longjmp）
+extern jmp_buf g_err_jb;       // 当前可恢复解析的 longjmp 目标（解析器单线程、不嵌套）
 
 // ========== 语法（AST）==========
 // v0.7：指针/数组。节点：声明/赋值/return/if/while/for/块/函数调用/解引用；
@@ -141,6 +152,14 @@ typedef enum {
   //   ND_CAST 让"结果类型"只有一个来源 = node->ty。
   //   指针转型（(T*)p）在这里**只换类型、不产码**（elem_ty/struct_idx 记指向类型）。
   ND_CAST,
+  // —— v2.9.0 struct 值语义第一刀（只做零初始化 + 值拷贝；按值返回/全局 struct 仍不做）——
+  //   ND_STRUCT_ZERO：lhs = 目标结构体变量（ND_VAR），struct_idx = 结构体；
+  //     语义 = 把**目标本体的 size 个字节**清零（{0} 的唯一形态；不是通用初始化列表）。
+  //   ND_STRUCT_COPY：lhs = 目标结构体变量（ND_VAR），rhs = 同类型的来源表达式
+  //     （同一 struct 的变量 / 字段地址链），struct_idx = 结构体；语义 = 按**字节**浅拷贝 size 个字节
+  //     （C 语义：指针字段复制的是指针值；嵌套 struct 值字段自动整块覆盖）。
+  //   ⚠️ 两者都只出现在**语句位置**（ND_EXPR_STMT 的子树）；不当表达式值用（FLINT 仍无 struct 整体值语义）。
+  ND_STRUCT_ZERO, ND_STRUCT_COPY,
 } NodeKind;
 
 // 变量类型（v0.7 起；v0.7.x 加结构体）
@@ -273,6 +292,15 @@ struct Node {
   int label_id;  // v1.3.1：ND_CASE 生成期分配的标签号（emit_label / jcc 目标）
   int fn_sig;    // v1.3.2：ND_VAR(ty==TY_FUNCPTR) / 间接 ND_CALL 的**签名表下标**（Program.sigs）
                  //   ⚠️ 间接调用的判据是 `func_index < 0 && fn_sig >= 0`；直接调用恒为 func_index>=0
+  // v2.6.0：函数指针数组元素作间接调用目标时的**匿名帧槽**（rbp 相对偏移；0 = 没有/不适用）。
+  //   只有 `ops[i](...)` 这种"目标不是 ND_VAR"的间接调用才分配：codegen 必须先求目标值、
+  //   实参全部就位后再从槽里装 rax（目标表达式可能含调用/寄存器使用，见 parse_indirect_call_core）。
+  int fp_tmp;
+  // v2.14.0（struct 按值返回）：这个 ND_CALL 已经把「隐藏返回缓冲地址」补成第 1 个实参。
+  //   只有两个合法位置会置位：struct 变量声明/赋值的右值、struct 返回函数里的 `return f();`。
+  //   后遍 check_sret_calls 用它拦下「mk(1,2).x / f(mk(1,2)) / p = mk() + 1」这类
+  //   把按值返回调用当普通值塞进任意表达式的写法（响亮报错，绝不静默发一条没有缓冲的 call）。
+  int sret_ok;
   char *loc;     // v0.9.1：节点对应源码位置（报错定位用；ND_CALL/ND_APICALL 构建时记录，
                  //          后遍检查（void 误用等）无 p->tok 可用时 error_at 定位）
   // v1.4.11（`-debug` 可审计发射层）：语句级**行号 + 源文件序号**。parse.c 建节点时从"当前语句起始
@@ -347,14 +375,28 @@ typedef struct {
   char *name;
   int len;
   int ty;          // Type：TY_INT / TY_CHAR / TY_DOUBLE / TY_INT64（标量）｜ TY_ARR（数组）
+                   //   v2.13.0：+ TY_STRUCT（按值全局 struct）｜ TY_PTR（指针全局，含 struct 指针）
   int elem_ty;     // TY_ARR 的元素类型 / TY_PTR 的指向类型
+                   //   v2.13.0：struct 数组全局 = TY_STRUCT（元素就是整个结构体）；
+                   //            TY_STRUCT 标量 / struct 指针 = TY_INT（没有"指向类型"这一说，看 struct_idx）
   int arr_len;     // TY_ARR：元素个数（非数组 = 1）
+  // v2.13.0（struct 值语义第三刀）：**结构体类型下标**（Program.structs；-1 = 不是 struct 族）。
+  //   三个消费者各自的口径：
+  //     · ty=TY_STRUCT               → 按值全局 struct（size = StructDef.size，doff 按 StructDef.align）
+  //     · ty=TY_ARR + elem=TY_STRUCT → 全局 struct 数组（元素步长 = 8*ceil(size/8)，与局部 a[i] 同源）
+  //     · ty=TY_PTR  + struct_idx>=0 → 全局 struct 指针（codegen 走既有 TY_PTR 64 位通路；sid 供 `p->f`/`p[i]`）
+  //   ⚠️ 非 struct 全局必须显式 -1：memset 的 0 会冒充"struct 0"（与 StructField.sid 同一条纪律）。
+  int struct_idx;
   int size;        // 本变量占的字节数
   int doff;        // 在 .data 内的字节偏移（已按类型对齐；**不含** DATA_RVA）
   int init_len;    // 初值字节数（0 = 全零，仅 .bss 语义；C 的 `int g;` 全局 = 0）
-  uint8_t init[64];// 初值字节（标量/小数组）。⚠️ int 元素是 **8 字节槽**（同数组寻址口径），
-                   //   故 int a[N]={...} 每元素占 8 字节 → 上限 = 8 个 int。更长的数组初值会明确报错
-                   //   （不静默截断）；要长数组请用「声明 + 运行时赋值」。
+  // —— 2026-11-03（int4-abi）：初值从固定 `uint8_t init[64]` 改成**按实际长度 malloc** ——
+  //   为什么必须动态：GlobalVar 是**数组元素**（每个全局变量一份），固定 64 字节意味着
+  //   `int g[4096] = {...}` 只装得下前 16 个元素（int 数组元素步长 4）就撞上限；而把它整体
+  //   抬成 256 KiB 更糟——每个标量全局（`int a; int b;`）都要各自吞 256 KiB，编译器自己先 OOM。
+  //   ⇒ 长度只跟真的写进来的字节数走；上限不在这里，而在 .data 单节上限（collect_globals 的两处检查）。
+  //   NULL = 没有初值（= .bss 语义，.data 全零）。pe.c 只读 init[0..init_len-1]。
+  uint8_t *init;
 } GlobalVar;
 
 // ========== 程序（多函数）==========
@@ -374,6 +416,15 @@ typedef struct {
 //   ⚠️ boot（自举侧）**没有全局变量** ⇒ 那边只能写字面量 32，必须靠 `test\边界探针.ps1` 复核
 //      （纪律：boot 写死的上限一律拿探针复核 ——「当年对齐过」≠「现在还齐」）。
 #define FUNC_MAX_ARGS 32
+
+// v2.7.0（2026-11-02）：递归下降**嵌套深度上限**（单点定义在这里）。
+//   为什么：`((((1))))` 走 primary → expr 的递归，语句嵌套走 stmt() → stmt_inner 的递归；
+//   2000 层括号 / 深层无花括号 if 链实测让 hlc 进程以 0xC00000FD（STACK_OVERFLOW）静默崩掉 —— 用户只看到"编译器死了"。
+//   512 的取法：gcc 能编 2000 层，512 已经够宽松；clang 默认 256 太紧，不采用。
+//   计数点**只有两处**（parse.c 的 primary '(' 分支、stmt() 包装层）——expr/assign/add 等
+//   链式函数是 while 循环、不递归，不加深 depth，别往那里加。语句层放在 stmt() 包装层而不是
+//   单个 '{' 分支：块 / 无花括号的 if / while 体全都经 stmt 递归，漏一处就会留下同类栈溢出。
+#define PARSE_MAX_DEPTH 512
 
 // —— v1.5.0 str 内建（str([段, ...]) → char*）的静态缓冲上限：**单点定义在这里** ——
 //   注入库（src/main.c 的 LIB_* 分块）里数组声明与超限判定都用 FLINT_STRBUF_CAP_S（"4096" 的字面量形式），
@@ -410,6 +461,12 @@ typedef struct {
   int ret_elem;        // v1.0.6：指针返回的指向类型（char* → TY_CHAR；int* → TY_INT；默认 TY_INT）
   int ret_struct;      // v1.0.6：struct S* 返回的结构体下标（-1 = 非结构体指向）
   int nargs;           // 参数个数 0..FUNC_MAX_ARGS（v1.4.26 由 4 抬到 32）
+  // v2.14.0（struct 按值返回）：本函数的**隐藏返回缓冲指针**槽（距 rbp）。0 = 非按值返回 struct。
+  //   调用约定：struct 返回函数隐式多一个「第 1 个」参数（rcx = 调用者分配的缓冲地址），
+  //   用户形参整体后移一位（rdx/r8/r9/栈参）。该槽由序言 `mov [rbp-retbuf_off], rcx` 落地，
+  //   `return v;` 把 v 的本体按 StructDef.size 字节搬进去、rax 回填该地址。
+  //   ⚠️ 它**不**进 nargs/param_* 表（那是用户可见签名），只活在 codegen 的序言/return 两处。
+  int retbuf_off;
   int param_offsets[FUNC_MAX_ARGS];// 参数 i 的变量槽偏移（距 rbp）
   bool param_ref[FUNC_MAX_ARGS];   // 参数 i 是引用形参（调用点传地址）
   int param_ty[FUNC_MAX_ARGS];     // v0.8：参数 i 的类型（TY_INT/TY_PTR/TY_STRUCT；装载宽度用）
@@ -491,7 +548,9 @@ typedef struct {
 // 参数通道仍按「实参表达式是不是 double」分派 —— 与直接调用同一条路，见 gen_call 注释）
 
 // v2.1.0 enum：具名整数常量（parse 期直接折成字面量，codegen 零改动）
-typedef struct { char *name; int value; } EnumConst;
+// v2.15.0：tok = 定义处名字 token（预扫描登记后，与全局/函数同名的冲突检查要挪到
+//   collect_funcs 之后补做，报错得指回原位置）。
+typedef struct { char *name; int value; Token *tok; } EnumConst;
 
 typedef struct {
   FuncDef *funcs;      // 函数数组（动态，源定义序）
@@ -665,6 +724,10 @@ typedef struct {
                        //   自然流到末尾的隐式 return 不能发 `mov eax,0`（会毁掉已在 xmm0 的返回值）
   // v1.4.25（`-strict`）：这两项只给严格档的诊断用（默认关时谁都不读）
   int ret_ty;          // 本函数返回类型（判"地址值经 int 返回被截断"）
+  // v2.14.0（struct 按值返回）：本函数按值返回的结构体下标（-1 = 不是）＋隐藏返回缓冲指针槽。
+  //   ND_RETURN 用它决定「搬进缓冲 / 直接转交」，自然流到末尾时的隐式返回也用它回填 rax。
+  int ret_struct;
+  int retbuf_off;
   Program *prog;       // 程序表（调用点查被调函数的形参类型/引用标记）
   size_t disp_off;     // main 内 call [rip+disp] 的 disp32 偏移（IAT 回填用）
   int scratch_off;     // v1.0.3：帧底部暂存槽偏移（间接赋值 rhs 先存槽再算地址——防跨 call 压栈错位）

@@ -1,0 +1,38 @@
+// f127_tcp.fl -- net_lib 探针：TCP 客户端（ws2_32 原生 socket，不走外网/不依赖监听端口）
+// 判据（8 位掩码全亮 255 -> 退出 42；期望值 = 本机实测）：
+//   bit0  std::tcp_ready() == 1（WSAStartup 2.2 成功）
+//   bit1  std::tcp_open(&t, "127.0.0.1", 1) == 0（端口 1 无人监听 -> connect 必败 -> 0）
+//   bit2  上一步之后 t.s == 0（失败时句柄被清 0，调用方不用猜）
+//   bit3  std::tcp_close(&t) 未打开返回 0（幂等安全）
+//   bit4  std::tcp_send(&t, "x", 1) 未打开返回 -1
+//   bit5  std::tcp_recv(&t, buf, 8) 未打开返回 -1
+//   bit6  std::tcp_open(&t, 0, 80) 参数非法（空指针）返回 0
+//   bit7  std::tcp_open(&t, "999.999.999.999", 80) 非法 IP（inet_addr = INADDR_NONE）返回 0，不崩
+include "../../lib/net_lib.fl"
+
+int main() {
+  struct Tcp t;
+  char buf[8];
+  int mask = 0;
+
+  t.s = 0;                                   // 局部 struct 字段不清零 -> 先赋值
+  buf[0] = 0;
+
+  if (std::tcp_ready() == 1) { mask = mask | 1; }
+
+  if (std::tcp_open(&t, "127.0.0.1", 1) == 0) { mask = mask | 2; }
+  if (t.s == 0) { mask = mask | 4; }
+
+  if (std::tcp_close(&t) == 0) { mask = mask | 8; }
+
+  if (std::tcp_send(&t, "x", 1) == 0 - 1) { mask = mask | 16; }
+  if (std::tcp_recv(&t, buf, 8) == 0 - 1) { mask = mask | 32; }
+
+  if (std::tcp_open(&t, 0, 80) == 0) { mask = mask | 64; }
+
+  if (std::tcp_open(&t, "999.999.999.999", 80) == 0) { mask = mask | 128; }
+
+  print(["f127 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

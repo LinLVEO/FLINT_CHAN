@@ -54,6 +54,14 @@ struct LVar {
   bool is_own; // v0.9：own 独占指针（new 初始化；出口自动释放；禁拷贝/重赋值）
   bool is_share; // v0.9：share 引用计数指针（new/share 拷贝初始化；拷贝+1 出口-1 归零释放）
   int fn_sig;    // v1.3.2：TY_FUNCPTR 变量的签名下标（Program.sigs）；其余 = FN_SIG_NONE
+  // ===== v2.12.0：**指针数组** `char *names[N]` =====
+  //   elem_ty == TY_PTR 时，本字段 = 元素指针的**指向类型**（char* 数组 → TY_CHAR；
+  //   int* 数组 → TY_INT；double* 数组 → TY_DOUBLE …）。
+  //   为什么 elem_ty 记 TY_PTR 而不是 char：数组的元素宽/下标步长/读写宽度全部按 elem_ty 走
+  //   （new_lvar 的槽数、postfix 的 ty_arr_stride、ND_DEREF.ty 的读宽）—— 记 TY_CHAR 会得到
+  //   1 字节步长 + 1 字节读写（把 8 字节地址读成半截），必须让"元素类型 = 指针"这一档成立，
+  //   指向类型则另存本字段（与 Node.elem_ty/TY_PTR 的分工同形：ty 说宽度，elem_ty 说指向什么）。
+  int elem_ptr_ty;
   // v5（`-debug`，D-1）：声明所在源码行 + 是不是形参 —— 变量位置表（`<out>.dbg.json`）要用。
   //   行号与编译器报错同源（src_line_of），不另解析源码。
   int line;
@@ -84,6 +92,11 @@ typedef struct {
   int switch_nest;    // v1.3.1：switch 嵌套深度（break 在 switch 里合法；continue 不算——它跳的仍是外层循环）
   bool fn_ret_dbl;    // v1.2.1 double 阶段2：当前解析函数返回 double（return 处做 int→double 提升）
   int fn_ret_ty;      // v1.5.0：当前解析函数的返回类型（TY_PTR → return str([...]) 放行）
+  int depth;          // v2.7.0：递归下降深度（括号/语句块嵌套）。超过 PARSE_MAX_DEPTH 就是栈溢出前兆
+  // v2.14.0（struct 按值返回）：当前函数按值返回的结构体下标（-1 = 不是按值返回 struct），
+  //   以及隐藏返回缓冲指针的槽偏移（0 = 无）。return 的整条分支靠这两个字段判形态/取缓冲。
+  int fn_ret_struct;
+  int fn_retbuf_off;
 } Parser;
 
 // —— token 工具 ——
@@ -226,7 +239,137 @@ static void add_enum_const(Program *prog, Token *tok, int value) {
   nm[tok->len] = 0;
   prog->enums[prog->nenums].name = nm;
   prog->enums[prog->nenums].value = value;
+  prog->enums[prog->nenums].tok = tok;
   prog->nenums++;
+}
+
+// ===== v2.15.0（G7）：编译期整数常量表达式 =====
+// 只认「字面量 / enum 常量 / 括号 / 一元 + - ~ / 二元 * / % << >> & | ^（+ - 也收）」。
+// **不走 expr()**：变量、函数调用、运行期量在这里一律失败 —— 数组长度/枚举值都要在 parse 期算死。
+// 失败返回 false，由调用点按各自既有文案报硬错（各位置的判据不同，统一文案反而会丢关键词）。
+// 优先级按 C：| < ^ < & < << >> < + - < * / %；只做整数运算（long long 中间值）。
+static bool parse_const_int(Parser *p, long long *out);
+
+static bool const_int_primary(Parser *p, long long *out) {
+  Token *t = p->tok;
+  if (t->kind == TK_NUM)   { *out = t->val;  p->tok = t->next; return true; }
+  if (t->kind == TK_NUM64) { *out = t->lval; p->tok = t->next; return true; }
+  if (is_punct(t, '(')) {
+    p->tok = t->next;
+    if (!parse_const_int(p, out)) return false;
+    if (!is_punct(p->tok, ')')) return false;
+    p->tok = p->tok->next;
+    return true;
+  }
+  if (is_punct(t, '-') || is_punct(t, '+') || is_punct(t, '~')) {
+    char op = *t->loc;
+    p->tok = t->next;
+    long long v = 0;
+    if (!const_int_primary(p, &v)) return false;
+    *out = (op == '-') ? -v : (op == '~') ? ~v : v;
+    return true;
+  }
+  if (t->kind == TK_IDENT && !is_keyword(t)) {
+    int ei = find_enum(p->prog, t);
+    if (ei >= 0) { *out = p->prog->enums[ei].value; p->tok = t->next; return true; }
+  }
+  return false;
+}
+
+static bool const_int_mul(Parser *p, long long *out) {
+  if (!const_int_primary(p, out)) return false;
+  for (;;) {
+    char op;
+    if (is_punct(p->tok, '*')) op = '*';
+    else if (is_punct(p->tok, '/')) op = '/';
+    else if (is_punct(p->tok, '%')) op = '%';
+    else break;
+    Token *opt = p->tok;
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_primary(p, &rhs)) return false;
+    if (op == '*') {
+      // 无符号乘法再回转：避免有符号溢出的 UB（数组长度本来就会在调用点做范围检查）
+      *out = (long long)((unsigned long long)*out * (unsigned long long)rhs);
+    } else {
+      if (rhs == 0) { error_at(opt->loc, "数组长度常量表达式里不能除以 0"); return false; }
+      if (op == '/') *out = *out / rhs;
+      else           *out = *out % rhs;
+    }
+  }
+  return true;
+}
+
+static bool const_int_add(Parser *p, long long *out) {
+  if (!const_int_mul(p, out)) return false;
+  for (;;) {
+    char op;
+    if (is_punct(p->tok, '+')) op = '+';
+    else if (is_punct(p->tok, '-')) op = '-';
+    else break;
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_mul(p, &rhs)) return false;
+    if (op == '+') *out = (long long)((unsigned long long)*out + (unsigned long long)rhs);
+    else           *out = (long long)((unsigned long long)*out - (unsigned long long)rhs);
+  }
+  return true;
+}
+
+static bool const_int_shift(Parser *p, long long *out) {
+  if (!const_int_add(p, out)) return false;
+  for (;;) {
+    char op;
+    if (is_punct_str(p->tok, "<<")) op = 'L';
+    else if (is_punct_str(p->tok, ">>")) op = 'R';
+    else break;
+    Token *opt = p->tok;
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_add(p, &rhs)) return false;
+    if (rhs < 0 || rhs > 63)
+      error_at(opt->loc, "数组长度常量表达式的位移位数须在 0..63（得到 %lld）", rhs);
+    if (op == 'L') *out = (long long)((unsigned long long)*out << rhs);
+    else           *out = *out >> rhs;
+  }
+  return true;
+}
+
+static bool const_int_and(Parser *p, long long *out) {
+  if (!const_int_shift(p, out)) return false;
+  while (is_punct(p->tok, '&')) {
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_shift(p, &rhs)) return false;
+    *out = *out & rhs;
+  }
+  return true;
+}
+
+static bool const_int_xor(Parser *p, long long *out) {
+  if (!const_int_and(p, out)) return false;
+  while (is_punct(p->tok, '^')) {
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_and(p, &rhs)) return false;
+    *out = *out ^ rhs;
+  }
+  return true;
+}
+
+static bool const_int_or(Parser *p, long long *out) {
+  if (!const_int_xor(p, out)) return false;
+  while (is_punct(p->tok, '|')) {
+    p->tok = p->tok->next;
+    long long rhs = 0;
+    if (!const_int_xor(p, &rhs)) return false;
+    *out = *out | rhs;
+  }
+  return true;
+}
+
+static bool parse_const_int(Parser *p, long long *out) {
+  return const_int_or(p, out);
 }
 
 // 登记变量：分配槽（数组 = arr_len × cols 个元素；结构体 = ceil(size/8) 个槽）；类型信息入 LVar
@@ -323,6 +466,51 @@ static Node *new_node(NodeKind kind, Node *lhs, Node *rhs) {
   if (g_stmt_loc) { n->line = src_line_of(g_stmt_loc); n->file = src_file_index_of(g_stmt_loc); }
   else { n->line = 0; n->file = -1; }
   return n;
+}
+
+static Node *new_var_node(int offset, bool is_ref, int ty, int struct_idx, int elem_ty);  // 定义在 new_node 之后
+
+// ===== v2.14.0（struct 按值返回）：调用点的隐藏返回缓冲 =====
+// 约定（只在「函数返回 struct 值」这一族里成立，其余函数一个字节都不变）：
+//   被调方的**第 1 个整型参数**（rcx）不是用户形参，而是调用者分配的返回缓冲地址；
+//   用户形参整体后移一位（rdx/r8/r9/第 4 个起走栈参）。
+// 实作：给 ND_CALL 的实参链**头插**一个"缓冲地址"表达式，让它走既有 gen_call 的
+//   求值/落位通路（第 i 个实参 → 第 i 个参数位置）—— 于是隐藏参数不需要第二条发射路径。
+static void sret_attach_arg(Node *call, Node *hidden) {
+  hidden->next = call->rhs;    // 头插：hidden 成为 args[0]（= rcx）
+  call->rhs = hidden;
+  call->nargs++;
+  call->sret_ok = 1;
+}
+
+// 目标结构体变量的**地址**（`&dst`）—— 声明/赋值的右值用。
+// 复制一个 ND_VAR 而不是复用原节点：原节点同时是 ND_STRUCT_COPY.lhs，
+// 同一个节点出现在两处会让 slotmap_declare_ast/后遍检查各走一遍（本仓"一个节点挂两处"的老坑）。
+static Node *sret_dst_addr(Node *lv) {
+  Node *cpy = new_node(ND_VAR, NULL, NULL);
+  cpy->offset = lv->offset;
+  cpy->ty = TY_STRUCT;
+  cpy->elem_ty = TY_INT;
+  cpy->struct_idx = lv->struct_idx;
+  cpy->is_ref = lv->is_ref;
+  cpy->is_global = lv->is_global;
+  cpy->loc = lv->loc;
+  Node *ad = new_node(ND_ADDR, cpy, NULL);
+  ad->ty = TY_PTR;
+  ad->elem_ty = TY_STRUCT;
+  ad->struct_idx = lv->struct_idx;
+  ad->loc = lv->loc;
+  return ad;
+}
+
+// `return f();`（f 也按值返回 struct）：把**本函数的**隐藏缓冲地址当 f 的隐藏首参传下去
+// （隐藏槽里存的就是调用者给我们的缓冲地址，64 位值直接当实参）。
+static Node *sret_retbuf_addr(Parser *p, Node *call) {
+  if (p->fn_retbuf_off <= 0)
+    error("内部错误：struct 按值返回函数缺少隐藏返回缓冲槽（parse_funcdef 未分配）");
+  Node *hb = new_var_node(p->fn_retbuf_off, false, TY_PTR, -1, TY_INT);
+  hb->loc = call->loc;
+  return hb;
 }
 
 // ===== v1.1.0 浮点（阶段1）：类型判定与自动提升（实现见下，声明在 flint.h 供 codegen 共用）=====
@@ -499,7 +687,9 @@ static Node *widen_dbl(Node *n) { return expr_widen_dbl(n); }
 static Node *asgn_rhs(Node *lhs, Node *rhs, char *loc) {
   if (lhs->ty == TY_FUNCPTR) {
     Node *bad = NULL;
-    if (rhs->kind == ND_VAR && rhs->ty == TY_FUNCPTR) {
+    // v2.6.0：右侧不再限定「变量」——函数指针数组元素 `ops[i]` 也是 TY_FUNCPTR 值（签名在节点上），
+    //   这样 `ops[0] = ops[1]` / `fp = ops[0]` 与单变量赋值走同一条检查。
+    if (rhs->ty == TY_FUNCPTR && rhs->fn_sig != FN_SIG_NONE) {
       // 签名比较放到调用方（需要 Program 表）——这里只保证形态合法
     } else if (rhs->kind == ND_FUNC_ADDR) {
       // 形态合法（签名比较在 funcptr_check_asgn 里做）
@@ -564,7 +754,9 @@ static Node *new_var_node(int offset, bool is_ref, int ty, int struct_idx, int e
 // v1.3.0：全局变量引用节点——offset 字段存 **Program.globals 下标**（不是 rbp 偏移），
 //   is_global 置位让 codegen 走 rip 相对通路（[rip+disp32] 指 .data），而不是帧槽通路。
 static Node *new_global_node(int gi, GlobalVar *g) {
-  Node *n = new_var_node(gi, false, g->ty, -1, g->elem_ty);
+  // v2.13.0：struct 族全局要带上 sid —— `g.a` / `gs[i].a` / `gp->a` 的字段表就是靠 node->struct_idx
+  //   查的（普通全局仍是显式 -1，别让 memset 的 0 冒充 struct 0）。
+  Node *n = new_var_node(gi, false, g->ty, g->struct_idx, g->elem_ty);
   n->is_global = true;
   return n;
 }
@@ -594,6 +786,7 @@ static Node *decl_list(Parser *p, int base_ty); // 解析 int/char 之后的声�
 static int find_func(Program *prog, Token *tok);     // 按名查函数，返回下标或 -1
 static int find_struct(Program *prog, Token *tok);   // v0.7.x：按名查结构体类型，返回下标或 -1
 static int find_api(Program *prog, Token *tok);      // v0.8：按名查 API，返回下标或 -1
+static void parse_enumdef(Parser *p, Program *prog); // v2.15.0：enum 定义（预扫描 + 顶层跳 token 共用）
 // v1.0.8：print 内建输出语句（print([段, ...] [, 换行])）
 static Node *print_stmt(Parser *p);
 // v2.0.0：try 错误传播糖（`try <变量> = <表达式>;`）—— 展开成两条已有语句，零 codegen
@@ -629,8 +822,9 @@ static Token *tok_next_if_punct(Token *t, char c) {   // token 版 consume（预
 // 解析函数指针的“参数类型表”：out->param_ty/param_sig/nargs 由本函数填。
 // ret_ty/ret_elem/ret_struct/ret_void 描述返回类型。返回参数表之后的 token。
 static Token *parse_funcptr_decl(FuncSig *out, Token *t, int ret_ty, int ret_elem, int ret_struct,
-                                 bool ret_void, Token **out_name) {
+                                 bool ret_void, Token **out_name, int *out_arr_len) {
   memset(out, 0, sizeof(*out));
+  if (out_arr_len) *out_arr_len = 0;
   out->ret_void = ret_void;
   out->ret_ty = ret_void ? TY_INT : ret_ty;
   out->ret_elem = ret_elem;
@@ -652,11 +846,28 @@ static Token *parse_funcptr_decl(FuncSig *out, Token *t, int ret_ty, int ret_ele
   if (name->kind != TK_IDENT || is_keyword(name))
     error_at(name->loc, "函数指针声明需要变量名：int (*fp)(int)");
   t = t->next;
-  // v1.3.2 边界：函数指针数组写成 `int (*t[2])(int)`（'[' 在括号内）—— 明确报错，别落进"缺少 ')'"
-  if (is_punct(t, '['))
-    error_at(t->loc, "函数指针数组暂不支持（v1.3.2 边界：回调表请用几个单独变量 + if 链）");
+  // ===== v2.6.0：函数指针数组 `int (*ops[2])(int, int)` =====
+  //   `[N]` 写在**名字之后、右括号之前**（C 声明符的读法：`(*ops[2])` 是「ops 是 2 个元素的数组，
+  //   元素是函数指针」）。N 必须是正整数数字常量——帧槽在 parse 期就要算死，跟 `int a[N]` 同一条口径。
+  //   ⚠️ 这个函数被 4 条路共用（变量声明 / 函数形参 / 预扫描 / void 分支），所以数组长度从出口参数
+  //   吐给调用方，**不在这里登记变量**：预扫描没有 Parser、也不该分帧槽（老约定，别破坏）。
+  int arr_len = 0;
+  if (is_punct(t, '[')) {
+    t = t->next;
+    if (t->kind != TK_NUM)
+      error_at(t->loc, "函数指针数组的长度须为数字常量（不支持省略长度 `(*ops[])`，也不是变量/表达式）");
+    arr_len = t->val;
+    if (arr_len <= 0)
+      error_at(t->loc, "函数指针数组长度须为正数（这里写了 %d）", arr_len);
+    t = t->next;
+    if (!is_punct(t, ']'))
+      error_at(t->loc, "函数指针数组长度缺少 ']'（写法：int (*ops[2])(int, int)）");
+    t = t->next;
+    if (is_punct(t, '['))
+      error_at(t->loc, "多维函数指针数组暂不支持（v2.6.0 边界：只开一维 `(*ops[N])(...)`）");
+  }
   if (!is_punct(t, ')'))
-    error_at(t->loc, "函数指针声明缺少 ')'（要写成 (*名字)）");
+    error_at(t->loc, "函数指针声明缺少 ')'（要写成 (*名字) 或 (*名字[N])）");
   t = t->next;
   if (!is_punct(t, '('))
     error_at(t->loc, "函数指针声明缺少参数表：int (*fp)(int)");
@@ -709,6 +920,7 @@ static Token *parse_funcptr_decl(FuncSig *out, Token *t, int ret_ty, int ret_ele
   t = t->next;
   out->nargs = n;
   *out_name = name;
+  if (out_arr_len) *out_arr_len = arr_len;
   return t;
 }
 
@@ -786,8 +998,8 @@ static const char *ty_name(int ty) {
 // 与 ty_name 同源：标量名一律走上面那张 switch（同一张表，别在两处各写一份拼写）；
 // 这里只补 ty_name 不做的三件事：指针（`T*`）、数组（`T[N]`）、结构体（`struct 名`）。
 // 缓冲区由调用方给（DebugVar.type 是 64 字节，这里 cap 至少 64）。
-static const char *ty_decl_str(char *buf, size_t cap, int ty, int elem_ty, int arr_len, int cols,
-                               int struct_idx, Program *prog) {
+static const char *ty_decl_str(char *buf, size_t cap, int ty, int elem_ty, int elem_ptr_ty,
+                               int arr_len, int cols, int struct_idx, Program *prog) {
   char base[48];
   if (ty == TY_STRUCT || (ty == TY_PTR && struct_idx >= 0)) {
     // struct 名：struct 表是唯一真源（parse 时结构体已定义；越界只可能是内部错，退化为 "struct"）
@@ -795,6 +1007,18 @@ static const char *ty_decl_str(char *buf, size_t cap, int ty, int elem_ty, int a
       snprintf(base, sizeof(base), "struct %s", prog->structs[struct_idx].name);
     else
       snprintf(base, sizeof(base), "struct");
+  } else if (ty == TY_ARR && elem_ty == TY_STRUCT && struct_idx >= 0) {
+    // v2.13.0：**struct 数组**的调试器写法 `struct E[N]` —— 与 TY_STRUCT+arr_len 那条同形。
+    //   漏这一档会经下面的 `ty == TY_ARR` 分支打成 `struct[N]`（ty_name(TY_STRUCT) = "struct"），
+    //   调试器就不知道元素是哪个结构体（字段表/槽宽都无从查）。
+    if (struct_idx >= 0 && struct_idx < prog->nstructs && prog->structs[struct_idx].name)
+      snprintf(base, sizeof(base), "struct %s", prog->structs[struct_idx].name);
+    else
+      snprintf(base, sizeof(base), "struct");
+  } else if (ty == TY_ARR && elem_ty == TY_PTR) {
+    // v2.12.0：**指针数组** `char *names[N]` 的调试器写法 `T*[N]`（元素是指针，不是 T）。
+    //   漏这一档会打成 `指针[3]`：调试器按 8 字节槽读值没错，但人读不出指向什么。
+    snprintf(base, sizeof(base), "%s*", ty_name(elem_ptr_ty));
   } else if (ty == TY_PTR || ty == TY_ARR) {
     snprintf(base, sizeof(base), "%s", ty_name(elem_ty));
   } else if (ty == TY_FUNCPTR) {
@@ -844,23 +1068,115 @@ static void funcptr_check_asgn(Program *prog, Node *lhs, Node *rhs, char *loc) {
     if (!sig_equal_func(prog, &prog->sigs[lhs->fn_sig], &prog->funcs[rhs->func_index]))
       error_at(loc, "函数指针签名不一致：'%s' 与左侧声明的 %s 不是同一套签名",
                prog->funcs[rhs->func_index].name, sig_desc(prog, lhs->fn_sig));
-  } else if (rhs->kind == ND_VAR && rhs->ty == TY_FUNCPTR && rhs->fn_sig != FN_SIG_NONE) {
+  } else if (rhs->ty == TY_FUNCPTR && rhs->fn_sig != FN_SIG_NONE) {
+    // v2.6.0：含函数指针数组元素（ND_DEREF）——右值签名同样要比
     if (!sig_equal(prog, &prog->sigs[lhs->fn_sig], &prog->sigs[rhs->fn_sig]))
-      error_at(loc, "函数指针签名不一致：左侧 %s vs 右侧 %s",
-               sig_desc(prog, lhs->fn_sig), sig_desc(prog, rhs->fn_sig));
+      error_at(loc, "函数指针签名不一致：右侧的函数指针与左侧声明的 %s 不是同一套签名",
+               sig_desc(prog, lhs->fn_sig));
   }
 }
 
 
+// ===== v2.6.0：函数指针数组的元素左值 = `*(基址 + 下标×8)` =====
+// 与 v2.5.0 的 arr_init_elem_stmt 同一条路子（基址 + 下标×元素宽 → ND_DEREF），
+// 差别只在元素类型是 TY_FUNCPTR、并且**必须把签名带着走**（fn_sig 是后续赋值/调用检查的唯一来源）。
+static Node *fp_arr_elem_lhs(LVar *v, int idx, int sig, char *loc) {
+  Node *base = new_var_node(v->offset, false, TY_ARR, -1, TY_FUNCPTR);
+  Node *scaled = new_node(ND_MUL, new_num(idx), new_num(ty_arr_stride(TY_FUNCPTR)));
+  Node *addr = new_node(ND_ADD, base, scaled);
+  Node *lhs = new_node(ND_DEREF, addr, NULL);
+  lhs->ty = TY_FUNCPTR;
+  lhs->fn_sig = sig;
+  lhs->loc = loc;
+  return lhs;
+}
+
+// ===== v2.6.0：函数指针数组初值的**单个元素** =====
+// 收三种写法：`&函数名`（普通表达式路）、**裸函数名**（只有这个位置放行 —— 探针 fp2 就是这么写的，
+//   而普通表达式位置仍按既有口径要求写 &）、函数指针变量/函数指针数组元素（签名一致即可）。
+// 为什么裸名只在这里开：primary 里「函数名不带括号」是既有明确报错（v1.3.2 口径），
+//   全局放宽会动到旧负例；而数组初值是 C 里最自然写裸名的地方，单独在解析器这一格识别风险最小。
+static Node *fp_arr_init_one(Parser *p, int sig, Token *arr_tok) {
+  Token *t0 = p->tok;
+  Node *init = NULL;
+  if (t0->kind == TK_IDENT && !is_keyword(t0)
+      && !find_lvar(p, t0) && find_func(p->prog, t0) >= 0
+      && !(t0->next && is_punct(t0->next, '('))) {
+    init = new_node(ND_FUNC_ADDR, NULL, NULL);
+    init->func_index = find_func(p->prog, t0);
+    init->loc = t0->loc;
+    p->tok = t0->next;
+  } else {
+    init = expr(p);
+  }
+  if (init->kind == ND_FUNC_ADDR) {
+    if (init->func_index < 0 || init->func_index >= p->prog->nfuncs)
+      error_at(arr_tok->loc, "内部错误：函数地址下标越界（%d）", init->func_index);
+    FuncDef *fn = &p->prog->funcs[init->func_index];
+    if (!sig_equal_func(p->prog, &p->prog->sigs[sig], fn))
+      error_at(init->loc ? init->loc : arr_tok->loc,
+               "函数指针数组的元素签名不一致：'%s' 与数组元素声明的 %s 不是同一套签名",
+               fn->name, sig_desc(p->prog, sig));
+  } else if (init->ty == TY_FUNCPTR && init->fn_sig != FN_SIG_NONE) {
+    if (!sig_equal(p->prog, &p->prog->sigs[sig], &p->prog->sigs[init->fn_sig]))
+      error_at(init->loc ? init->loc : arr_tok->loc,
+               "函数指针数组的元素签名不一致：右边这个函数指针与数组元素声明的 %s 不是同一套签名",
+               sig_desc(p->prog, sig));
+  } else {
+    error_at(arr_tok->loc,
+             "函数指针数组的初值只能是「&函数名」/ 裸函数名 / 函数指针变量"
+             "（不能接整数、普通指针、函数调用结果）");
+  }
+  return init;
+}
+
 static Node *decl_funcptr_stmt(Parser *p, int ret_ty, int ret_elem, int ret_struct, bool ret_void) {
   FuncSig s;
   Token *name = NULL;
-  p->tok = parse_funcptr_decl(&s, p->tok, ret_ty, ret_elem, ret_struct, ret_void, &name);
-  if (is_punct(p->tok, '['))
-    error_at(p->tok->loc, "函数指针数组暂不支持（v1.3.2 边界：回调表请用几个单独变量 + if 链）");
+  int arr_len = 0;
+  p->tok = parse_funcptr_decl(&s, p->tok, ret_ty, ret_elem, ret_struct, ret_void, &name, &arr_len);
   if (p->scope_nest != 0)
-    error_at(name->loc, "函数指针暂只支持函数顶层作用域声明（块/循环内 = v1.3.2 边界）");
+    error_at(name->loc, arr_len > 0
+      ? "函数指针数组暂只支持函数顶层作用域声明（块/循环内 = v2.6.0 边界）"
+      : "函数指针暂只支持函数顶层作用域声明（块/循环内 = v1.3.2 边界）");
   int sig = add_sig(p, s);
+  // ===== v2.6.0：数组形态 —— 登记成普通 TY_ARR（元素 TY_FUNCPTR，元素签名存 LVar.fn_sig）=====
+  //   帧布局 / 下标寻址 / 越界诊断全部复用 int 数组那条路（元素 8 字节槽，见 new_lvar 的槽数算法）。
+  if (arr_len > 0) {
+    LVar *v = new_lvar(p, name, false, TY_ARR, arr_len, 0, -1, TY_FUNCPTR);
+    v->fn_sig = sig;
+    if (!consume(p, '=')) return block_of(NULL);
+    if (!is_punct(p->tok, '{'))
+      error_at(p->tok->loc, "函数指针数组的初始化必须写成 {&函数名, ...}（长度由声明给出，"
+                            "不支持单个标量初值，也不支持省略长度）");
+    p->tok = p->tok->next;   // 吃 '{'
+    if (is_punct(p->tok, '}'))
+      error_at(p->tok->loc, "函数指针数组初值不能是空 {}（每个元素都要给一个函数）");
+    Node head = {0};
+    Node *cur = &head;
+    int idx = 0;
+    for (;;) {
+      if (idx >= arr_len)
+        error_at(p->tok->loc, "函数指针数组初值元素比声明长度多（声明 %d 个）", arr_len);
+      Node *val = fp_arr_init_one(p, sig, name);
+      Node *lhs = fp_arr_elem_lhs(v, idx, sig, name->loc);
+      Node *asgn = new_node(ND_ASSIGN, lhs, val);
+      asgn->loc = name->loc;
+      cur = cur->next = new_node(ND_EXPR_STMT, asgn, NULL);
+      idx++;
+      if (is_punct(p->tok, ',')) {
+        p->tok = p->tok->next;
+        if (is_punct(p->tok, '}')) break;   // 允许尾逗号
+        continue;
+      }
+      break;
+    }
+    if (idx != arr_len)
+      error_at(name->loc, "函数指针数组初值需要正好 %d 个元素（这里给了 %d 个）——"
+                          "不补零、不省略长度", arr_len, idx);
+    skip(p, '}');
+    return block_of(head.next);
+  }
   LVar *v = new_lvar(p, name, false, TY_FUNCPTR, 0, 0, -1, TY_INT);
   v->fn_sig = sig;
   if (!consume(p, '=')) return block_of(NULL);
@@ -874,11 +1190,12 @@ static Node *decl_funcptr_stmt(Parser *p, int ret_ty, int ret_elem, int ret_stru
     if (!sig_equal_func(p->prog, &p->prog->sigs[sig], fn))
       error_at(name->loc, "函数指针签名不一致：'%s' 的类型是 %s，而 '%.*s' 是另一套签名",
                fn->name, sig_desc(p->prog, sig), name->len, name->loc);
-  } else if (init->kind == ND_VAR && init->ty == TY_FUNCPTR) {
+  } else if (init->ty == TY_FUNCPTR && init->fn_sig != FN_SIG_NONE) {
+    // v2.6.0：右边也可以是函数指针数组元素 `ops[i]`（ND_DEREF，签名在节点上）
     rsig = init->fn_sig;
     if (!sig_equal(p->prog, &p->prog->sigs[sig], &p->prog->sigs[rsig]))
-      error_at(name->loc, "函数指针签名不一致：左边 %s vs 右边 %s",
-               sig_desc(p->prog, sig), sig_desc(p->prog, rsig));
+      error_at(name->loc, "函数指针签名不一致：右边的函数指针与左边 '%.*s' 声明的 %s 不是同一套签名",
+               name->len, name->loc, sig_desc(p->prog, sig));
   } else {
     error_at(name->loc, "函数指针只能由「&函数名」或另一个函数指针初始化"
                         "（不能接整数 / 普通指针 / 结构体字段 / 函数调用结果）");
@@ -888,14 +1205,11 @@ static Node *decl_funcptr_stmt(Parser *p, int ret_ty, int ret_elem, int ret_stru
   return block_of(new_node(ND_EXPR_STMT, asgn, NULL));
 }
 
-// 间接调用：`fp(实参...)`（fp 是 TY_FUNCPTR 变量）——按签名表做「个数 / 双通道 / 传地址」三条检查，
+// 间接调用：`fp(实参...)` / v2.6.0 `ops[i](实参...)` —— 按签名表做「个数 / 双通道 / 传地址」三条检查，
 // 与直接调用（primary 里的函数名分支）**逐条同口径**，否则同一份源码换个调用方式就静默传错寄存器。
-static Node *parse_indirect_call(Parser *p, LVar *fp) {
-  FuncSig *s = &p->prog->sigs[fp->fn_sig];
-  Token *nm = p->tok;
-  Node *target = new_var_node(fp->offset, false, TY_FUNCPTR, -1, TY_INT);   // 调用目标（codegen 装 rax）
-  target->fn_sig = fp->fn_sig;
-  p->tok = p->tok->next;              // 吃变量名
+// v2.6.0：核心改为收**目标表达式节点**（变量 / 数组元素都行），p->tok 一律在 '(' 上。
+static Node *parse_indirect_call_core(Parser *p, Node *target, int sig, Token *nm) {
+  FuncSig *s = &p->prog->sigs[sig];
   skip(p, '(');
   Node *head = NULL;
   Node **cur = &head;
@@ -915,11 +1229,12 @@ static Node *parse_indirect_call(Parser *p, LVar *fp) {
       if (pty == TY_FUNCPTR) {
         // 实参必须是签名一致的函数指针（或未知签名 = 预扫描尚未落表的场景，放行但绝不换通道）
         int want = s->param_sig[nargs];
-        if (arg->kind == ND_VAR && arg->ty == TY_FUNCPTR) {
-          if (want != FN_SIG_NONE && arg->fn_sig != FN_SIG_NONE
+        // v2.6.0：函数指针数组元素（ND_DEREF，签名在节点上）与变量同一条检查
+        if (arg->ty == TY_FUNCPTR && arg->fn_sig != FN_SIG_NONE) {
+          if (want != FN_SIG_NONE
               && !sig_equal(p->prog, &p->prog->sigs[want], &p->prog->sigs[arg->fn_sig]))
-            error_at(nm->loc, "实参的函数指针签名与该形参不一致（需要 %s，给的是 %s）",
-                     sig_desc(p->prog, want), sig_desc(p->prog, arg->fn_sig));
+            error_at(nm->loc, "实参的函数指针签名与该形参不一致（形参需要 %s）——"
+                              "右边这个函数指针是另一套签名", sig_desc(p->prog, want));
         } else if (arg->kind == ND_FUNC_ADDR) {
           if (want != FN_SIG_NONE
               && !sig_equal_func(p->prog, &p->prog->sigs[want], &p->prog->funcs[arg->func_index]))
@@ -940,14 +1255,35 @@ static Node *parse_indirect_call(Parser *p, LVar *fp) {
     error_at(p->tok->loc, "这个函数指针需要 %d 个实参，这里只给了 %d 个", s->nargs, nargs);
   Node *call = new_node(ND_CALL, target, head);
   call->func_index = -1;              // ← 间接调用的唯一判据（codegen 据此走 FF D0）
-  call->fn_sig = fp->fn_sig;
+  call->fn_sig = sig;
   call->nargs = nargs;
   call->is_void = s->ret_void;
   call->ty = s->ret_void ? TY_INT : s->ret_ty;
   call->elem_ty = s->ret_elem;
   call->struct_idx = s->ret_struct;
   call->loc = nm->loc;
+  // v2.6.0：目标**不是局部变量**（= 函数指针数组元素）时，codegen 没法用 [rbp-off] 一步装载。
+  //   分一个**匿名帧槽**（不进作用域/不查重名，同 i64_compound 的做法）：codegen 在求实参**之前**
+  //   先把目标表达式算进这个槽，等实参全部就位后再从槽里装 rax —— 目标表达式里的函数调用/寄存器
+  //   使用就绝不会打乱已经摆好的实参寄存器（顺序是硬约束，见 gen_call 间接调用那段的注释）。
+  if (target->kind != ND_VAR) {
+    if (!p->scope)
+      error_at(nm->loc, "内部错误：函数指针数组的间接调用出现在函数体外");
+    if ((long long)p->next_offset + 8LL > 0x7FFFFFFFLL)
+      error_at(nm->loc, "变量/数组/结构体总长过大（帧槽累计超 2GB 上限）");
+    call->fp_tmp = p->next_offset;
+    p->next_offset += 8;
+    p->var_count += 1;
+  }
   return call;
+}
+
+static Node *parse_indirect_call(Parser *p, LVar *fp) {
+  Token *nm = p->tok;
+  Node *target = new_var_node(fp->offset, false, TY_FUNCPTR, -1, TY_INT);   // 调用目标（codegen 装 rax）
+  target->fn_sig = fp->fn_sig;
+  p->tok = p->tok->next;              // 吃变量名
+  return parse_indirect_call_core(p, target, fp->fn_sig, nm);
 }
 
 // —— v0.9.1 S4 修复：-safe 下「new 必须由 own/share 接管」的统一深层检查 ——
@@ -1020,16 +1356,33 @@ static Node *decl_list(Parser *p, int base_ty) {   // v1.0.5：base_ty = TY_INT 
     int ty = ptr ? TY_PTR : base_ty;
     int arr_len = 0;
     int cols = 0;                         // v2.2.0：二维数组列数（0 = 一维）
-    if (is_punct(p->tok, '[')) {          // char a[N] / int a[5]
-      if (ref || ptr)
+    bool is_ptr_arr = false;              // v2.12.0：`char *names[N]` = 元素为 8 字节指针的数组
+    if (is_punct(p->tok, '[')) {          // char a[N] / int a[5] / char *names[3]
+      // v2.12.0：**指针数组**放行（`char *names[3]` / `int *ps[4]` / `double *ds[2]`）。
+      //   元素类型 = TY_PTR（宽度 8 / 步长 8 / 8 字节读写都由既有 TY_PTR 通路承担），
+      //   指向类型另存 LVar.elem_ptr_ty（见该字段的注释）。
+      //   引用仍不能带数组（`int &a[3]` 本来就没有可绑定的对象），文案保持原样。
+      if (ref)
         error_at(p->tok->loc, "数组暂不能与 &/* 组合（v0.7 单修饰符）");
       p->tok = p->tok->next;
-      if (p->tok->kind != TK_NUM) error_at(p->tok->loc, "数组长度须为数字常量");
-      arr_len = p->tok->val;
-      if (arr_len <= 0) error_at(p->tok->loc, "数组长度须为正数");
-      p->tok = p->tok->next;
+      // v2.15.0（G7）：长度 = 编译期常量（字面量 / enum 常量 / 常量表达式）；变量/调用仍硬错
+      Token *len_tok = p->tok;
+      long long lenv = 0;
+      if (!parse_const_int(p, &lenv))
+        error_at(len_tok->loc, "数组长度须为数字常量（字面量 / enum 常量 / 常量表达式）"
+                               "——变量、函数调用、运行期量都不行（帧槽在 parse 期就得算死）");
+      if (lenv <= 0) error_at(len_tok->loc, "数组长度须为正数（得到 %lld）", lenv);
+      if (lenv > 2147483647LL)
+        error_at(len_tok->loc, "数组长度过大（%lld；上限 2147483647）", lenv);
+      arr_len = (int)lenv;
       skip(p, ']');
       ty = TY_ARR;
+      if (ptr) {
+        is_ptr_arr = true;
+        elem = TY_PTR;            // 元素 = 指针（8 字节槽；不是 base_ty 的 1/4/8 元素宽）
+        if (is_punct(p->tok, '['))
+          error_at(p->tok->loc, "指针数组暂不支持二维（v2.12 边界：只开一维 char *a[N] / int *a[N]）");
+      } else {
       // ===== v2.2.0：二维数组 `int m[行][列];`（只开局部 int；char/double/全局/形参都不做）=====
       //   语义 = row-major 一维化：m[i][j] ≡ m[i*cols + j]（越界不检查，与一维数组同口径）。
       //   落地 = parse 期把第二维折成一维线性下标（见 postfix），**codegen 零改动**。
@@ -1039,14 +1392,21 @@ static Node *decl_list(Parser *p, int base_ty) {   // v1.0.5：base_ty = TY_INT 
           error_at(p->tok->loc, "二维数组暂只支持 int（%s 不做——char/double 的整块布局还没定）",
                    ty_name(base_ty));
         p->tok = p->tok->next;
-        if (p->tok->kind != TK_NUM) error_at(p->tok->loc, "二维数组的列数须为数字常量");
-        cols = p->tok->val;
-        if (cols <= 0) error_at(p->tok->loc, "二维数组的列数须为正数");
-        p->tok = p->tok->next;
+        // v2.15.0（G7）：列数同样接受编译期常量表达式
+        Token *col_tok = p->tok;
+        long long colv = 0;
+        if (!parse_const_int(p, &colv))
+          error_at(col_tok->loc, "二维数组的列数须为数字常量（字面量 / enum 常量 / 常量表达式）"
+                                 "——变量、函数调用、运行期量都不行（帧槽在 parse 期就得算死）");
+        if (colv <= 0) error_at(col_tok->loc, "二维数组的列数须为正数（得到 %lld）", colv);
+        if (colv > 2147483647LL)
+          error_at(col_tok->loc, "二维数组的列数过大（%lld；上限 2147483647）", colv);
+        cols = (int)colv;
         skip(p, ']');
         if (is_punct(p->tok, '['))
           error_at(p->tok->loc, "三维数组暂不支持（只开二维 int m[行][列]）");
       }
+      }   // end !is_ptr_arr
     }
     // v1.0.5 已知边界：char 引用（&c 别名读写需解引用字节宽度，未入）与 char own/share（堆对象仅 int）暂拒
     if (ref && ty_is8(base_ty))
@@ -1059,6 +1419,7 @@ static Node *decl_list(Parser *p, int base_ty) {   // v1.0.5：base_ty = TY_INT 
     if ((is_uni || is_sh) && ty_is8(base_ty))
       error_at(name->loc, "'own'/'share' 只能修饰 int*（%s 无堆所有权语义）", ty_name(base_ty));
     LVar *v = new_lvar(p, name, ref, ty, arr_len, cols, -1, elem);
+    if (is_ptr_arr) v->elem_ptr_ty = base_ty;   // v2.12.0：元素指针的指向类型（char*/int*/double*…）
     bool had_init = ref;   // v1.4.25：这条声明最终有没有初值（strict 未初始化检查的判据）
     if (is_uni || is_sh) {
       if (p->scope_nest != 0)
@@ -1091,11 +1452,14 @@ static Node *decl_list(Parser *p, int base_ty) {   // v1.0.5：base_ty = TY_INT 
       //   省略长度 `int a[] = {...}`、嵌套大括号；全局数组的 `{..}` 走 .data 的独立通路
       //   （parse_global_init，本分支只负责函数体内的局部声明）。
       if (consume(p, '=')) {
-        if (base_ty != TY_INT)
+        // v2.12.0：指针数组同一条初始化通路（元素 = 8 字节指针，初值收地址值/字符串字面量/0）。
+        if (base_ty != TY_INT && !is_ptr_arr)
           error_at(p->tok->loc, "数组暂不支持整体初始化（只开了局部 int 数组；%s 数组的整块布局未定）",
                    ty_name(base_ty));
         if (!is_punct(p->tok, '{'))
-          error_at(p->tok->loc, "int 数组整体初始化必须写成 {v0, v1, ...}（数组没有标量初值语义）");
+          error_at(p->tok->loc, is_ptr_arr
+                   ? "指针数组整体初始化必须写成 {\"串\", &x, ...}（数组没有标量初值语义）"
+                   : "int 数组整体初始化必须写成 {v0, v1, ...}（数组没有标量初值语义）");
         int nelem = (cols > 0) ? arr_len * cols : arr_len;   // 二维按 row-major 一维总数
         p->tok = p->tok->next;                                 // 吃 '{'
         if (is_punct(p->tok, '}'))
@@ -1187,7 +1551,15 @@ static Node *stmt_inner(Parser *p);
 static Node *stmt(Parser *p) {
   char *saved = g_stmt_loc;
   g_stmt_loc = p->tok ? p->tok->loc : NULL;
+  // v2.7.0：语句嵌套的**唯一**计数点。块 `{{{...}}}`、`if (1) if (1) ...`、while/for/switch 体
+  //   都从这里递归回 stmt；平铺语句逐条进出、depth 立刻还原，不会累积。
+  //   原来只加在 stmt_inner 的 '{' 分支，漏了无花括号的 if/while 链（深层仍会 0xC00000FD）。
+  //   error_at 自己 exit(1)，报错路径不需要回退 depth。
+  p->depth = p->depth + 1;
+  if (p->depth > PARSE_MAX_DEPTH)
+    error_at(p->tok->loc, "嵌套过深（上限 %d 层）：括号或语句块套得太深，请拆成变量/函数", PARSE_MAX_DEPTH);
   Node *n = stmt_inner(p);
+  p->depth = p->depth - 1;
   g_stmt_loc = saved;
   return n;
 }
@@ -1199,12 +1571,50 @@ static Node *stmt_inner(Parser *p) {
   if (is_ident(p->tok, "return")) {
     p->tok = p->tok->next;
     if (consume(p, ';')) {
+      if (p->fn_ret_struct >= 0)
+        error_at(p->tok->loc, "struct 按值返回的函数必须 `return <同类型 struct 值>;`"
+                              "（`return;` 只能用在 void 函数）");
       if (!p->fn_ret_void)
         error_at(p->tok->loc, "'return;' 只能用在 void 函数");
       return new_node(ND_RETURN, NULL, NULL);
     }
     if (p->fn_ret_void)
       error_at(p->tok->loc, "void 函数不能 return 表达式");
+    // ===== v2.14.0（struct 值语义第四刀）：**struct 按值返回**的 return =====
+    //   只开两种右值形态（其余一律响亮报错，绝不静默发一条没有缓冲的 call）：
+    //     ① `return v;` / `return q.inner;` —— 同一 struct 的变量/字段（地址链，按 size 字节搬到隐藏缓冲）；
+    //     ② `return f();` —— f 也是按值返回 struct（把**本函数的**隐藏缓冲地址转交给 f，零额外拷贝）。
+    //   `return (a = b);` 这类复合表达式不支持：赋值结点不是地址链（先赋给变量再 return）。
+    if (p->fn_ret_struct >= 0) {
+      Token *rt0 = p->tok;
+      Node *e = expr(p);
+      if (!e || e->ty != TY_STRUCT)
+        error_at(rt0->loc, "struct 按值返回要求 return 的值是 struct %s 类型（这里给的是 %s）",
+                 p->prog->structs[p->fn_ret_struct].name, ty_name(e ? expr_ty_of(e) : TY_INT));
+      if (e->struct_idx != p->fn_ret_struct)
+        error_at(rt0->loc, "struct 按值返回要求 return **同一个** struct 类型（本函数返回 struct %s，"
+                           "这里给的是 struct %s）——不同类型布局不同，不能逐字节搬",
+                 p->prog->structs[p->fn_ret_struct].name,
+                 e->struct_idx >= 0 ? p->prog->structs[e->struct_idx].name : "?");
+      if (e->kind == ND_CALL) {
+        if (e->func_index < 0 || p->prog->funcs[e->func_index].ret_ty != TY_STRUCT)
+          error_at(rt0->loc, "return 的调用结果不是**按值返回 struct** 的函数（只有 struct S f() 形态"
+                             "能把返回值直接转交给调用者的缓冲）");
+        sret_attach_arg(e, sret_retbuf_addr(p, e));
+        skip(p, ';');
+        return new_node(ND_RETURN, e, NULL);
+      }
+      // 只认**地址链**：ND_VAR（变量/引用/全局）与 ND_ADD（字段/数组元素的地址链）。
+      //   `*sp`（ND_DEREF，ty=TY_STRUCT）不在此列：解引用读那一路按「值宽」取数（TY_STRUCT
+      //   会落到 32 位兜底），拿它当 struct 本体地址是错的 —— 明确拒收，别静默搬错地址。
+      if (e->kind != ND_VAR && e->kind != ND_ADD)
+        error_at(rt0->loc, "struct 按值返回的 return 只支持「return <struct 变量/字段/数组元素>;」或"
+                           "「return <同类型按值返回函数调用>;」——"
+                           "`return (a = b);` / `return *sp;` / `return f().x;` 这类形态暂不支持，"
+                           "请先赋给变量再 return");
+      skip(p, ';');
+      return new_node(ND_RETURN, e, NULL);
+    }
     // v1.5.0：return str([...]); —— 只在指针返回函数里（展开成语句链 + ND_RETURN）
     if (is_str_call(p->tok)) {
       if (p->fn_ret_ty != TY_PTR)
@@ -1355,14 +1765,19 @@ static Node *stmt_inner(Parser *p) {
     if (is_punct(p->tok->next, '[')) {
       p->tok = p->tok->next;   // '['
       p->tok = p->tok->next;
-      if (p->tok->kind != TK_NUM)
-        error_at(p->tok->loc, "struct 数组长度须为数字常量（与 int a[N] 同口径）");
-      sarr = p->tok->val;
-      if (sarr <= 0) error_at(p->tok->loc, "struct 数组长度须为正数");
-      p->tok = p->tok->next;
+      // v2.15.0（G7）：与 int a[N] 同一口径 —— 编译期常量（字面量 / enum 常量 / 常量表达式）
+      Token *slen_tok = p->tok;
+      long long slenv = 0;
+      if (!parse_const_int(p, &slenv))
+        error_at(slen_tok->loc, "struct 数组长度须为数字常量（与 int a[N] 同口径；"
+                                "字面量 / enum 常量 / 常量表达式）——变量、函数调用都不行");
+      if (slenv <= 0) error_at(slen_tok->loc, "struct 数组长度须为正数（得到 %lld）", slenv);
+      if (slenv > 2147483647LL)
+        error_at(slen_tok->loc, "struct 数组长度过大（%lld；上限 2147483647）", slenv);
+      sarr = (int)slenv;
       skip(p, ']');
     }
-    new_lvar(p, vn, false, TY_STRUCT, sarr, 0, sidx, TY_INT);   // 登记变量（无初始化，无后续引用）
+    LVar *sv = new_lvar(p, vn, false, TY_STRUCT, sarr, 0, sidx, TY_INT);   // 登记变量
     if (sarr > 0) {   // 数组形态：p->tok 已越过 ']'（不消费变量名 token）
       if (consume(p, '='))
         error_at(p->tok->loc, "struct 数组暂不支持整体初始化（逐元素 a[i].字段 = 值）");
@@ -1370,13 +1785,59 @@ static Node *stmt_inner(Parser *p) {
       return block_of(NULL);
     }
     p->tok = p->tok->next;
-    if (consume(p, '='))
-      error_at(p->tok->loc, "结构体暂不支持整体初始化（逐字段赋值）");
+    // ===== v2.9.0（struct 值语义第一刀）：`struct E e = {0};` 与 `struct E b = a;` =====
+    //   只开这两条，布局/ABI 一个字节不动：
+    //     · {0} = 把目标本体的 size 字节清零（C 的 {0} 语义；不是通用初始化列表）；
+    //     · 变量初始化 = 同一 struct 类型的**字节浅拷贝**（指针字段复制指针值，嵌套值字段整块覆盖）。
+    //   两种形态都摊平成一条语句节点（ND_STRUCT_ZERO / ND_STRUCT_COPY），codegen 里各只加一个发射器。
+    Node *init_stmt = NULL;
+    if (consume(p, '=')) {
+      char *eq_loc = p->tok->loc;   // 右值起点（报错 caret）
+      Node *dst = new_var_node(sv->offset, false, TY_STRUCT, sidx, TY_INT);
+      dst->loc = vn->loc;
+      if (is_punct(p->tok, '{')) {
+        Token *lb = p->tok;
+        p->tok = p->tok->next;   // 吃 '{'
+        if (is_punct(p->tok, '}'))
+          error_at(lb->loc, "空初始化列表 {} 不接受——C 的 {0} 才表示「全字段清零」，请写 {0}");
+        if (p->tok->kind != TK_NUM || p->tok->val != 0)
+          error_at(p->tok->loc, "结构体整体初始化只支持 {0}（全字段清零）——"
+                                "{v0, v1, ...} 这种通用初始化列表暂不支持，请声明后逐字段赋值");
+        p->tok = p->tok->next;   // 吃 0
+        if (!is_punct(p->tok, '}'))
+          error_at(p->tok->loc, "结构体整体初始化只支持**恰好一个 0** 的 {0}——"
+                                "通用初始化列表暂不支持，请声明后逐字段赋值");
+        p->tok = p->tok->next;   // 吃 '}'
+        Node *z = new_node(ND_STRUCT_ZERO, dst, NULL);
+        z->ty = TY_STRUCT;
+        z->struct_idx = sidx;
+        z->loc = eq_loc;
+        init_stmt = new_node(ND_EXPR_STMT, z, NULL);
+      } else {
+        Node *src = assign(p);
+        if (src->ty != TY_STRUCT)
+          error_at(eq_loc, "结构体初始化右边必须是**同一个 struct 类型**的值（这里给的是 %s）——"
+                           "全零请写 {0}；要搬字段请声明后逐字段赋值",
+                   ty_name(expr_ty_of(src)));
+        if (src->struct_idx != sidx)
+          error_at(eq_loc, "结构体整体拷贝要求两边是**同一个 struct 类型**"
+                           "（不同 struct 的布局/字段不同，不能逐字节搬）——请逐字段赋值");
+        Node *cp = new_node(ND_STRUCT_COPY, dst, src);
+        cp->ty = TY_STRUCT;
+        cp->struct_idx = sidx;
+        cp->loc = eq_loc;
+        // v2.14.0：右值是「按值返回 struct 的函数调用」⇒ 把目标变量的地址补成隐藏首参
+        //   （被调方直接写进这个变量；codegen 的 gen_struct_copy 见到这种 rhs 只发 call，不再回拷）。
+        if (src->kind == ND_CALL) sret_attach_arg(src, sret_dst_addr(dst));
+        init_stmt = new_node(ND_EXPR_STMT, cp, NULL);
+      }
+    }
     skip(p, ';');
-    return block_of(NULL);
+    return block_of(init_stmt);
   }
 
   // 块 { 语句* }（新作用域）
+  // v2.7.0：这里的嵌套由 stmt() 包装层统一计数（块内每条语句都经 stmt 递归），本分支不再单独计。
   if (is_punct(p->tok, '{')) {
     p->tok = p->tok->next;
     scope_push(p);
@@ -1536,11 +1997,26 @@ static Node *stmt_inner(Parser *p) {
           bool neg = false;
           if (is_punct(p->tok, '-')) { neg = true; p->tok = p->tok->next; }
           else if (is_punct(p->tok, '+')) p->tok = p->tok->next;
-          if (p->tok->kind != TK_NUM)
-            error_at(p->tok->loc, "case 标签必须是整型常量（case 3: / case -1: / case 'a':）"
-                                  "——变量、函数调用、运算表达式都不行（switch 要在编译期排跳转表）");
-          v = neg ? -p->tok->val : p->tok->val;
-          p->tok = p->tok->next;
+          // v2.15.0（G5）：case 标签 = 整数字面量（可带 +/-）**或 enum 常量**。
+          //   刻意不收常量表达式：`case 1 + 1:` 仍走下面 ':' 的硬错（run-tests 的既有判据）。
+          long long cv = 0;
+          bool got = false;
+          if (p->tok->kind == TK_NUM) {
+            cv = p->tok->val;
+            p->tok = p->tok->next;
+            got = true;
+          } else if (p->tok->kind == TK_IDENT) {
+            int ei = find_enum(p->prog, p->tok);
+            if (ei >= 0) {
+              cv = p->prog->enums[ei].value;
+              p->tok = p->tok->next;
+              got = true;
+            }
+          }
+          if (!got)
+            error_at(p->tok->loc, "case 标签必须是整型常量（case 3: / case -1: / case 'a': / case 枚举常量:）"
+                                  "——变量、函数调用、case 1 + 1 这类表达式都不行（switch 要在编译期排跳转表）");
+          v = neg ? -(int)cv : (int)cv;
           for (int i = 0; i < ncase; i++)
             if (case_vals[i] == v)
               error_at(kw->loc, "case 常量 %d 重复（同一个值写两次，先写的那段永远不会被选中）", v);
@@ -1713,8 +2189,9 @@ static Node *ternary(Parser *p) {
   tern_addr_info(b, &tb);
   // v1.3.2：函数指针分支不做 —— 三元只能表达"值/地址两类"，而函数指针还带**签名**，
   //   落成通用的 TY_PTR 会把签名丢掉（后续调用就没人检查了）→ 明确报错，别静默退化。
-  if ((a->kind == ND_VAR && a->ty == TY_FUNCPTR) || a->kind == ND_FUNC_ADDR
-      || (b->kind == ND_VAR && b->ty == TY_FUNCPTR) || b->kind == ND_FUNC_ADDR)
+  // v2.6.0：判据从「ND_VAR / ND_FUNC_ADDR」放宽到**任何 TY_FUNCPTR 值**（含函数指针数组元素
+  //   ops[i]），否则元素落到下面的整数通路 = 签名与 64 位地址一起被静默丢掉。
+  if (a->ty == TY_FUNCPTR || b->ty == TY_FUNCPTR)
     error_at(q0->loc, "三元的函数指针分支暂不支持（v1.3.2 边界：签名会被丢掉）——"
                       "请用 if/else 给函数指针变量赋值");
   if (ta.is_addr != tb.is_addr)
@@ -1764,6 +2241,9 @@ static Node *assign(Parser *p) {
   };
   for (int i = 0; i < 10; i++) {
     if (consume_str(p, compound[i].op)) {
+      // v2.9.0：struct 只有「整体拷贝」一种写操作 —— 复合赋值没有 C 语义（不能 b += a）
+      if (node->kind == ND_VAR && node->ty == TY_STRUCT)
+        error_at(p->tok->loc, "struct 不支持复合赋值（结构体只支持整体拷贝 b = a; 与 {0} 零初始化）");
       if (!is_lvalue(node))
         error_at(p->tok->loc, "赋值左边必须是变量或 *p/a[i]");
       if (node->kind == ND_VAR && (node->is_own || node->is_share))
@@ -1801,7 +2281,12 @@ static Node *assign(Parser *p) {
     }
   }
   if (consume(p, '=')) {
-    if (!is_lvalue(node))
+    // ===== v2.9.0（struct 值语义第一刀）：`b = a;` 整体字节拷贝 =====
+    //   只认「目标 = 结构体变量（含 struct 引用形参）」。`a[0] = b` / `p.inner = q` 这类
+    //   元素/字段整体赋值仍**不**开（它们不是 ND_VAR 左值，照旧报下面的错）——本刀边界。
+    bool struct_var = (node->kind == ND_VAR && node->ty == TY_STRUCT);
+    char *rhs_loc = p->tok->loc;
+    if (!struct_var && !is_lvalue(node))
       error_at(p->tok->loc, "赋值左边必须是变量或 *p/a[i]");
     if (node->kind == ND_VAR && (node->is_own || node->is_share))
       error_at(p->tok->loc, "own/share 指针不能重新赋值（所有权由声明初始化 + 出口自动释放管理）");
@@ -1809,6 +2294,22 @@ static Node *assign(Parser *p) {
     //   `s = str([...]);` 必须先按语句形态识别，才不会把缓冲复位夹进表达式求值序里）。
     //   于是 `x = str([...])`（x 不是指针）等写法直接落到 primary 的响亮报错。
     Node *rhs = assign(p);
+    if (struct_var) {
+      if (rhs->ty != TY_STRUCT)
+        error_at(rhs_loc, "struct 整体赋值右边必须是**同一个 struct 类型**的值（这里给的是 %s）——"
+                          "结构体没有整体值语义，只有同类型逐字节拷贝",
+                 ty_name(expr_ty_of(rhs)));
+      if (rhs->struct_idx != node->struct_idx)
+        error_at(rhs_loc, "struct 整体赋值要求两边是**同一个 struct 类型**"
+                          "（不同 struct 的布局/字段不同，不能逐字节搬）——请逐字段赋值");
+      Node *cp = new_node(ND_STRUCT_COPY, node, rhs);
+      cp->ty = TY_STRUCT;
+      cp->struct_idx = node->struct_idx;
+      cp->loc = rhs_loc;
+      // v2.14.0：`p = mk(...)` —— 同上，目标地址补成隐藏首参（右值是指针字段/元素调用时同一条）
+      if (rhs->kind == ND_CALL) sret_attach_arg(rhs, sret_dst_addr(node));
+      return cp;   // 语句位置使用；FLINT 仍无 struct 整体值语义（别当值用）
+    }
     if (rhs->kind == ND_VAR && (rhs->is_own || rhs->is_share))
       error_at(p->tok->loc, "own/share 指针不能拷贝给其他变量（share 拷贝请用 int *share q = p; 初始化）");
     if (flint_safe_mode && subtree_has_new(rhs))
@@ -1849,11 +2350,85 @@ static bool kind_is_arith(NodeKind k) {
   return k == ND_ADD || k == ND_SUB || k == ND_MUL || k == ND_DIV;
 }
 
+// ===== v2.8.0（B 阶段①）：常量折叠（只在 parse 层；codegen 一行未改、不知道有这回事）=====
+// 纪律（保守版）：
+//   ① 只折「两侧都是 ND_NUM 字面量」的节点 ⇒ 天然不可能丢副作用（调用/赋值/++/-- 都不是 ND_NUM）；
+//      `1 && f()` 右侧不是字面量 ⇒ 不折，短路语义原样保留；
+//   ② 不做常量传播（`int x = 5; x + 1` 不折）、不做代数化简（`x*0` / `x*1` 不碰）；
+//   ③ 折叠值必须与**运行期实际发射的指令**逐位一致 —— 口径逐条对着 codegen 的发射器：
+//      · int 是 32 位、溢出回绕（add/sub/imul/neg 的 32 位形态）⇒ 一律用 uint32_t 算再转回 int；
+//      · `/` `%` 走 cdq+idiv：向零截断、余数随被除数符号 ⇒ 用 int64 算（32 位域内精确），
+//        **除数为 0、或 INT_MIN / -1（idiv 溢出 #DE）一律不折** —— 折了等于把运行期崩溃变成静默值；
+//      · `<<` `>>` 走 shl/sar eax,cl：x86 只取 cl 的低 5 位 ⇒ 折叠按 count & 31（不是 C 的 UB 口径）；
+//        `>>` 是**算术**右移（sar，符号位补齐），不借 C 的实现定义行为；
+//      · 比较走 setcc+movzx、`&&` `||` 走 gen_logand/gen_logor ⇒ 结果都是 0/1（不是操作数本身）；
+//      · 一元 `-`/`~`/`!` 同理，只在操作数是 ND_NUM 时折。
+//   ④ ND_NUM 恒为 TY_INT（new_num 不刻别的类型）⇒ 只有 int 语义进得来；
+//      ND_NUM64（>2^31-1 的字面量）**故意不折**（64 位语义另立一门，不在本轮）。
+#define FOLD_INT_MIN (-2147483647 - 1)
+
+static int fold_shl32(int a, int b) {
+  return (int)((uint32_t)a << (unsigned)(b & 31));    // 对齐 shl eax,cl（cl 低 5 位）
+}
+static int fold_sar32(int a, int b) {
+  int c = b & 31;
+  if (c == 0) return a;
+  uint32_t u = (uint32_t)a;
+  if (a >= 0) return (int)(u >> c);                    // 非负：逻辑右移与算术右移相同
+  return (int)((u >> c) | (~(uint32_t)0 << (32 - c))); // 负数：显式补符号位（sar）
+}
+
+// 二元折叠：命中返回 true 并写 *out（调用方返回 new_num(*out)）。未命中 = 原样建节点。
+static bool fold_bin_const(NodeKind kind, Node *lhs, Node *rhs, int *out) {
+  if (!lhs || !rhs || lhs->kind != ND_NUM || rhs->kind != ND_NUM) return false;
+  int a = lhs->val, b = rhs->val;
+  switch (kind) {
+    case ND_ADD: *out = (int)((uint32_t)a + (uint32_t)b); return true;
+    case ND_SUB: *out = (int)((uint32_t)a - (uint32_t)b); return true;
+    case ND_MUL: *out = (int)((uint32_t)a * (uint32_t)b); return true;
+    case ND_DIV:
+      if (b == 0 || (a == FOLD_INT_MIN && b == -1)) return false;   // 运行期是 #DE 崩 ⇒ 不折
+      *out = (int)((long long)a / (long long)b);
+      return true;
+    case ND_MOD:
+      if (b == 0 || (a == FOLD_INT_MIN && b == -1)) return false;
+      *out = (int)((long long)a % (long long)b);
+      return true;
+    case ND_SHL: *out = fold_shl32(a, b); return true;
+    case ND_SHR: *out = fold_sar32(a, b); return true;
+    case ND_BITAND: *out = a & b; return true;
+    case ND_BITOR:  *out = a | b; return true;
+    case ND_BITXOR: *out = a ^ b; return true;
+    case ND_EQ: *out = (a == b); return true;
+    case ND_NE: *out = (a != b); return true;
+    case ND_LT: *out = (a < b); return true;
+    case ND_LE: *out = (a <= b); return true;
+    case ND_GT: *out = (a > b); return true;
+    case ND_GE: *out = (a >= b); return true;
+    // `&&` / `||`：只在两侧都是字面量时折 —— `0 && f()` 右侧不是字面量 ⇒ 不折（副作用不会被吞）
+    case ND_LOGAND: *out = (a != 0 && b != 0); return true;
+    case ND_LOGOR:  *out = (a != 0 || b != 0); return true;
+    default: return false;
+  }
+}
+static bool fold_un_const(NodeKind kind, Node *operand, int *out) {
+  if (!operand || operand->kind != ND_NUM) return false;
+  switch (kind) {
+    case ND_NEG:    *out = (int)(0u - (uint32_t)operand->val); return true;   // int 回绕（neg eax）
+    case ND_NOT:    *out = (operand->val == 0); return true;                  // sete + movzx
+    case ND_BITNOT: *out = ~operand->val; return true;                        // not eax
+    default: return false;
+  }
+}
+
 // mkbin：二元节点统一构造——v1.1.0 起在此做 int→double 自动提升（C 语义）；
 // v1.7.0 起同样在 int_64 上做提升（任一操作数 int_64 ⇒ 另一侧包 ND_I2L）；
 // v1.9.0 起按**通常算术转换**决定提升目标：有符号源符号扩展、无符号源零扩展（ND_U2L）。
 // 两侧都是 int 时是零开销（不做任何包装，行为与原实现完全一致）。
 static Node *mkbin(NodeKind kind, Node *lhs, Node *rhs) {
+  // v2.8.0：两侧都是字面量 ⇒ 当场算成常量（口径见上面的 fold_bin_const 长注释）
+  int fv;
+  if (fold_bin_const(kind, lhs, rhs, &fv)) return new_num(fv);
   bool li = expr_is_i64(lhs), ri = expr_is_i64(rhs);
   // ⚠️ int_64 ↔ double 的混算一律硬错（P0/P1）：必须**先于** double 提升判 ——
   //   否则 `d * big` 会走进 widen_dbl(int_64) 把它当 32 位 int 转 double（静默错值）。
@@ -1898,6 +2473,9 @@ static Node *logand(Parser *p) {
 // —— v0.7.2 位运算优先级层（C 语义：&& > | > ^ > & > 相等）——
 // ⚠️ v1.1.0：位运算/移位/取模不接受 double（C 同此语义）——mkintbin 负责拦
 static Node *mkintbin(Parser *p, NodeKind kind, Node *lhs, Node *rhs) {
+  // v2.8.0：位/移位/取模同样在两侧都是字面量时当场算（口径见 fold_bin_const）
+  int fv;
+  if (fold_bin_const(kind, lhs, rhs, &fv)) return new_num(fv);
   if (is_dbl_node(lhs) || is_dbl_node(rhs))
     error_at(p->tok->loc, "这个运算符不支持 double（位运算/移位/取模只对整数）");
   int rt = usual_arith_ty(expr_ty_of(lhs), expr_ty_of(rhs));
@@ -2241,6 +2819,10 @@ static Node *unary(Parser *p) {
     // v1.1.0：一元负号**不在解析期提升**——把 `-10` 硬提升成 double 会让 `-10 % 3` / `-10 & 3`
     // 这类整数写法被「不支持 double」拦掉（实测 28 项回归炸）。真正提升交给外层 mkbin。
     Node *operand = unary(p);
+    // v2.8.0：一元负号的操作数是字面量 ⇒ 当场折（int 回绕，与运行期 neg eax 逐位一致）。
+    //   ND_NUM64 不在这里（64 位语义另立一门），保持原节点。
+    int fv;
+    if (fold_un_const(ND_NEG, operand, &fv)) return new_num(fv);
     Node *neg = new_node(ND_NEG, operand, NULL);
     if (is_dbl_node(operand)) neg->ty = TY_DOUBLE;
     else {
@@ -2255,12 +2837,16 @@ static Node *unary(Parser *p) {
     Node *operand = unary(p);
     if (is_dbl_node(operand))
       error_at(p->tok->loc, "! 不支持 double（先比较：d != 0.0）");
+    int fv;
+    if (fold_un_const(ND_NOT, operand, &fv)) return new_num(fv);   // v2.8.0：!字面量当场折（0/1）
     return new_node(ND_NOT, operand, NULL);
   }
   if (consume(p, '~')) {
     Node *operand = unary(p);
     if (is_dbl_node(operand))
       error_at(p->tok->loc, "~ 不支持 double（位运算只对整数）");
+    int fv;
+    if (fold_un_const(ND_BITNOT, operand, &fv)) return new_num(fv);   // v2.8.0：~字面量当场折（not eax）
     Node *n = new_node(ND_BITNOT, operand, NULL);
     int rt = int_promote(expr_ty_of(operand));   // v1.9.0：整数提升，结果类型随提升后类型
     if (ty_isint(rt)) n->ty = rt;
@@ -2321,6 +2907,12 @@ static Node *unary(Parser *p) {
       d->ty = pe;
     else if (pe == TY_UINT32)
       d->ty = TY_UINT32;                 // v1.9.0：uint_32* 解引用（读宽同 int，符号性保留）
+    // v2.12.0：*指针数组 = 元素指针（`*names` ≡ names[0]，值宽 8 字节）。这条通路目前拿不到
+    //   元素的**指向类型**（ptr_elem_ty 只回 TY_PTR），掉进默认 TY_INT 就会 4 字节读半个指针
+    //   ⇒ 静默错值。本版只开下标形态，裸解引用一律响亮报错（绝不静默按 int 读）。
+    else if (pe == TY_PTR)
+      error_at(p->tok->loc, "指针数组请用下标访问（`char *a[N]` 的 a[i]）——"
+                            "`*a` / `*(a+i)` 暂不支持（本版拿不到元素的指向类型，按 32 位读半个指针会静默错值）");
     return d;
   }
   if (consume_str(p, "++")) {
@@ -2481,11 +3073,12 @@ static Node *call_arg_norm(Parser *p, FuncDef *fn, int nargs, Node *arg) {
   // v1.3.2：函数指针形参 → 实参必须是签名一致的「&函数名」或函数指针变量
   if (fn->param_ty[nargs] == TY_FUNCPTR) {
     int want = fn->param_sig[nargs];
-    if (arg->kind == ND_VAR && arg->ty == TY_FUNCPTR) {
-      if (want != FN_SIG_NONE && arg->fn_sig != FN_SIG_NONE
+    // v2.6.0：函数指针数组元素（ND_DEREF，签名在节点上）与变量同一条检查
+    if (arg->ty == TY_FUNCPTR && arg->fn_sig != FN_SIG_NONE) {
+      if (want != FN_SIG_NONE
           && !sig_equal(p->prog, &p->prog->sigs[want], &p->prog->sigs[arg->fn_sig]))
-        error_at(p->tok->loc, "实参函数指针的签名与形参不一致（需要 %s，给的是 %s）",
-                 sig_desc(p->prog, want), sig_desc(p->prog, arg->fn_sig));
+        error_at(p->tok->loc, "实参函数指针的签名与形参不一致（形参需要 %s）——"
+                              "右边这个函数指针是另一套签名", sig_desc(p->prog, want));
     } else if (arg->kind == ND_FUNC_ADDR) {
       if (want != FN_SIG_NONE
           && !sig_equal_func(p->prog, &p->prog->sigs[want], &p->prog->funcs[arg->func_index]))
@@ -2629,10 +3222,106 @@ static Node *method_call(Parser *p, Node *recv, bool value_recv, int sidx, const
   return call_finish(p, fn, fi, arg0, 1, fn_loc);
 }
 
+// v2.6.0：函数指针数组的**常量下标**求值（只折字面量 / 负号 / 加减——够覆盖 `ops[2]`、`ops[-1]`、
+//   `ops[N-1]` 这类写法；变量下标当然求不出来，保持运行期语义）。为什么要折：函数指针数组的越界
+//   调用是**跳到野地址**（不是写错一个值），默认档就必须在编译期拦下来，不能等运行期崩。
+static bool fp_const_index(Node *n, int *out) {
+  long long a;
+  int tmp;
+  if (!n) return false;
+  switch (n->kind) {
+    case ND_NUM: a = n->val; break;
+    case ND_NEG:
+      if (!fp_const_index(n->lhs, &tmp)) return false;
+      a = -(long long)tmp;
+      break;
+    case ND_ADD:
+      if (!fp_const_index(n->lhs, &tmp)) return false;
+      a = tmp;
+      if (!fp_const_index(n->rhs, &tmp)) return false;
+      a += tmp;
+      break;
+    case ND_SUB:
+      if (!fp_const_index(n->lhs, &tmp)) return false;
+      a = tmp;
+      if (!fp_const_index(n->rhs, &tmp)) return false;
+      a -= tmp;
+      break;
+    default: return false;
+  }
+  if (a < -2147483647LL - 1 || a > 2147483647LL) return false;   // 溢出 int ⇒ 不当常量（照变量下标处理）
+  *out = (int)a;
+  return true;
+}
+
 static Node *postfix(Parser *p) {
   Node *node = primary(p);
   for (;;) {
     if (consume(p, '[')) {
+      // ===== v2.6.0：函数指针数组取元素 `ops[i]` =====
+      //   形态 = 普通数组那条「基址 + 下标×元素宽 → ND_DEREF」，但**必须**把元素签名带到节点上
+      //   （TY_FUNCPTR 的专用通路：没有 fn_sig 就没法做调用/赋值检查，codegen 也就不知道该不该调）。
+      //   边界：只认局部数组变量形态（与 struct 数组同一条线）；全局函数指针数组本版未开。
+      if (node->ty == TY_ARR && node->elem_ty == TY_FUNCPTR) {
+        if (node->kind != ND_VAR || node->is_global)
+          error_at(p->tok->loc, "函数指针数组的下标只支持局部数组变量形态 ops[i]"
+                                "（v2.6.0 边界：全局/表达式结果下标暂不支持）");
+        LVar *av = lv_by_offset(p->all_lvars, node->offset);
+        if (!av || av->ty != TY_ARR || av->elem_ty != TY_FUNCPTR)
+          error_at(p->tok->loc, "内部错误：找不到函数指针数组 '%s' 的声明信息", av ? av->name : "?");
+        Token *idx_tok = p->tok;
+        Node *idx = expr(p);
+        skip(p, ']');
+        // 越界：**常量**下标一律当场报错（函数指针数组的越界调用 = 跳到野地址，比写错值更凶；
+        //   这里不跟 -strict 开关走，默认档也拦 —— 长度在声明期已完全确定，没有误报空间）。
+        int cidx = 0;
+        if (fp_const_index(idx, &cidx) && (cidx < 0 || cidx >= av->arr_len))
+          error_at(idx_tok->loc, "函数指针数组 '%s' 的常量下标 %d 越界（合法下标 0..%d）",
+                   av->name, cidx, av->arr_len - 1);
+        Node *scaled = new_node(ND_MUL, idx, new_num(ty_arr_stride(TY_FUNCPTR)));
+        Node *addr = new_node(ND_ADD, node, scaled);
+        Node *d = new_node(ND_DEREF, addr, NULL);
+        d->ty = TY_FUNCPTR;
+        d->fn_sig = av->fn_sig;
+        d->loc = idx_tok->loc;
+        node = d;
+        continue;
+      }
+      // ===== v2.13.0（struct 值语义第三刀）：**struct 数组值的通用下标** =====
+      //   覆盖两条新来源（局部 struct 数组仍是下面 v2.1.0 那支，`node->ty == TY_STRUCT`）：
+      //     ① 全局 struct 数组 `struct E gs[3];` → 变量节点 ty=TY_ARR + elem=TY_STRUCT + struct_idx；
+      //     ② struct 数组字段 `w.es[i]` → `.es` 造出的地址链 ty=TY_ARR + elem=TY_STRUCT + struct_idx。
+      //   语义与局部 `a[i]` **一字不差**：结果是**元素地址**（不套 ND_DEREF）⇒ `w.es[i].f` / `&w.es[i]`
+      //   / 传给 `struct E *` 形参三条用法与局部数组同形。
+      //   步长单点 = 8*ceil(size/8)（与局部数组 new_lvar 槽数、struct 指针下标**同一条口径**）；
+      //   布局期（parse_structdef / collect_globals）也用这同一个式子 ⇒ 下标与布局不可能分叉。
+      if (node->ty == TY_ARR && node->elem_ty == TY_STRUCT) {
+        if (node->struct_idx < 0)
+          error_at(p->tok->loc, "内部错误：struct 数组缺少结构体下标（parse 应已带上）");
+        int alen = -1;   // -1 = 长度拿不到（struct 数组字段；-strict 的常量越界检查据此跳过）
+        if (node->kind == ND_VAR) {
+          if (node->is_global) alen = p->prog->globals[node->offset].arr_len;
+          else { LVar *av = lv_by_offset(p->all_lvars, node->offset); if (av) alen = av->arr_len; }
+        }
+        int stride = 8 * ((p->prog->structs[node->struct_idx].size + 7) / 8);
+        Token *idx_tok = p->tok;
+        Node *idx = expr(p);
+        skip(p, ']');
+        // 二维 struct 数组（`es[i][j]`）本版不做 —— 响亮拒收，别让第二个 '[' 落到别处去。
+        if (is_punct(p->tok, '['))
+          error_at(p->tok->loc, "struct 数组只支持一维下标（二维 `es[i][j]` 暂不支持）——"
+                                "要二维请写一维 `es[i*cols + j]` 自己算");
+        if (flint_strict && idx->kind == ND_NUM && alen > 0
+            && (idx->val < 0 || idx->val >= alen))
+          error_at(idx_tok->loc, "[E-STRICT-BOUNDS] 常量下标 %d 越界：这个 struct 数组只有 %d 个元素"
+                                 "（合法下标 0..%d）", idx->val, alen, alen - 1);
+        Node *scaled = new_node(ND_MUL, idx, new_num(stride));
+        Node *addr = new_node(ND_ADD, node, scaled);
+        addr->ty = TY_STRUCT;                  // 元素地址：地址链 + 目标结构体类型
+        addr->struct_idx = node->struct_idx;
+        node = addr;
+        continue;
+      }
       // ===== v2.1.0：struct 数组元素 `a[i]` =====
       //   语义 = **元素地址**（基址 + i×步长），与「struct 变量名作表达式 = 首地址」同一条口径
       //   ⇒ 三种用法自然成立：`a[i].f`（字段通路）、`&a[i]`（地址就是这个值）、把 `a[i]` 传给
@@ -2732,6 +3421,21 @@ static Node *postfix(Parser *p) {
       // a[i] = *(a + i*scale)：基址表达式（数组名 lea / 指针 load）+ 下标×元素宽
       //   int 元素 = 8 字节槽（旧语义）；v1.0.5 char 元素 = 1 字节（字节缓冲/字符串构建）
       int elem = node->elem_ty;
+      // ===== v2.12.0：**指针数组元素** `names[i]`（元素类型 = TY_PTR）=====
+      //   元素宽 8、读写 8 字节（既有的 TY_PTR 通路），但还要把**指向类型**带给节点 ——
+      //   `names[i][0]` 的下标缩放、`*names[i]` 的读宽、`print([names[i]])` 的分派全靠节点
+      //   elem_ty（口径与指针变量/指针字段同一条：ty 说宽度，elem_ty 说指向什么）。
+      //   指向类型存在 LVar.elem_ptr_ty（数组声明期记的 base_ty）；结构体指针数组本版未开，
+      //   故这里只接局部 ND_VAR 形态（与函数指针数组/struct 数组同一条线）。
+      int ptr_arr_elem = TY_INT;
+      if (elem == TY_PTR) {
+        LVar *av = (node->kind == ND_VAR && !node->is_global)
+                 ? lv_by_offset(p->all_lvars, node->offset) : NULL;
+        if (!av || av->ty != TY_ARR || av->elem_ty != TY_PTR)
+          error_at(p->tok->loc, "指针数组的下标只支持局部数组变量形态 names[i]"
+                                "（v2.12 边界：全局/结构体字段/表达式结果下标暂不支持）");
+        ptr_arr_elem = av->elem_ptr_ty;
+      }
       // ⚠️ 元素宽必须与**语言的数组语义**一致，不是与 C 的 sizeof 一致：
       //   FLINT 的 int 元素 = **8 字节槽**（见本文件 postfix：`a[i] = *(a + i*8)`，SPEC 亦如此），
       //   所以 .data 里全局 int 数组也必须按 8 字节/元素摆放（见下方 collect_globals 的 esize）。
@@ -2743,7 +3447,14 @@ static Node *postfix(Parser *p) {
       node = new_node(ND_DEREF, addr, NULL);
       // v1.9.0：元素读类型 = **元素类型原值**（不再手抄一条 if 链 —— 那条链每加一个类型就要改
       //   一次，漏了就把 uint_64 元素读成 32 位）。char/uint_8→1 字节，int/uint_32→4，int_64/uint_64→8。
-      node->ty = ty_isint(elem) || elem == TY_DOUBLE ? elem : TY_INT;
+      //   v2.12.0：指针元素 = TY_PTR + 指向类型（读 64 位；struct_idx 显式 -1，别让 0 冒充 struct 0）。
+      if (elem == TY_PTR) {
+        node->ty = TY_PTR;
+        node->elem_ty = ptr_arr_elem;
+        node->struct_idx = -1;
+      } else {
+        node->ty = ty_isint(elem) || elem == TY_DOUBLE ? elem : TY_INT;
+      }
     } else if (consume(p, '.')) {
       // p.x：p = 结构体变量（普通或引用；名字作表达式 = 结构体地址）
       // v1.6.0：方法调用点糖 recv.name(args) ⇒ Type_name(&recv, args) —— 判据 = **括号**
@@ -2812,7 +3523,10 @@ static Node *postfix(Parser *p) {
         Node *da = new_node(ND_ADD, node, new_num(foff));
         da->ty = TY_ARR;
         da->elem_ty = felem;
-        da->struct_idx = -1;   // 2026-10-24：非 struct 节点必须显式 -1（new_node 的清零会让 0 冒充"struct 0"）
+        // v2.13.0：**struct 数组字段** `struct E es[N]` 的地址链要把元素结构体带上 ——
+        //   下一级 `[` 靠它算步长、再下一级 `.f` 靠它查字段表。普通数组字段（int/char/double）
+        //   仍是 -1（new_node 的清零会让 0 冒充"struct 0"）。
+        da->struct_idx = (felem == TY_STRUCT) ? fsid : -1;
         node = da;
       } else if (fty == TY_STRUCT && fsid >= 0) {
         // ===== v2.4.0：嵌套 struct **值字段** `a.b` = 字段地址（不套 ND_DEREF）=====
@@ -2868,7 +3582,10 @@ static Node *postfix(Parser *p) {
         Node *da = new_node(ND_ADD, node, new_num(foff));
         da->ty = TY_ARR;
         da->elem_ty = felem;
-        da->struct_idx = -1;   // 2026-10-24：非 struct 节点必须显式 -1（new_node 的清零会让 0 冒充"struct 0"）
+        // v2.13.0：**struct 数组字段** `struct E es[N]` 的地址链要把元素结构体带上 ——
+        //   下一级 `[` 靠它算步长、再下一级 `.f` 靠它查字段表。普通数组字段（int/char/double）
+        //   仍是 -1（new_node 的清零会让 0 冒充"struct 0"）。
+        da->struct_idx = (felem == TY_STRUCT) ? fsid : -1;
         node = da;
       } else if (fty == TY_STRUCT && fsid >= 0) {
         // v2.4.0：`p->b`（b 是 struct 值字段）→ 字段地址链，余下同 `.` 分支（见上面那段注释）
@@ -2913,6 +3630,14 @@ static Node *postfix(Parser *p) {
       node = new_node(ND_POST_DEC, node, NULL);
       if (i64) node->ty = oty;
       else if (oty == TY_UINT32) node->ty = TY_UINT32;
+    } else if (is_punct(p->tok, '(') && node->ty == TY_FUNCPTR) {
+      // ===== v2.6.0：函数指针**表达式**的间接调用 `ops[i](实参...)` =====
+      //   变量形态 `fp(...)` 早在 primary 里就被接走了（那条路保持逐字节不变）；这里接的是
+      //   postfix 造出来的解引用节点（数组元素）。签名取自节点（parse 在取元素时从 LVar 带上来）。
+      if (node->fn_sig == FN_SIG_NONE)
+        error_at(p->tok->loc, "内部错误：函数指针表达式缺少签名（取元素时应已从声明带上来）");
+      node = parse_indirect_call_core(p, node, node->fn_sig, p->tok);
+      continue;
     } else {
       return node;
     }
@@ -2921,9 +3646,15 @@ static Node *postfix(Parser *p) {
 
 // primary = "(" expr ")" | NUM | 标识符
 static Node *primary(Parser *p) {
+  // v2.7.0：`((((1))))` 走这里 → expr 的递归；进括号先记深度，正常出口再还原。
+  //   ⚠️ 只加在这个 '(' 分支 —— postfix/expr/assign/add 等链式函数是 while 循环，不递归。
   if (consume(p, '(')) {
+    p->depth = p->depth + 1;
+    if (p->depth > PARSE_MAX_DEPTH)
+      error_at(p->tok->loc, "嵌套过深（上限 %d 层）：括号或语句块套得太深，请拆成变量/函数", PARSE_MAX_DEPTH);
     Node *n = expr(p);
     skip(p, ')');
+    p->depth = p->depth - 1;
     return n;
   }
   if (p->tok->kind == TK_NUM) {
@@ -3198,6 +3929,9 @@ static int seg_print_kind(Parser *p, Token *s0, Node *n) {
   case ND_DEREF:
     if (n->ty == TY_CHAR) return 1;          // *p (char*) = char 值 → 字符
     if (n->ty == TY_INT) return 2;
+    // v2.12.0：char* 结构体字段 / char* 指针数组元素（ND_DEREF + ty=TY_PTR + elem=TY_CHAR）
+    //   的值就是字符串首地址 → 与 char* 变量同一档整串输出。
+    if (n->ty == TY_PTR && n->elem_ty == TY_CHAR) return 0;
     if (n->ty == TY_PTR) error_at(s0->loc, "指针字段/指针解引用结果暂不支持直接打印");
     return 2;
   case ND_NEW:
@@ -3647,15 +4381,38 @@ static void parse_structdef(Parser *p, Program *prog) {
             && strncmp(s->fields[i].name, fn0->loc, (size_t)fn0->len) == 0)
           error_at(fn0->loc, "字段 '%.*s' 重复", fn0->len, fn0->loc);
       p->tok = p->tok->next;
-      if (is_punct(p->tok, '['))
-        error_at(p->tok->loc, fptr0
-                 ? "struct 指针字段暂不支持数组形态（v2.3 边界）"
-                 : "struct 值字段暂不支持数组形态（v2.4 边界：`struct B b[4];` 不做）");
+      // ===== v2.13.0（struct 值语义第三刀）：**struct 数组字段** `struct E es[4];` =====
+      //   布局 = 按内层对齐落位、占 `N × 8*ceil(size/8)` 字节；下标步长与局部 `struct E a[N]`
+      //   **同一条口径**（8*ceil(size/8)，见 new_lvar 的槽数与 postfix 的 struct 数组下标）。
+      //   ⚠️ 别照 C 的 sizeof 当步长：FLINT 的 struct 数组元素一直是 8 字节槽对齐的，
+      //   两处用不同步长 = `w.es[1]` 与布局错位（编译过、静默写坏邻字段）。
+      //   边界（全部响亮拒收）：自嵌套数组（尺寸无穷）、二维 `[2][3]`、struct 指针数组字段。
+      int fsarr = 0;   // 0 = 不是数组字段（与 arr_len=1 的标量字段区分开）
+      if (is_punct(p->tok, '[')) {
+        if (fptr0)
+          error_at(p->tok->loc, "struct 指针字段暂不支持数组形态（v2.3 边界）");
+        p->tok = p->tok->next;
+        Token *cnt0 = p->tok;
+        // v2.15.0（G7）：与 `int buf[N]` 同一口径 —— 编译期常量（字面量 / enum 常量 / 常量表达式）
+        long long fsv = 0;
+        if (!parse_const_int(p, &fsv))
+          error_at(cnt0->loc, "struct 数组字段长度须为正整数常量（字面量 / enum 常量 / 常量表达式）"
+                              "——变量、函数调用、运行期量都不行（布局在 parse 期就得算死）");
+        if (fsv <= 0)
+          error_at(cnt0->loc, "struct 数组字段长度须为正整数常量（得到 %lld）", fsv);
+        if (fsv > 2147483647LL)
+          error_at(cnt0->loc, "struct 数组字段长度过大（%lld；上限 2147483647）", fsv);
+        fsarr = (int)fsv;
+        skip(p, ']');
+        if (is_punct(p->tok, '['))
+          error_at(p->tok->loc, "struct 数组字段只支持一维（`struct E es[N]`）——二维 "
+                                "`struct E es[2][3]` 暂不支持；要二维请声明成一维 `es[2*3]` 自己算下标");
+      }
       StructField *sf0 = &s->fields[s->nfields];
       sf0->name = malloc((size_t)fn0->len + 1);
       memcpy(sf0->name, fn0->loc, (size_t)fn0->len);
       sf0->name[fn0->len] = '\0';
-      sf0->arr_len = 1;
+      sf0->arr_len = fsarr > 0 ? fsarr : 1;
       if (fptr0) {
         sf0->ty = TY_PTR;
         sf0->elem = TY_INT;    // 指向类型走 sid（与 struct* 形参同一口径）
@@ -3667,16 +4424,30 @@ static void parse_structdef(Parser *p, Program *prog) {
       } else {
         // 自嵌套拦截：当前结构体在字段循环**之前**就进了表（nstructs++），find_struct 找得到自己。
         //   指针形态的自引用合法（上面那支），**值**形态 = 尺寸无穷 ⇒ 必须先于布局检查。
+        //   v2.13.0：数组形态 `struct A a[2]` 同样是值形态（N 份自身 = 尺寸无穷），一并拦。
         if (fsid0 == prog->nstructs - 1)
           error_at(sn->loc, "结构体不能把自身作为值字段（`struct %s { struct %s ... }` 尺寸无穷）——"
-                            "自引用请写指针形态 `struct %s *next;`", s->name, s->name, s->name);
+                            "数组形态 `struct %s a[N]` 同样不行；自引用请写指针形态 `struct %s *next;`",
+                   s->name, s->name, s->name, s->name);
         StructDef *in = &prog->structs[fsid0];
         int ialign = in->align > 0 ? in->align : 1;
-        sf0->ty = TY_STRUCT;
-        sf0->elem = TY_INT;    // 值字段没有指向类型；只借用字段存类型（sid 才是真值）
         sf0->sid = fsid0;
         sf0->offset = align_up(cur, ialign);
-        cur = sf0->offset + in->size;
+        if (fsarr > 0) {
+          // 数组字段：元素步长 = 8*ceil(size/8)（与局部 struct 数组下标同一式子）
+          int stride = 8 * ((in->size + 7) / 8);
+          long long end = (long long)sf0->offset + (long long)stride * fsarr;
+          if (end > 0x7FFFFFFFLL)
+            error_at(fn0->loc, "结构体字段 '%s' 过大（%d 个元素 × %d 字节）——结构体总长不能超过 2GB",
+                     sf0->name, fsarr, stride);
+          sf0->ty = TY_ARR;
+          sf0->elem = TY_STRUCT;   // 元素就是整个结构体（sid 说哪个）
+          cur = (int)end;
+        } else {
+          sf0->ty = TY_STRUCT;
+          sf0->elem = TY_INT;    // 值字段没有指向类型；只借用字段存类型（sid 才是真值）
+          cur = sf0->offset + in->size;
+        }
         if (ialign > max_align) max_align = ialign;
       }
       s->nfields++;
@@ -3690,16 +4461,20 @@ static void parse_structdef(Parser *p, Program *prog) {
     bool fdbl = (fty0 == TY_DOUBLE);
     bool fint = (fty0 == TY_INT || fty0 == TY_UINT32);
     if (!fchar && !fdbl && !fi64 && !fint)
-      error_at(p->tok->loc, "结构体字段类型支持 char / int / int_64 / double / uint_8 / uint_32 / uint_64 / int *"
-                            " / 已定义 struct 的值或指针（v2.4）");
+      error_at(p->tok->loc, "结构体字段类型支持 char / int / int_64 / double / uint_8 / uint_32 / uint_64"
+                            " / int* / char* / double* / 已定义 struct 的值或指针（v2.12）");
     p->tok = p->tok->next;
     // v1.3.2：函数指针字段（`int (*cb)(int);`）暂不做 —— 明确报错，别让 `(` 落到"期望字段名"那种含糊提示上
     if (is_punct(p->tok, '('))
       error_at(p->tok->loc, "结构体暂不支持函数指针字段（v1.3.2 边界）——"
                             "回调请存成局部函数指针变量，或把一个整数/地址字段 + 间接调用拆开写");
     bool fptr = consume(p, '*');   // int *p = 指针/句柄字段（8 字节）
-    if (fptr && ty_is8(fty0))
-      error_at(p->tok->loc, "%s 指针字段暂不支持（v1.0.5：指针字段仍 int*/double*/结构体指针）", ty_name(fty0));
+    // ===== v2.12.0：**char * 字段** `char *name;` =====
+    //   布局/表示与 int*/double*/struct* 字段**完全同族**：8 字节地址、对齐 8、偏移走
+    //   StructField.offset / StructDef.size（不另算一套）；差别只在指向类型（f->elem = TY_CHAR），
+    //   `*s.name` 按字节读、`s.name[i]` 按 1 字节缩放、`print([s.name])` 按字符串输出。
+    //   原来这里把 ty_is8 的指针字段一律拒收（v1.0.5 边界），本轮收掉。
+    //   uint_8* 同族（ty_is8 一并放行：指向类型保留无符号性，宽度仍 1 字节）。
     // v1.2.5：double* 字段开放 —— 字段本身仍是 8 字节地址（与 int* 同槽），差别在**指向类型**
     // （f->elem = TY_DOUBLE）→ `*s.p` 8 字节 SSE 读写、`s.p[i]` 下标按 8 字节缩放（见 postfix）
     Token *fn = p->tok;
@@ -3717,12 +4492,22 @@ static void parse_structdef(Parser *p, Program *prog) {
     int arr_len = 1;
     if (consume(p, '[')) {
       Token *cnt = p->tok;
-      if (cnt->kind != TK_NUM || cnt->val <= 0)
-        error_at(cnt->loc, "数组字段长度须为正整数常量");
-      arr_len = (int)cnt->val;
-      p->tok = p->tok->next;
+      // v2.15.0（G7）：固定长度数组字段同样接受编译期常量（字面量 / enum 常量 / 常量表达式）
+      long long fav = 0;
+      if (!parse_const_int(p, &fav))
+        error_at(cnt->loc, "数组字段长度须为正整数常量（字面量 / enum 常量 / 常量表达式）"
+                           "——变量、函数调用、运行期量都不行（布局在 parse 期就得算死）");
+      if (fav <= 0) error_at(cnt->loc, "数组字段长度须为正整数常量（得到 %lld）", fav);
+      if (fav > 2147483647LL)
+        error_at(cnt->loc, "数组字段长度过大（%lld；上限 2147483647）", fav);
+      arr_len = (int)fav;
       skip(p, ']');
     }
+    // v2.12.0：**指针数组字段**（`char *p[4];` / `int *p[4];`）仍不做 —— 但必须响亮拒收。
+    //   旧实现会静默按「单个指针字段」布局（只留 8 字节），随后 s.p[i] 越界写到下一个字段上。
+    //   本轮放开 char* 字段后这条静默路径更容易被踩到，故补上（文案与 struct* 数组字段同一条）。
+    if (fptr && arr_len > 1)
+      error_at(fn->loc, "struct 指针字段暂不支持数组形态（v2.3 边界）");
     StructField *f = &s->fields[s->nfields];
     f->sid = -1;   // 2026-10-24（v2.3）：普通字段必须显式 -1 —— memset 的 0 会让 int* 字段冒充"指向 struct 0"
     f->name = malloc((size_t)fn->len + 1);
@@ -3755,6 +4540,63 @@ static void parse_structdef(Parser *p, Program *prog) {
   s->size = align_up(cur, has_ptr ? 8 : max_align);   // 总大小按最大对齐取整（帧内槽数 = ceil(size/8)）
   s->align = has_ptr ? 8 : max_align;                 // v2.4：同一口径 —— 嵌套我时按这个对齐落位
   if (s->nfields == 0) error_at(name->loc, "结构体不能为空");
+}
+
+// ===== v2.15.0（G7）：**enum 定义预扫描** =====
+// 为什么需要它：全局数组的 .data 布局（collect_globals）、struct 字段长度（preparse_structs）
+//   都要在 parse 早期算死，而 enum 常量的登记原本发生在第二遍顶层循环（太晚）——
+//   `enum K { POOL = 4 } struct E es[POOL];` 会报"须为数字常量"。
+// 做法：在 preparse_structs / collect_globals **之前**把顶层 enum 定义按源序登记一遍；
+//   第二遍顶层循环遇到 enum 只跳 token、不再重复解析（否则报"重复声明"）。
+// 副作用（与 struct 预扫描同向放宽、可接受）：enum 常量的可见范围从"定义点之后"变成整个文件。
+// 代价：登记时全局/函数表还没建 ⇒ 与全局变量/函数同名的冲突检查挪到 collect_funcs 之后补
+//   （check_enum_conflicts），报错位置仍是定义处的名字 token。
+static void preparse_enums(Token *tok, Program *prog) {
+  Parser p = {0};
+  p.tok = tok;
+  p.prog = prog;
+  int depth = 0;
+  while (p.tok->kind != TK_EOF) {
+    if (is_punct(p.tok, '{')) { depth++; p.tok = p.tok->next; continue; }
+    if (is_punct(p.tok, '}')) { depth--; p.tok = p.tok->next; continue; }
+    if (depth == 0 && is_ident(p.tok, "enum")) {
+      Token *en = p.tok->next;
+      if (en && en->kind == TK_IDENT && !is_keyword(en) && is_punct(en->next, '{')) {
+        parse_enumdef(&p, prog);   // 消费整条定义（含 '}' / 可选 ';'），depth 不变
+        continue;
+      }
+    }
+    p.tok = p.tok->next;
+  }
+}
+
+// ===== v2.13.0（struct 值语义第三刀）：**struct 定义预扫描** =====
+// 为什么需要它：全局变量的 .data 布局在 collect_globals 里**一次算死**（doff 决定所有 [rip+disp32]），
+//   而 struct 全局的尺寸/对齐只能从 StructDef 拿 —— 可 collect_globals 跑在第二遍（parse_structdef）
+//   之前。原实现因此只能把 struct 全局整个拒掉。
+// 做法：在 collect_globals 之前把**顶层 struct 定义**先解析一遍（源序 ⇒ 内层先定义这条判据不变），
+//   第二遍的顶层循环遇到 `struct 名 {` 只跳 token、不再重复解析（否则报"重复定义"）。
+// 副作用（已知、可接受）：结构体定义在文件里的**可见范围**从"定义点之后"放宽到"整个文件"——
+//   原来"函数写在 struct 定义之前就用它"会报未定义，现在能用。方向是放宽，不会让既有合法程序变非法。
+// 判据"顶层"与 collect_globals 同源：花括号深度 0 处的 `struct IDENT {`；函数体/形参里的不算。
+static void preparse_structs(Token *tok, Program *prog) {
+  Parser p = {0};
+  p.tok = tok;
+  p.prog = prog;
+  p.next_offset = 8;   // 与 parse() 里的主 Parser 同初值（struct 解析不用它，只为口径一致）
+  int depth = 0;
+  while (p.tok->kind != TK_EOF) {
+    if (is_punct(p.tok, '{')) { depth++; p.tok = p.tok->next; continue; }
+    if (is_punct(p.tok, '}')) { depth--; p.tok = p.tok->next; continue; }
+    if (depth == 0 && is_ident(p.tok, "struct")) {
+      Token *sn = p.tok->next;
+      if (sn && sn->kind == TK_IDENT && !is_keyword(sn) && is_punct(sn->next, '{')) {
+        parse_structdef(&p, prog);   // 消费整条定义（含 '}'），depth 不变
+        continue;
+      }
+    }
+    p.tok = p.tok->next;
+  }
 }
 
 // —— v0.6 后遍检查：void 函数调用只能作为表达式语句的根 ——
@@ -3813,6 +4655,41 @@ static void check_stmt_void(Node *n) {
       break;
     default: break;
   }
+}
+
+// ===== v2.14.0：struct 按值返回的**用法后遍检查** =====
+// 只有两个位置会给调用节点补隐藏返回缓冲（sret_ok）：
+//   ① struct 变量声明初始化 / 整体赋值的右值（parse 的声明/赋值两支）；
+//   ② struct 返回函数里的 `return f();`。
+// 其余任何位置（`mk(1,2).x`、`f(mk(1,2))`、`p = mk(1,2) + 1`、把调用当语句丢弃……）都**明确报错**：
+//   这些位置没有"目标变量"，硬发一条 call 会让被调方往一个不存在的缓冲里写（静默踩栈）。
+// 为什么用后遍而不是在每个表达式入口各拦一次：入口有 10+ 个（实参/二元/条件/三元/下标/字段链…），
+//   漏一处就是静默错值；"补过缓冲的调用才会有 sret_ok"是构造期就定死的事实，后遍扫一遍就完备。
+static void check_sret_calls(Parser *p, Node *n) {
+  if (!n) return;
+  if (n->kind == ND_CALL) {
+    FuncDef *f = n->func_index >= 0 ? &p->prog->funcs[n->func_index] : NULL;
+    if (f && f->ret_ty == TY_STRUCT && !n->sret_ok) {
+      const char *sn = (f->ret_struct >= 0) ? p->prog->structs[f->ret_struct].name : "S";
+      if (n->loc) error_at(n->loc,
+        "struct 按值返回的函数 '%s' 的调用只能出现在两个位置："
+        "① `struct %s v = %s(...);` / `v = %s(...);` 的右值；"
+        "② 按值返回 struct 的函数里的 `return %s(...);`。"
+        "不能把结果塞进任意表达式（`%s(...).x` / f(%s(...)) / 参与运算 / 丢弃结果）——"
+        "本语言没有 struct 整体值语义；请先赋给同类型 struct 变量再逐字段用",
+        f->name, sn, f->name, f->name, f->name, f->name, f->name);
+      error("struct 按值返回调用出现在不支持的位置（见上一条）");
+    }
+    for (Node *a = n->rhs; a; a = a->next) check_sret_calls(p, a);
+    return;
+  }
+  check_sret_calls(p, n->lhs);
+  check_sret_calls(p, n->rhs);
+  check_sret_calls(p, n->els);
+  check_sret_calls(p, n->init);
+  check_sret_calls(p, n->cond);
+  check_sret_calls(p, n->inc);
+  check_sret_calls(p, n->next);
 }
 
 // 第一遍：轻扫 token 流，收集所有函数名（模式 ("int"|"void") IDENT "("）
@@ -3961,16 +4838,22 @@ static void collect_globals(Token *tok, Program *prog) {
     // 类型词（v1.9.0：一律走 type_kw_of 单点表 —— uint_* 也在这里被认出来）
     int base_ty;
     bool is_struct_ty = false;
+    int struct_sid = -1;   // v2.13.0：struct 全局的类型下标（preparse_structs 已把结构体表建好）
     int kw0 = type_kw_of(t);
     if (kw0 >= 0) { base_ty = kw0; t = t->next; }
     else if (is_ident(t, "struct")) {
-      // struct S name; → 跳过结构体名（第一版只支持标量/数组全局，struct 全局走下面报错）
+      // v2.13.0：`struct S 名...` —— 结构体表此时已由 preparse_structs 填好，直接查 sid。
       Token *sn = t->next;
       if (!sn || sn->kind != TK_IDENT || is_keyword(sn)) continue;
+      struct_sid = find_struct(prog, sn);
+      if (struct_sid < 0) {
+        error_at(sn->loc, "未定义的结构体类型 '%.*s'（struct 须先定义后使用）", sn->len, sn->loc);
+        t = sn->next;
+        continue;   // 已报错（g_err_count>0 ⇒ 不产 exe）；继续扫，别拿 -1 去算布局
+      }
       is_struct_ty = true;
-      base_ty = TY_INT;      // 占位值：真正的报错在下面「暂不支持 struct 全局变量」
-      t = sn;
-      t = t->next;
+      base_ty = TY_INT;      // 标量基类型占位：struct 的尺寸/对齐只从 StructDef 取（下面分档）
+      t = sn->next;
     }
     else continue;
 
@@ -3997,11 +4880,21 @@ static void collect_globals(Token *tok, Program *prog) {
       int arr_len = -1;
       if (after && is_punct(after, '[')) {
         Token *sz = after->next;
-        if (!sz || sz->kind != TK_NUM)
-          error_at(name->loc, "全局数组长度必须是正整数常量（全局数组在 .data 里，长度编译期就得定）");
-        arr_len = sz->val;
-        if (arr_len <= 0) error_at(sz->loc, "全局数组长度必须为正（得到 %d）", arr_len);
-        Token *rb = sz->next;
+        // v2.15.0（G7）：全局数组长度 = 编译期常量（字面量 / enum 常量 / 常量表达式）。
+        //   enum 常量已在 preparse_enums 阶段登记（本函数跑在其后）；变量/调用仍硬错。
+        Parser gcp = {0};
+        gcp.tok = sz;
+        gcp.prog = prog;
+        long long glen = 0;
+        if (!sz) error_at(name->loc, "全局数组声明缺少长度");
+        if (!parse_const_int(&gcp, &glen))
+          error_at(sz->loc, "全局数组长度必须是正整数常量（字面量 / enum 常量 / 常量表达式）"
+                            "——全局数组在 .data 里，长度编译期就得定；变量、函数调用都不行");
+        if (glen <= 0) error_at(sz->loc, "全局数组长度必须为正（得到 %lld）", glen);
+        if (glen > 2147483647LL)
+          error_at(sz->loc, "全局数组长度过大（%lld；上限 2147483647）", glen);
+        arr_len = (int)glen;
+        Token *rb = gcp.tok;
         if (!rb || !is_punct(rb, ']')) error_at(sz->loc, "全局数组声明期望 ']'");
         after = rb->next;
         // v2.2.0：二维数组只开**局部**（.data 里的行列布局与全局初始化都还没定）
@@ -4028,32 +4921,51 @@ static void collect_globals(Token *tok, Program *prog) {
 
       // v1.10.0（IDE 服务端）：**标量指针全局**（int* / char* / double* / int_64* / uint_*）开放。
       //   过去这里两条 error 把指针与 struct 一起挡掉，而报错文案又推荐「请用 struct 指针全局变量」——
-      //   那条建议自己也会撞上同样的 error（走不通的指路）。现按类型分档，只说真不支持的：
-      //     · struct 按值全局：布局/整体值语义未做 → 仍拒绝（错误文案改成可执行的替代方案）
-      //     · struct 指针全局：缺 sid（GlobalVar 没有 struct 类型下标）→ 明确标成「下一步」
-      if (is_struct_ty && !is_ptr)
-        error_at(name->loc, "暂不支持 struct 按值全局变量——请用 int 数组自管布局，或在函数里声明局部 struct");
-      if (is_struct_ty && is_ptr)
-        error_at(name->loc, "暂不支持 struct 指针全局变量（缺 struct 类型下标，下一步做）"
-                            "——当前只开 int*/char*/double*/int_64*/uint_8* 等标量指针全局");
+      //   那条建议自己也会撞上同样的 error（走不通的指路）。现按类型分档，只说真不支持的。
+      //   v2.13.0：**struct 族全局全部开放**（按值 / 数组 / 指针）—— GlobalVar 加了 struct_idx，
+      //   布局按 StructDef.size/align 走（见下面分档）。旧的「暂不支持 struct 按值/指针全局」两条负例
+      //   在本轮改判（见 test\run-tests.js 的 ng_struct_init）。
       if (is_ptr && arr_len > 0)
         error_at(name->loc, "指针全局不支持数组形式（`int *g[4]` 是「4 个指针」——数组元素是指针的全局还没开）");
 
+      // ===== v2.13.0：**布局分档**（标量族 / struct 族）=====
+      //   struct 族的尺寸/对齐**只从 StructDef 取**（size/align 是布局期唯一真值，别在这里重算字段）；
+      //   元素步长的口径必须与 postfix 的下标缩放**同一式子**（struct 数组元素 = 8*ceil(size/8)）。
       int elem_ty = base_ty;
       int ty = (arr_len > 0) ? TY_ARR : base_ty;
       int count = (arr_len > 0) ? arr_len : 1;
-      if (is_ptr) { ty = TY_PTR; count = 1; }   // 指针：8 字节槽，elem_ty 记指向类型（codegen 已按 TY_PTR 走 64 位读写）
+      int esize;
+      int align;
+      if (is_struct_ty) {
+        StructDef *sd = &prog->structs[struct_sid];
+        if (is_ptr) {
+          // struct 指针全局：8 字节地址槽；指向哪个结构体记在 struct_idx（`gp->f` / `gp[i]` 要用）
+          ty = TY_PTR; elem_ty = TY_INT; count = 1; esize = 8; align = 8;
+        } else if (arr_len > 0) {
+          // struct 数组全局：元素步长与局部 `struct E a[N]` 一字不差（8*ceil(size/8)）
+          ty = TY_ARR; elem_ty = TY_STRUCT; count = arr_len;
+          esize = 8 * ((sd->size + 7) / 8);
+          align = sd->align > 0 ? sd->align : 1;
+        } else {
+          // 按值 struct 全局：占 StructDef.size 字节，按 StructDef.align 落位
+          ty = TY_STRUCT; elem_ty = TY_INT; count = 1;
+          esize = sd->size;
+          align = sd->align > 0 ? sd->align : 1;
+        }
+      } else {
+        if (is_ptr) { ty = TY_PTR; count = 1; }   // 指针：8 字节槽，elem_ty 记指向类型（codegen 已按 TY_PTR 走 64 位读写）
 
-      // 元素对齐/尺寸 —— 必须与 **postfix 的下标缩放口径**（a[i] = *(a+i*esize)）严格一致！
-      //   🐞 实测踩过真坑：这里原按 C 的 sizeof 摆（int=4），而下标缩放是语言口径（int 元素 8 字节槽）
-      //   → `garr[2]` 算到 base+16 = **下一个全局变量的槽**上，静默写坏别处（"编译过、静默错值"）。
-      //   判据：凡「布局尺寸」与「寻址步长」分处两个文件时，两处的元素宽必须写进同一张口径表。
-      int esize = ty_is64(base_ty) ? ty_arr_stride(TY_INT64)   // v1.7.0：标量/数组元素都是 8（值宽 = 步长）
-                : ty_is8(base_ty) ? 1                          // v1.9.0：uint_8 与 char 同（1 字节）
-                : (base_ty == TY_DOUBLE) ? 8
-                : (arr_len > 0) ? ty_arr_stride(base_ty) : 8;   // v1.6.5：int/uint_32 数组元素 4 字节；全局 int 标量仍 8（读写 64 位约定）
-      if (is_ptr) esize = 8;                                    // 指针槽恒 8 字节（与局部指针变量同口径）
-      int align = (esize > 8) ? 8 : esize;
+        // 元素对齐/尺寸 —— 必须与 **postfix 的下标缩放口径**（a[i] = *(a+i*esize)）严格一致！
+        //   🐞 实测踩过真坑：这里原按 C 的 sizeof 摆（int=4），而下标缩放是语言口径（int 元素 8 字节槽）
+        //   → `garr[2]` 算到 base+16 = **下一个全局变量的槽**上，静默写坏别处（"编译过、静默错值"）。
+        //   判据：凡「布局尺寸」与「寻址步长」分处两个文件时，两处的元素宽必须写进同一张口径表。
+        esize = ty_is64(base_ty) ? ty_arr_stride(TY_INT64)   // v1.7.0：标量/数组元素都是 8（值宽 = 步长）
+              : ty_is8(base_ty) ? 1                          // v1.9.0：uint_8 与 char 同（1 字节）
+              : (base_ty == TY_DOUBLE) ? 8
+              : (arr_len > 0) ? ty_arr_stride(base_ty) : 8;   // v1.6.5：int/uint_32 数组元素 4 字节；全局 int 标量仍 8（读写 64 位约定）
+        if (is_ptr) esize = 8;                                // 指针槽恒 8 字节（与局部指针变量同口径）
+        align = (esize > 8) ? 8 : esize;
+      }
 
       long long total = (long long)esize * count;
       // 2026-10-24：`.data` 用自己的上限 FLINT_MAX_DATA（原借 FLINT_MAX_TEXT，两个资源共用一个数）
@@ -4077,6 +4989,7 @@ static void collect_globals(Token *tok, Program *prog) {
       g->ty = ty;
       g->elem_ty = elem_ty;
       g->arr_len = count;
+      g->struct_idx = is_struct_ty ? struct_sid : -1;   // v2.13.0：非 struct 族显式 -1（0 冒充 struct 0）
       g->size = (int)total;
       g->doff = align_up(cur, align);
       g->init_len = 0;
@@ -4087,20 +5000,56 @@ static void collect_globals(Token *tok, Program *prog) {
 
       // 初值（只支持编译期常量；见 parse_global_init）
       if (is_punct(after, '=')) {
-        if (is_ptr)
+        if (is_struct_ty) {
+          // v2.13.0：struct 全局**只开 .bss 语义**（无初值 ⇒ 全零，与 C 的 `struct E g;` 相同）。
+          //   整体初始化列表不做（init[64] 也装不下一个结构体）；指针形态与标量指针同一红线。
+          //   ⚠️ 两个分支各自写成**单条字面量**的 error_at（不写成三目 + 相邻字面量拼接）：
+          //   tools\诊断ID.mjs 对「三目分支里的相邻字面量」只收录第一段，运行时 fmt 是拼好的整串
+          //   ⇒ 查表落空、这条诊断就没有 ID（v2.10.0 的不变量）。拆成两条调用各自命中。
+          if (is_ptr)
+            error_at(after->loc, "struct 指针全局暂不支持初值——请在函数里赋值（例如 gp = &g; 或 gp = 0;）");
+          else
+            error_at(after->loc, "struct 全局变量暂不支持整体初始化（`struct E g = {...}`）——全局 struct 只有 .bss 语义（全零）；要初值请在 main 里逐字段赋值，或用局部 struct 造好后整体拷贝 g = 局部值");
+          while (after->kind != TK_EOF && !is_punct(after, ',') && !is_punct(after, ';'))
+            after = after->next;
+        } else if (is_ptr) {
           error_at(after->loc, "指针全局暂不支持初值——请在函数里赋值（例如 g = 0; 或 g = new ...），"
                                "避免把 4 字节常量写进 8 字节指针槽");
-        Token *vt = after->next;
-        int ilen = 0;
-        const uint8_t *bytes = parse_global_init(vt, base_ty, count, esize, &ilen);
-        if (ilen > (int)sizeof(g->init))
-          error_at(name->loc, "全局变量初值过长（%d 字节，上限 %d）", ilen, (int)sizeof(g->init));
-        memcpy(g->init, bytes, (size_t)ilen);
-        g->init_len = ilen;
-        free((void *)bytes);
-        // 跳过初值（含 '}' 与元素逗号）→ 停在 ',' 或 ';'
-        while (after->kind != TK_EOF && !is_punct(after, ',') && !is_punct(after, ';'))
-          after = after->next;
+        } else {
+          Token *vt = after->next;
+          int ilen = 0;
+          const uint8_t *bytes = parse_global_init(vt, base_ty, count, esize, &ilen);
+          // 2026-11-03（int4-abi）：这里原来量的是 `sizeof(g->init)` = 64 字节的**结构体字段容量**，
+          //   于是「初值能进 .data」这件事被一个与 .data 无关的数组大小挡住（16 KiB 的 int 数组直接报错，
+          //   用户只能退化成逐元素赋值 → 4096 个 mov）。现在按实际长度 malloc，且上面的
+          //   `total > FLINT_MAX_DATA` 已经把单个全局变量框在 .data 单节容量内；这条检查留着当兜底
+          //   （文案/诊断 ID 不变），上限口径改成 .data 单节上限而不是字段大小。
+          if (ilen > FLINT_MAX_DATA)
+            error_at(name->loc, "全局变量初值过长（%d 字节，上限 %d）", ilen, FLINT_MAX_DATA);
+          if (ilen > 0) {
+            g->init = malloc((size_t)ilen);
+            if (!g->init) error("内存不足（全局变量初值）");
+            memcpy(g->init, bytes, (size_t)ilen);
+          }
+          g->init_len = ilen;
+          free((void *)bytes);
+          // 跳过初值（含 '}' 与元素逗号）→ 停在 ',' 或 ';'
+          // —— 2026-11-03（int4-abi）：必须**按花括号深度**跳，不能"见到第一个 ',' 就停"。
+          //   为什么：`int g[3] = {1,2,3};` 的元素逗号在花括号里，旧写法停在那里，把 `t` 丢进初值中段；
+          //   外层 for 继续逐 token 扫，扫到收尾的 '}' 时把它当成**函数体右括号**（depth-- ⇒ -1），
+          //   于是 `depth != 0` 把**其后所有全局声明静默吞掉**（症状：`使用了未声明的变量 'g7'`，
+          //   而源码里明明声明了）。多元素初始化列表天然带逗号 ⇒ 大数组初值一放开就必踩。
+          //   判据：全局初值里的 ',' 是**元素分隔符**，只有花括号外的 ',' 才是声明分隔符。
+          {
+            int brace = 0;
+            while (after->kind != TK_EOF) {
+              if (is_punct(after, '{')) brace++;
+              else if (is_punct(after, '}')) brace--;
+              else if (brace <= 0 && (is_punct(after, ',') || is_punct(after, ';'))) break;
+              after = after->next;
+            }
+          }
+        }
       }
       prog->nglobals++;
 
@@ -4138,10 +5087,18 @@ static void collect_funcs(Token *tok, Program *prog) {  int n = 0, cap = 8;
     //   v1.9.0：uint_* 也必须在这里认出来，否则"先调用、后定义"的 uint 返回函数会被当 int。
     bool ret_is_ptr = false;
     int pre_ret_ty = TY_INT;
+    int pre_struct = -1;   // v2.14.0：`struct V f(...)`（按值返回）的结构体下标
     if (is_ident(t, "void")) pre_ret_ty = TY_INT;                 // void 由 parse_funcdef 置 ret_void
     else if (type_kw_of(t) >= 0) pre_ret_ty = type_kw_of(t);     // v1.9.0：单点表
     else if (is_ident(t, "struct")) {
       if (!name || name->kind != TK_IDENT || is_keyword(name)) continue;  // struct 类型名
+      // v2.14.0：按值返回 struct —— 结构体表已由 preparse_structs 建好，这里能把下标提前落表。
+      //   不落这一格的后果与 v1.2.1 的 double 返回同族：**先调用、后定义**时调用点把返回值当 int，
+      //   声明初始化会走 int 赋值路径（静默错值）。指针返回（后跟 '*'）仍走老路，pre_struct 置 -1。
+      if (!is_punct(name->next, '*')) {
+        pre_struct = find_struct(prog, name);
+        if (pre_struct < 0) continue;   // 未定义类型：交给 parse_funcdef 报精确错
+      }
       name = name->next;
     }
     if (name && is_punct(name, '*')) { name = name->next; ret_is_ptr = true; }  // int*/char*/struct S*
@@ -4166,11 +5123,12 @@ static void collect_funcs(Token *tok, Program *prog) {  int n = 0, cap = 8;
     f->name[name->len] = '\0';
     f->is_main = is_ident(name, "main");
     // v1.2.1：返回类型提前落表（parse_funcdef 会再正式算一遍并覆盖，这里只为「调用点在定义之前」兜底）
-    f->ret_ty = ret_is_ptr ? TY_PTR : pre_ret_ty;
+    // v2.14.0：struct 按值返回也提前落表（ret_ty = TY_STRUCT + ret_struct = 结构体下标）
+    f->ret_ty = ret_is_ptr ? TY_PTR : (pre_struct >= 0 ? TY_STRUCT : pre_ret_ty);
     // v1.2.5：指针返回的**指向类型**同样要提前落表（理由与返回类型一致）——否则「先调用、后定义」的
     //   `*f()` / `f()[i]` 在调用点按 int 语义走：double* 会被当 int* 读 4 字节（静默错值）。
     f->ret_elem = ret_is_ptr ? pre_ret_ty : TY_INT;
-    f->ret_struct = -1;
+    f->ret_struct = ret_is_ptr ? -1 : pre_struct;
     // v1.2.2 double 阶段2 第二步：预扫描**同时记形参类型**（这里只关心 double 与否）——理由同返回类型：
     //   「先调用、后定义」的 double 形参函数，调用点解析时 param_ty 还是 0（= TY_INT）→ int 实参不提升、
     //   double 实参被当 int 收 → 实参走 rax 通道而值在 xmm0 ＝ 静默传垃圾。只做「类型词+修饰符+名字」浅扫描；
@@ -4198,7 +5156,13 @@ static void collect_funcs(Token *tok, Program *prog) {  int n = 0, cap = 8;
           if (fp) {
             FuncSig ps;
             Token *pn = NULL;
-            pt = parse_funcptr_decl(&ps, q, pr_ty, pr_elem, -1, pr_void, &pn);
+            int psz = 0;
+            pt = parse_funcptr_decl(&ps, q, pr_ty, pr_elem, -1, pr_void, &pn, &psz);
+            // v2.6.0：函数指针**数组**作形参暂不支持 —— 预扫描这一路也必须响亮报错，
+            //   否则它会静默把 `int (*t[2])(int)` 当成单个函数指针形参（"预扫描只补一个字段"家族）。
+            if (psz > 0)
+              error_at(pn->loc, "函数指针数组作函数形参暂不支持（v2.6.0 边界）——"
+                                "请传单个函数指针，或在函数内声明数组后逐个赋值");
             f->param_ty[pi] = TY_FUNCPTR;
             f->param_ref[pi] = false;
             f->param_sig[pi] = add_sig_prog(prog, ps);
@@ -4531,6 +5495,97 @@ static void strict_uninit_func(Parser *p, Node *body) {
   for (Node *s = body; s; s = s->next) strict_walk(p, s);
 }
 
+// ===== v2.8.0（B 阶段②）：死代码消除（语句层，保守）=====
+// 只做三件"不可达"的事，**不做**常量传播/代数化简/寄存器分配：
+//   ① `if (字面量)` → 只留被选中的那一支（无 else = 整条语句消失；两支都先递归优化过）；
+//   ② `while (0)` / `for (; 0; ...)` → 删掉（`for` 的 init 在 C 里**执行一次** ⇒ 有 init 时只保留 init，
+//      别把 `for (f(); 0;)` 的 f() 一起删了——那是可观察副作用）；
+//   ③ 同一条链上 `return` / `break` / `continue` 之后的语句 → 删掉（不可达）。
+//
+// 为什么放在 parse_funcdef 的**最后**（-strict 未初始化/越界诊断、void 用法检查都跑完之后）：
+//   那些检查都在原 AST 上做 ⇒ 删除语句不会让任何既有诊断变松/变紧（诊断口径零变化，门不会因此翻红）。
+//
+// ⚠️ `switch` 的 rhs 是**扁平语句链**，`case/default` 标记本身就是跳转入口 —— 那条链上**绝不截断**：
+//   `break` 之后到下一个 case 之间的语句虽然不可达，但**下一个 case 标记仍可被跳进来**；
+//   在链上做"终止符后全删"会把 case 标签一起删掉 = 静默删分支（编译过、行为错）。
+//   所以 switch 链只逐条递归优化，不做链级截断。
+static Node *opt_chain(Node *chain, bool in_switch);
+
+// 返回替换后的语句链（NULL = 整条语句消失；可能把 if 分支/for-init 就地展开成链）
+static Node *opt_stmt(Node *s) {
+  if (!s) return NULL;
+  switch (s->kind) {
+    case ND_BLOCK:
+      s->rhs = opt_chain(s->rhs, false);
+      return s;
+    case ND_IF:
+      s->rhs = opt_stmt(s->rhs);          // 先优化两支（里面可能还有 if/while/block）
+      s->els = opt_stmt(s->els);
+      if (s->lhs && s->lhs->kind == ND_NUM)   // 条件已折叠成字面量
+        return s->lhs->val ? s->rhs : s->els; // 被选中那一支（可能 NULL）
+      return s;
+    case ND_WHILE:
+      s->rhs = opt_stmt(s->rhs);
+      if (s->lhs && s->lhs->kind == ND_NUM && s->lhs->val == 0) return NULL;   // while (0) 整条删
+      return s;
+    case ND_FOR:
+      s->rhs = opt_stmt(s->rhs);
+      if (s->cond && s->cond->kind == ND_NUM && s->cond->val == 0) {
+        if (!s->init) return NULL;                 // for (; 0; ...) ⇒ 什么都不执行
+        if (!s->init->next) return s->init;        // init 恰好一条语句 ⇒ 只留它
+        Node *b = new_node(ND_BLOCK, NULL, NULL);  // init 是声明链：包成块当一条语句（不产码）
+        b->rhs = s->init;
+        return b;
+      }
+      return s;
+    case ND_SWITCH:
+      s->rhs = opt_chain(s->rhs, true);            // 扁平链：只优化、不截断（见上面的长注释）
+      return s;
+    default:
+      return s;
+  }
+}
+
+static bool opt_is_terminator(Node *s) {
+  return s && (s->kind == ND_RETURN || s->kind == ND_BREAK || s->kind == ND_CONTINUE);
+}
+// 这条语句链是否**必然**以终止符收尾（块看它最后一条；if 不算——只走一支不算必然）
+static bool opt_chain_terminates(Node *chain) {
+  if (!chain) return false;
+  Node *last = chain;
+  while (last->next) last = last->next;
+  if (opt_is_terminator(last)) return true;
+  if (last->kind == ND_BLOCK) return opt_chain_terminates(last->rhs);
+  return false;
+}
+
+static Node *opt_chain(Node *chain, bool in_switch) {
+  Node head = {0};
+  Node *tail = &head;
+  bool dead = false;                 // 本链已遇到终止符 ⇒ 后面的语句不可达
+  for (Node *s = chain; s; ) {
+    Node *rest = s->next;            // 先存后继（下面会把 s 摘下来重接）
+    s->next = NULL;
+    if (!dead) {
+      Node *r = opt_stmt(s);
+      if (r) {
+        tail->next = r;
+        while (tail->next) tail = tail->next;
+        if (!in_switch && opt_chain_terminates(r)) dead = true;
+      }
+    }
+    s = rest;
+  }
+  return head.next;
+}
+
+
+// ===== C1 阶段：函数级错误恢复 =====
+// 恢复点记录：parse_funcdef 在吃函数体 '{' 之前把它记在这里。
+//   解析中途 error_at/error → longjmp 回来 → 凭它做括号配平，跳到**本函数体结束之后**。
+//   若错误发生在函数头（还没见到函数体 '{'），这里保持 NULL，改走"跳到下一个顶层项"。
+static Token *g_recover_body_open = NULL;
+
 static void parse_funcdef(Parser *p, Program *prog, int fi) {
   FuncDef *fn = &prog->funcs[fi];
 
@@ -4590,8 +5645,10 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
       error_at(p->tok->loc, "main 必须返回 int（退出码 = main 返回值）");
     fn->ret_void = true;
   } else {
-    if (ret_ty == TY_STRUCT && !is_punct(p->tok, '*'))
-      error_at(p->tok->loc, "struct 须指针返回（struct S *f()——按值返回暂不支持）");
+    // v2.14.0（struct 值语义第四刀）：**struct 按值返回** `struct V f(...)`。
+    //   返回类型记 TY_STRUCT + ret_struct（字段早已存在）；调用约定在 codegen 侧实现为
+    //   「隐藏返回缓冲指针 = 第 1 个整型参数」。`struct V *f()` 的老路（v1.0.6）**一字不动**。
+    bool struct_val_ret = (ret_ty == TY_STRUCT && !is_punct(p->tok, '*'));
     if (consume(p, '*')) {                    // v1.0.6：指针/句柄返回（64 位 rax）
       // v1.2.5：double* 指针返回开放 —— 指向类型进 ret_elem（`*f()` / `f()[i]` 的读写宽度与缩放靠它）
       if (fn->is_main)
@@ -4600,6 +5657,13 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
       fn->ret_elem = (ty_isint(ret_ty) || ret_ty == TY_DOUBLE) ? ret_ty : TY_INT;
       fn->ret_struct = (ret_ty == TY_STRUCT) ? ret_sidx : -1;
       fn->ret_ty = TY_PTR;
+    } else if (struct_val_ret) {
+      if (fn->is_main)
+        error_at(p->tok->loc, "main 必须返回 int（退出码 = main 返回值）");
+      fn->ret_ty = TY_STRUCT;
+      fn->ret_elem = TY_INT;
+      fn->ret_struct = ret_sidx;
+      fn->retbuf_off = 0;   // 下面解析完形参表后分配（形参槽从它之后开始）
     } else {
       if (fn->is_main && ret_ty != TY_INT)
         error_at(p->tok->loc, "main 必须返回 int（退出码 = main 返回值）");
@@ -4616,6 +5680,17 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
   p->var_count = 0;
   p->next_offset = 8;
   p->all_lvars = NULL;   // v1.4.25：strict 的"本函数全部变量"链每函数重建
+  // v2.14.0：struct 按值返回的**隐藏返回缓冲指针**槽（rcx 收进来的那个地址）。
+  //   放在参数之前分配 ⇒ 槽偏移 8，用户形参整体后移；它**不进** scope/all_lvars（用户不可见，
+  //   调试变量表也不列它）——代码生成只靠 FuncDef.retbuf_off 找到它。
+  p->fn_ret_struct = (fn->ret_ty == TY_STRUCT) ? fn->ret_struct : -1;  // 指针返回的 ret_struct 也存 sidx，别混
+  p->fn_retbuf_off = 0;
+  if (p->fn_ret_struct >= 0) {
+    fn->retbuf_off = p->next_offset;
+    p->next_offset += 8;
+    p->var_count += 1;
+    p->fn_retbuf_off = fn->retbuf_off;
+  }
   fn->nargs = 0;   // v1.2.2：预扫描为「前向调用」预填过形参个数，这里清零后正式重新登记
   for (int z = 0; z < FUNC_MAX_ARGS; z++) fn->param_sig[z] = FN_SIG_NONE;   // v1.3.2（0 是合法签名下标，不能靠清零）
   scope_push(p);
@@ -4653,7 +5728,12 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
         if (is_fp) {
           FuncSig ps;
           Token *pn = NULL;
-          p->tok = parse_funcptr_decl(&ps, t0, pr_ty, pr_elem, -1, pr_void, &pn);
+          int psz = 0;
+          p->tok = parse_funcptr_decl(&ps, t0, pr_ty, pr_elem, -1, pr_void, &pn, &psz);
+          // v2.6.0：数组形参要在**正式定义**这一路也拦住（预扫描已拦一道，两道同口径）
+          if (psz > 0)
+            error_at(pn->loc, "函数指针数组作函数形参暂不支持（v2.6.0 边界）——"
+                              "请传单个函数指针，或在函数内声明数组后逐个赋值");
           if (fn->nargs >= FUNC_MAX_ARGS)
             error_at(pn->loc, "函数参数最多 %d 个（前 4 个走 rcx/rdx/r8/r9、第 5 个起走栈参，v1.4.26）",
                      FUNC_MAX_ARGS);
@@ -4745,6 +5825,15 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
     }
   }
   skip(p, ')');
+  // v2.14.0：struct 按值返回 = 隐藏返回缓冲占用第 1 个整型参数（rcx）⇒ 用户参数上限减 1。
+  //   （codegen 的 gen_call 用 `Node *args[FUNC_MAX_ARGS]`，补上隐藏参数后最多 FUNC_MAX_ARGS 个。）
+  if (p->fn_ret_struct >= 0 && fn->nargs >= FUNC_MAX_ARGS)
+    error_at(p->tok->loc, "struct 按值返回的函数最多 %d 个用户参数（第 1 个整型参数 rcx 被隐藏的"
+                          "返回缓冲指针占用；其余函数仍是 %d 个）",
+             FUNC_MAX_ARGS - 1, FUNC_MAX_ARGS);
+  // C1：记录函数体 '{' 的位置 —— 解析中途报错时，恢复路径靠它做括号配平（见 parse_funcdef_recover）。
+  //   放在 skip 之前：skip 失败（当前不是 '{'）时恢复路径会检查类型后退回"跳到下一个顶层项"。
+  g_recover_body_open = p->tok;
   skip(p, '{');
 
   Node head = {0};
@@ -4758,6 +5847,10 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
 
   fn->body = head.next;
   fn->var_count = p->var_count;
+
+  // v2.14.0：struct 按值返回调用的**位置检查**（只有声明/赋值右值与直接 return 两处合法）。
+  //   放在 DCE 之前：`return` 之后的死语句会被 DCE 掉，不能靠"反正不执行"放过（那是静默）。
+  check_sret_calls(p, fn->body);
 
   // ===== v5（`-debug`，D-1）：本函数的**变量位置表**（调试器读局部量/形参的唯一依据）=====
   // 数据源 = p->all_lvars —— 与"给变量分槽"是**同一张表**（offset/ty/elem_ty/arr_len/struct_idx 全在 LVar 上），
@@ -4781,7 +5874,8 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
         d->line = v->line;
         d->kind = v->is_param ? 1
                 : ((v->ty == TY_ARR || v->ty == TY_STRUCT) ? 2 : 0);   // 0=local 1=param 2=aggregate
-        ty_decl_str(d->type, sizeof(d->type), v->ty, v->elem_ty, v->arr_len, v->cols, v->struct_idx, p->prog);
+        ty_decl_str(d->type, sizeof(d->type), v->ty, v->elem_ty, v->elem_ptr_ty,
+                    v->arr_len, v->cols, v->struct_idx, p->prog);
       }
       fn->dbg_vars = dv;
       fn->ndbg_vars = nv;
@@ -4794,6 +5888,155 @@ static void parse_funcdef(Parser *p, Program *prog, int fi) {
 
   // void 调用用法检查（结果不能当值）
   for (Node *s = fn->body; s; s = s->next) check_stmt_void(s);
+
+  // v2.8.0（B 阶段②）：死代码消除。**放在所有 parse 期诊断之后**（-strict / void 用法检查
+  //   都在原 AST 上跑过 ⇒ 诊断口径零变化）；只做不可达删除，codegen 一行未改。
+  fn->body = opt_chain(fn->body, false);
+}
+
+// ===== C1 阶段：函数级错误恢复的实现 =====
+// 粒度 = **一个函数**：某函数解析中报错 → longjmp 回本函数调用点 → 跳到该函数之后 → 继续下一个顶层项。
+// 为什么不做语句级：语句级要在坏 AST 上继续解析，级联错误多，还可能原地打转（死循环）；
+//   函数级的出口只有「解析完 / 跳到函数体后」，前进性可以一眼证明。
+// 内存取舍：longjmp 跳过栈上清理 —— 出错函数里已分配但没挂进 AST 的 Node/LVar/Scope 会泄漏。
+//   编译器是**短命进程**（一次编译一次 exit），这点泄漏可接受；本函数不尝试手工回收（回收反而可能二次释放）。
+static bool tok_starts_toplevel(Token *t) {
+  if (!t || t->kind != TK_IDENT) return false;
+  return is_ident(t, "int") || is_ident(t, "int_64") || is_ident(t, "char")
+      || is_ident(t, "double") || is_ident(t, "void") || is_ident(t, "struct")
+      || is_ident(t, "uint_8") || is_ident(t, "uint_32") || is_ident(t, "uint_64")
+      || is_ident(t, "enum") || is_ident(t, "api");
+}
+
+// 从函数体 '{' 起做括号配平，返回**匹配 '}' 之后**的 token。
+// 前进性：open 是 '{'，返回值严格在它之后；缺右花括号时一路扫到 EOF 返回 EOF（仍在前进）。
+static Token *skip_past_brace_group(Token *open) {
+  int depth = 0;
+  Token *t = open;
+  for (; t && t->kind != TK_EOF; t = t->next) {
+    if (is_punct(t, '{')) depth++;
+    else if (is_punct(t, '}')) {
+      depth--;
+      if (depth == 0) return t->next;
+    }
+  }
+  return t;   // EOF（函数体没配平：已经走到文件尾，保证不回头）
+}
+
+// 函数头就出错（还没见到函数体 '{'）时的兜底：从出错点扫到下一个**顶层**声明起点。
+// 前进性：`advanced` 保证至少吃掉一个 token 才允许返回 —— 否则 p->tok 原地不动 → 主循环死循环。
+// 括号深度从 start 扫到 from 现算（不猜），避免把形参表里的 `int` 误认成顶层声明。
+static Token *skip_to_next_toplevel(Token *start, Token *from) {
+  if (!from) return NULL;
+  int paren = 0, brace = 0, brack = 0;
+  for (Token *t = start; t && t != from && t->kind != TK_EOF; t = t->next) {
+    if (is_punct(t, '(')) paren++;
+    else if (is_punct(t, ')')) { if (paren > 0) paren--; }
+    else if (is_punct(t, '[')) brack++;
+    else if (is_punct(t, ']')) { if (brack > 0) brack--; }
+    else if (is_punct(t, '{')) brace++;
+    else if (is_punct(t, '}')) { if (brace > 0) brace--; }
+  }
+  bool advanced = false;
+  Token *t = from;
+  while (t && t->kind != TK_EOF) {
+    if (is_punct(t, '(')) paren++;
+    else if (is_punct(t, ')')) { if (paren > 0) paren--; }
+    else if (is_punct(t, '[')) brack++;
+    else if (is_punct(t, ']')) { if (brack > 0) brack--; }
+    else if (is_punct(t, '{')) brace++;
+    else if (is_punct(t, '}')) { if (brace > 0) brace--; }
+    if (advanced && paren == 0 && brace == 0 && brack == 0 && tok_starts_toplevel(t))
+      return t;
+    t = t->next;
+    advanced = true;
+  }
+  return t;   // EOF（或 NULL）
+}
+
+// 恢复现场（静态区）：setjmp 之后自动变量可能被 longjmp "clobber"（GCC -Wclobbered），
+//   而恢复路径要用出错前的这些值 —— 一律存静态变量，不依赖被 longjmp 跳过的栈帧。
+static struct {
+  Parser *p;
+  Program *prog;
+  int fi;
+  Token *start;
+  Scope *scope;
+  int scope_nest, loop_nest, switch_nest, depth;
+  char *stmt_loc;
+} g_recover_saved;
+
+// 出错后的复位 + 跳转（独立函数：负责所有"弄脏了要擦干净"的状态）
+static void recover_after_error(void) {
+  Parser *p = g_recover_saved.p;
+  Program *prog = g_recover_saved.prog;
+  int fi = g_recover_saved.fi;
+
+  // 复位 Parser 状态：longjmp 跳过 scope_pop / depth-- / loop_nest--，
+  //   不清的话下一个函数会带着「作用域链、递归深度、循环深度」的残值解析 —— 轻则误报，重则再炸。
+  p->scope = g_recover_saved.scope;          // 丢掉出错函数里没弹干净的作用域层
+  p->scope_nest = g_recover_saved.scope_nest;
+  p->loop_nest = g_recover_saved.loop_nest;
+  p->switch_nest = g_recover_saved.switch_nest;
+  p->depth = g_recover_saved.depth;          // 否则下一个函数一开始就撞 PARSE_MAX_DEPTH
+  p->var_count = 0;
+  p->next_offset = 8;
+  p->all_lvars = NULL;
+  p->fn_ret_struct = -1;   // v2.14.0：别让坏函数的"按值返回"标记漏到下一个函数
+  p->fn_retbuf_off = 0;
+  g_stmt_loc = g_recover_saved.stmt_loc;     // 语句行号游标不能带着坏函数的值
+
+  if (g_recover_body_open && is_punct(g_recover_body_open, '{'))
+    p->tok = skip_past_brace_group(g_recover_body_open);              // 已开体：配平到体后
+  else
+    p->tok = skip_to_next_toplevel(g_recover_saved.start, p->tok);    // 还没开体：扫到下一个顶层项
+
+  // 半截函数不入 AST：清掉可能写了一半的签名信息（本轮有错不进 codegen，这里只为后续解析不受污染）
+  FuncDef *fn = &prog->funcs[fi];
+  fn->body = NULL;
+  fn->nargs = 0;
+  fn->ret_void = false;
+  fn->ret_ty = TY_INT;
+  fn->ret_elem = TY_INT;
+  fn->ret_struct = -1;
+  fn->retbuf_off = 0;   // v2.14.0：半截函数不留隐藏返回缓冲槽
+  fn->var_count = 0;
+  fn->dbg_vars = NULL;
+  fn->ndbg_vars = 0;
+}
+
+// parse_funcdef 的恢复外壳：两个调用点都走这里。
+// 正常路径 = 原样调用；出错路径 = 复位 Parser 状态 + 跳到下一个函数。
+static void parse_funcdef_recover(Parser *p, Program *prog, int fi) {
+  // 防御：fi 必须落在预扫描函数表内。坏输入下的恢复可能让"解析调用数"超过预扫描登记数；
+  //   越界就只跳 token、绝不碰 prog->funcs —— 宁可少报，也不能越界写坏内存（"不能崩"优先）。
+  if (fi < 0 || fi >= prog->nfuncs) {
+    p->tok = skip_to_next_toplevel(p->tok, p->tok);   // 至少前进一个 token，不会原地打转
+    return;
+  }
+
+  g_recover_saved.p = p;
+  g_recover_saved.prog = prog;
+  g_recover_saved.fi = fi;
+  g_recover_saved.start = p->tok;
+  g_recover_saved.scope = p->scope;
+  g_recover_saved.scope_nest = p->scope_nest;
+  g_recover_saved.loop_nest = p->loop_nest;
+  g_recover_saved.switch_nest = p->switch_nest;
+  g_recover_saved.depth = p->depth;
+  g_recover_saved.stmt_loc = g_stmt_loc;
+
+  g_recover_body_open = NULL;
+  if (setjmp(g_err_jb) == 0) {
+    g_err_recovering = 1;
+    parse_funcdef(p, prog, fi);
+    g_err_recovering = 0;
+    g_recover_body_open = NULL;
+    return;
+  }
+  // —— 出错恢复路径（error_at/error 已经打印过）——
+  g_err_recovering = 0;
+  recover_after_error();
 }
 
 // —— v2.1.0 enum 定义：`enum Name { A, B = 3, C }` ——
@@ -4832,10 +6075,7 @@ static void parse_enumdef(Parser *p, Program *prog) {
       }
       if (neg) val = 0 - val;
     }
-    if (find_global(prog, it) >= 0)
-      error_at(it->loc, "枚举常量 '%.*s' 与全局变量同名", it->len, it->loc);
-    if (find_func(prog, it) >= 0)
-      error_at(it->loc, "枚举常量 '%.*s' 与函数同名", it->len, it->loc);
+    // v2.15.0：与全局变量/函数同名的检查已挪到 check_enum_conflicts（预扫描时两表还没建）
     if (find_enum(prog, it) >= 0)
       error_at(it->loc, "枚举常量 '%.*s' 重复声明", it->len, it->loc);
     add_enum_const(prog, it, val);
@@ -4850,15 +6090,38 @@ static void parse_enumdef(Parser *p, Program *prog) {
     error_at(nm->loc, "enum '%.*s' 里至少要有一个常量", nm->len, nm->loc);
 }
 
+// v2.15.0：enum 预扫描先于 collect_globals/collect_funcs，登记时这两张表还是空的 ⇒
+//   原本在 parse_enumdef 里的"与全局变量/函数同名"检查挪到这里（collect_funcs 之后）补做。
+//   常量自身的重复声明已在预扫描登记时查过；这里只补跨表冲突。
+static void check_enum_conflicts(Program *prog) {
+  for (int i = 0; i < prog->nenums; i++) {
+    EnumConst *e = &prog->enums[i];
+    if (!e->tok) continue;
+    if (find_global(prog, e->tok) >= 0)
+      error_at(e->tok->loc, "枚举常量 '%.*s' 与全局变量同名", e->tok->len, e->tok->loc);
+    if (find_func(prog, e->tok) >= 0)
+      error_at(e->tok->loc, "枚举常量 '%.*s' 与函数同名", e->tok->len, e->tok->loc);
+  }
+}
+
 Program parse(Token *tok) {
   Program prog = {0};
 
+  // v2.15.0：**enum 定义预扫描最先**——struct 字段长度与全局数组长度都要在扫布局时用常量值，
+  //   而常量登记原本在第二遍顶层循环（太晚）。第二遍遇到 enum 只跳 token（见下）。
+  preparse_enums(tok, &prog);
+  // v2.13.0：**struct 定义预扫描**——collect_globals 要给 `struct E g;` 算 .data 的尺寸/对齐，
+  //   而这两样只有 StructDef 知道；结构体表必须在全局布局之前建好。
+  //   第二遍的顶层循环遇到 struct 定义只跳 token（见下），不会重复解析。
+  preparse_structs(tok, &prog);
   // v1.3.0：全局变量预扫描**必须最先**——它把 .data 偏移一次算死，供函数体（含前向引用）
   //   建出 ND_VAR；同时它也跳过 API/函数定义，与 collect_funcs 共用同一套顶层识别口径。
   collect_globals(tok, &prog);
   // 第一遍：预登记函数名（前向调用可用）+ 顶部 API 声明（v0.8）
   collect_funcs(tok, &prog);
   collect_apis(tok, &prog);
+  // v2.15.0：enum 常量与全局变量/函数同名的冲突（预扫描时两表还没建，这里补）
+  check_enum_conflicts(&prog);
   // v0.9：内置堆 API（VirtualAlloc/VirtualFree）——源码含 'new' 才登记，纯算数 exe 零污染
   prog.api_alloc = -1;
   prog.api_free = -1;
@@ -4874,9 +6137,11 @@ Program parse(Token *tok) {
 
   // 第二遍：按源序解析 struct 定义与函数定义
   // ⚠️ 位置初始化与 Parser 字段顺序一一对应（新增字段必须同步这里，否则「名字对不上值」的静默错位）：
-  //   tok, scope, var_count, next_offset, prog, fn_ret_void, scope_nest, loop_nest, switch_nest, fn_ret_dbl, fn_ret_ty
+  //   tok, scope, var_count, next_offset, all_lvars, prog, fn_ret_void, scope_nest, loop_nest,
+  //   switch_nest, fn_ret_dbl, fn_ret_ty, depth
   //   （v1.5.0 加 fn_ret_ty 时漏了这一处 ⇒ gcc 报 missing initializer、warn 门从 7 变 8；补 0 = TY_INT）
-  Parser p = { tok, NULL, 0, 8, NULL, &prog, false, 0, 0, 0, false, 0 };
+  //   （v2.7.0 加 depth 时同样补末位 0；Parser 全局只有这一处位置初始化）
+  Parser p = { tok, NULL, 0, 8, NULL, &prog, false, 0, 0, 0, false, 0, 0, -1, 0 };
   int fi = 0;
   bool seen_toplevel = false;   // 是否已见 struct/函数（api 只允许在此之前）
   while (p.tok->kind != TK_EOF) {
@@ -4890,21 +6155,47 @@ Program parse(Token *tok) {
     }
     if (is_ident(p.tok, "enum")) {
       seen_toplevel = true;
-      parse_enumdef(&p, &prog);
+      // v2.15.0：定义已由 preparse_enums 登记（数组长度要先知道常量值）——这里只跳 token，
+      //   别再 parse_enumdef（会报"重复声明"）。形态不完整时仍交 parse_enumdef 报准确错。
+      Token *en = p.tok->next;
+      if (en && en->kind == TK_IDENT && !is_keyword(en) && is_punct(en->next, '{')) {
+        while (p.tok->kind != TK_EOF && !is_punct(p.tok, '}')) p.tok = p.tok->next;
+        if (p.tok->kind == TK_EOF) error_at(p.tok->loc, "enum 缺少右花括号 '}'");
+        else p.tok = p.tok->next;
+        if (is_punct(p.tok, ';')) p.tok = p.tok->next;   // 末尾分号可选
+      } else {
+        parse_enumdef(&p, &prog);
+      }
       continue;
     }
     if (is_ident(p.tok, "struct")) {
       seen_toplevel = true;
-      // struct 定义 = struct 名 { ... }；其余 struct 名 开头 = 函数（v1.0.6 指针返回 struct S *f()
-      //   或非法的值返回 struct P f() → 交 parse_funcdef 报精确错）
+      // struct 定义 = struct 名 { ... }；其余 struct 名 开头 = 全局 struct 声明 或 函数
+      //   （v1.0.6 指针返回 struct S *f()；非法的值返回 struct P f() → 交 parse_funcdef 报精确错）
       Token *sn = p.tok->next;
       Token *after = (sn && sn->kind == TK_IDENT) ? sn->next : NULL;
-      if (!after || !is_punct(after, '{')) {
-        parse_funcdef(&p, &prog, fi);
-        fi++;
+      if (after && is_punct(after, '{')) {
+        // v2.13.0：定义已由 preparse_structs 解析（全局布局要先知道尺寸）——这里只跳过 token，
+        //   别再 parse_structdef（会报"重复定义"）。
+        while (p.tok->kind != TK_EOF && !is_punct(p.tok, '}')) p.tok = p.tok->next;
+        if (p.tok->kind == TK_EOF) error_at(p.tok->loc, "结构体缺少右花括号 '}'");
+        else p.tok = p.tok->next;
         continue;
       }
-      parse_structdef(&p, &prog);
+      // v2.13.0：**全局 struct 声明**（按值 / 数组 / 指针）——collect_globals 已登记 .data 偏移，
+      //   这里只跳过整条声明。判据与标量全局同一套：声明符扫到 ';' / '=' / ','。
+      //   名字后跟 '(' 的仍是函数（struct S *f()），交给 parse_funcdef_recover。
+      if (after) {
+        Token *end = scan_declarator(after);
+        if (end && (is_punct(end, ';') || is_punct(end, '=') || is_punct(end, ','))) {
+          while (p.tok->kind != TK_EOF && !is_punct(p.tok, ';')) p.tok = p.tok->next;
+          if (p.tok->kind == TK_EOF) error_at(p.tok->loc, "全局 struct 声明缺少 ';'");
+          else p.tok = p.tok->next;
+          continue;
+        }
+      }
+      parse_funcdef_recover(&p, &prog, fi);   // C1：函数级错误恢复（出错不退出，继续下一个函数）
+      fi++;
       continue;
     }
     if (!is_ident(p.tok, "void") && !is_ident(p.tok, "struct") && type_kw_of(p.tok) < 0)
@@ -4929,10 +6220,16 @@ Program parse(Token *tok) {
       error_at(p.tok->loc, "顶层只允许 struct 定义、函数定义或全局变量声明"
                            "（int/int_64/char/double/uint_8/uint_32/uint_64/void 名称(...) "
                            "或同组类型 名称[= 常量];）");
-    parse_funcdef(&p, &prog, fi);
+    parse_funcdef_recover(&p, &prog, fi);   // C1：函数级错误恢复（出错不退出，继续下一个函数）
     fi++;
   }
-  if (fi != prog.nfuncs)
+  // C1：有错时不再要求"解析数 == 预扫描数"——恢复路径可能跳过坏掉的顶层项，
+  //   这是错误恢复的预期行为，不是内部错误（无错路径口径完全不变）。
+  if (g_err_count == 0 && fi != prog.nfuncs)
     error_at(tok->loc, "内部错误：函数解析数与预扫描不一致");
+  // C1：有错 → 打一行汇总，main.c 见 g_err_count > 0 就不进 codegen、不产 exe。
+  //   只在**多错**时打：单错输出必须与 C1 之前一字不差（判据 3）。
+  if (g_err_count > 1)
+    fprintf(stderr, "hlc: 共 %d 个错误，未生成产物\n", g_err_count);
   return prog;
 }

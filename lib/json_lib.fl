@@ -1,0 +1,399 @@
+// json_lib.fl — FLINT 标准库（数据批）：完整 JSON 解析（建树，扁平节点池）
+// 用法：include "../../lib/json_lib.fl"（路径相对本文件目录解析）
+//
+// ⚠️ 一个必须记住的坑（本轮实测）：struct 字段不能声明 char*，本库的 `struct JP.s`
+//   只能用 `int *` 装源串地址；但 **int* 的下标按 4 字节步进**，直接写 `j->s[p]` 会读到
+//   偏移 4p 的 4 字节窗口（`& 255` 只在 p=0 时碰巧对）。所以每个用到的函数里先
+//   `char *cs = j->s;` 再按 char* 下标读 —— 这是本库能正确解析的唯一写法。
+//
+// 节点布局（struct JNode，8 个 int = 32 字节）：
+//   type   0=null 1=false 2=true 3=number 4=string 5=array 6=object
+//   keyoff/keylen  对象成员的键在源串里的原始区间（不含引号）
+//   valoff/vallen  标量（number/string）的值区间（不含引号；容器为 0）
+//   first  第一个子节点下标（-1 = 无）；next 同层下一个兄弟（-1 = 无）；parent 父（-1 根）
+//
+// 解析：递归下降（实测 FLINT 支持自递归），节点数超 nodecap → 失败；深度受递归栈限制。
+// 查询：json_type / json_child / json_next / json_key（键原样）/ json_str（值反转义）/
+//       json_num（十进制整数，小数截断，超 int32 饱和）。
+// 错误输入（非法 token / 括号不配对 / 节点超限）一律 -1，不静默。
+//
+// 已知边界：不支持科学计数法的精确值（按整数截断）；\uXXXX 只处理 BMP；
+//           键不做反转义（json_key 原样给字节，常见的键没有转义）。
+
+struct JNode {
+  int type;
+  int keyoff;
+  int keylen;
+  int valoff;
+  int vallen;
+  int first;
+  int next;
+  int parent;
+}
+
+// 解析器状态（s 用 int* 装地址；读写时先转 char*，见文件头）
+struct JP {
+  int *s;
+  int n;
+  int p;
+  struct JNode *nd;
+  int cnt;
+  int cap;
+}
+
+// 跳空白，返回新位置
+int jp_ws(struct JP *j) {
+  char *cs = j->s;
+  int c = 0;
+  while (j->p < j->n) {
+    c = cs[j->p] & 255;
+    if (c == 32 || c == 9 || c == 10 || c == 13) { j->p = j->p + 1; }
+    else { break; }
+  }
+  return j->p;
+}
+
+// 十六进制字符 → 值；非法 → -1
+int jp_hex(int c) {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 97 + 10; }
+  if (c >= 65 && c <= 70) { return c - 65 + 10; }
+  return -1;
+}
+
+// 解析一个字符串（j->p 指向开引号）：写回原始区间 off/len（不含引号），
+// 并把 j->p 推到闭引号之后。1 = 成功；0 = 失败（未闭合 / 非法转义）。
+int jp_strscan(struct JP *j, int *off, int *len) {
+  char *cs = j->s;
+  int q = 0;
+  int st = 0;
+  int c = 0;
+  if (j->p >= j->n) { return 0; }
+  if ((cs[j->p] & 255) != 34) { return 0; }
+  q = j->p + 1;
+  st = q;
+  while (q < j->n) {
+    c = cs[q] & 255;
+    if (c == 34) {
+      *off = st;
+      *len = q - st;
+      j->p = q + 1;
+      return 1;
+    }
+    if (c == 92) {
+      if (q + 1 >= j->n) { return 0; }
+      q = q + 2;
+      continue;
+    }
+    q = q + 1;
+  }
+  return 0;
+}
+
+// 新建一个节点，返回下标；池满 → -1
+int jp_new(struct JP *j, int type, int parent) {
+  int idx = 0;
+  if (j->cnt >= j->cap) { return -1; }
+  idx = j->cnt;
+  j->cnt = j->cnt + 1;
+  j->nd[idx].type = type;
+  j->nd[idx].keyoff = 0;
+  j->nd[idx].keylen = 0;
+  j->nd[idx].valoff = 0;
+  j->nd[idx].vallen = 0;
+  j->nd[idx].first = -1;
+  j->nd[idx].next = -1;
+  j->nd[idx].parent = parent;
+  return idx;
+}
+
+// 解析一个值（递归）：成功写 *out = 节点下标，返回 1；失败 0
+int jp_node(struct JP *j, int parent, int *out) {
+  char *cs = j->s;
+  int idx = 0;
+  int c = 0;
+  int child = 0;
+  int ko = 0;
+  int kl = 0;
+  int last = 0;
+  jp_ws(j);
+  if (j->p >= j->n) { return 0; }
+  c = cs[j->p] & 255;
+
+  if (c == 34) {                                   // 字符串
+    idx = jp_new(j, 4, parent);
+    if (idx < 0) { return 0; }
+    if (jp_strscan(j, &ko, &kl) == 0) { return 0; }
+    j->nd[idx].valoff = ko;
+    j->nd[idx].vallen = kl;
+    *out = idx;
+    return 1;
+  }
+
+  if (c == 123) {                                  // 对象
+    idx = jp_new(j, 6, parent);
+    if (idx < 0) { return 0; }
+    j->p = j->p + 1;
+    jp_ws(j);
+    if (j->p < j->n && (cs[j->p] & 255) == 125) { j->p = j->p + 1; *out = idx; return 1; }
+    last = -1;
+    while (1) {
+      jp_ws(j);
+      if (j->p >= j->n) { return 0; }
+      if ((cs[j->p] & 255) != 34) { return 0; }
+      if (jp_strscan(j, &ko, &kl) == 0) { return 0; }
+      jp_ws(j);
+      if (j->p >= j->n) { return 0; }
+      if ((cs[j->p] & 255) != 58) { return 0; }  // ':'
+      j->p = j->p + 1;
+      if (jp_node(j, idx, &child) == 0) { return 0; }
+      j->nd[child].keyoff = ko;
+      j->nd[child].keylen = kl;
+      if (last >= 0) { j->nd[last].next = child; }
+      else { j->nd[idx].first = child; }
+      last = child;
+      jp_ws(j);
+      if (j->p >= j->n) { return 0; }
+      c = cs[j->p] & 255;
+      if (c == 44) { j->p = j->p + 1; continue; }
+      if (c == 125) { j->p = j->p + 1; *out = idx; return 1; }
+      return 0;
+    }
+  }
+
+  if (c == 91) {                                   // 数组
+    idx = jp_new(j, 5, parent);
+    if (idx < 0) { return 0; }
+    j->p = j->p + 1;
+    jp_ws(j);
+    if (j->p < j->n && (cs[j->p] & 255) == 93) { j->p = j->p + 1; *out = idx; return 1; }
+    last = -1;
+    while (1) {
+      if (jp_node(j, idx, &child) == 0) { return 0; }
+      if (last >= 0) { j->nd[last].next = child; }
+      else { j->nd[idx].first = child; }
+      last = child;
+      jp_ws(j);
+      if (j->p >= j->n) { return 0; }
+      c = cs[j->p] & 255;
+      if (c == 44) { j->p = j->p + 1; continue; }
+      if (c == 93) { j->p = j->p + 1; *out = idx; return 1; }
+      return 0;
+    }
+  }
+
+  if (c == 116) {                                  // true
+    if (j->p + 3 >= j->n) { return 0; }
+    if ((cs[j->p + 1] & 255) != 114) { return 0; }
+    if ((cs[j->p + 2] & 255) != 117) { return 0; }
+    if ((cs[j->p + 3] & 255) != 101) { return 0; }
+    idx = jp_new(j, 2, parent);
+    if (idx < 0) { return 0; }
+    j->p = j->p + 4;
+    *out = idx;
+    return 1;
+  }
+
+  if (c == 102) {                                  // false
+    if (j->p + 4 >= j->n) { return 0; }
+    if ((cs[j->p + 1] & 255) != 97) { return 0; }
+    if ((cs[j->p + 2] & 255) != 108) { return 0; }
+    if ((cs[j->p + 3] & 255) != 115) { return 0; }
+    if ((cs[j->p + 4] & 255) != 101) { return 0; }
+    idx = jp_new(j, 1, parent);
+    if (idx < 0) { return 0; }
+    j->p = j->p + 5;
+    *out = idx;
+    return 1;
+  }
+
+  if (c == 110) {                                  // null
+    if (j->p + 3 >= j->n) { return 0; }
+    if ((cs[j->p + 1] & 255) != 117) { return 0; }
+    if ((cs[j->p + 2] & 255) != 108) { return 0; }
+    if ((cs[j->p + 3] & 255) != 108) { return 0; }
+    idx = jp_new(j, 0, parent);
+    if (idx < 0) { return 0; }
+    j->p = j->p + 4;
+    *out = idx;
+    return 1;
+  }
+
+  if (c == 45 || (c >= 48 && c <= 57)) {           // 数字
+    int st = j->p;
+    idx = jp_new(j, 3, parent);
+    if (idx < 0) { return 0; }
+    if (c == 45) { j->p = j->p + 1; }
+    if (j->p >= j->n) { return 0; }
+    if (!((cs[j->p] & 255) >= 48 && (cs[j->p] & 255) <= 57)) { return 0; }
+    while (j->p < j->n) {
+      c = cs[j->p] & 255;
+      if ((c >= 48 && c <= 57) || c == 46) { j->p = j->p + 1; }
+      else { break; }
+    }
+    j->nd[idx].valoff = st;
+    j->nd[idx].vallen = j->p - st;
+    *out = idx;
+    return 1;
+  }
+
+  return 0;
+}
+
+// 解析整段 JSON：成功返回根节点下标（0）；-1 = 失败
+int std::json_parse(char *src, int n, struct JNode *nodes, int nodecap) {
+  struct JP j;
+  int root = -1;
+  if (src == 0) { return -1; }
+  if (nodes == 0) { return -1; }
+  if (n < 1) { return -1; }
+  if (nodecap < 1) { return -1; }
+  j.s = src;
+  j.n = n;
+  j.p = 0;
+  j.nd = nodes;
+  j.cnt = 0;
+  j.cap = nodecap;
+  if (jp_node(&j, -1, &root) == 0) { return -1; }
+  jp_ws(&j);
+  if (j.p != j.n) { return -1; }
+  return root;
+}
+
+// 节点类型：0..6；越界 -1
+int std::json_type(struct JNode *nodes, int idx) {
+  if (nodes == 0) { return -1; }
+  if (idx < 0) { return -1; }
+  return nodes[idx].type;
+}
+
+// 第一个子节点下标；-1 = 没有
+int std::json_child(struct JNode *nodes, int idx) {
+  if (nodes == 0) { return -1; }
+  if (idx < 0) { return -1; }
+  return nodes[idx].first;
+}
+
+// 同层下一个兄弟下标；-1 = 没有
+int std::json_next(struct JNode *nodes, int idx) {
+  if (nodes == 0) { return -1; }
+  if (idx < 0) { return -1; }
+  return nodes[idx].next;
+}
+
+// 对象成员的键（原样字节，不反转义）：返回长度；-1 = 失败/cap 不够
+int std::json_key(char *src, struct JNode *nodes, int idx, char *out, int cap) {
+  int i = 0;
+  if (src == 0) { return -1; }
+  if (nodes == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (idx < 0) { return -1; }
+  if (nodes[idx].keylen + 1 > cap) { return -1; }
+  while (i < nodes[idx].keylen) {
+    out[i] = src[nodes[idx].keyoff + i];
+    i = i + 1;
+  }
+  out[i] = 0;
+  return i;
+}
+
+// 字符串值（反转义）：返回长度；-1 = 失败/不是字符串/cap 不够/非法转义
+int std::json_str(char *src, struct JNode *nodes, int idx, char *out, int cap) {
+  int i = 0;
+  int o = 0;
+  int c = 0;
+  int v = 0;
+  int k = 0;
+  int h = 0;
+  int off = 0;
+  int len = 0;
+  if (src == 0) { return -1; }
+  if (nodes == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (idx < 0) { return -1; }
+  if (nodes[idx].type != 4) { return -1; }
+  off = nodes[idx].valoff;
+  len = nodes[idx].vallen;
+  while (i < len) {
+    c = src[off + i] & 255;
+    if (c == 92) {
+      i = i + 1;
+      if (i >= len) { return -1; }
+      c = src[off + i] & 255;
+      if (c == 110) { c = 10; }
+      else if (c == 116) { c = 9; }
+      else if (c == 114) { c = 13; }
+      else if (c == 98) { c = 8; }
+      else if (c == 102) { c = 12; }
+      else if (c == 34) { c = 34; }
+      else if (c == 92) { c = 92; }
+      else if (c == 47) { c = 47; }
+      else if (c == 117) {
+        if (i + 4 >= len) { return -1; }
+        v = 0;
+        k = 0;
+        while (k < 4) {
+          h = jp_hex(src[off + i + 1 + k] & 255);
+          if (h < 0) { return -1; }
+          v = v * 16 + h;
+          k = k + 1;
+        }
+        i = i + 4;
+        if (v < 128) {
+          if (o + 1 >= cap) { return -1; }
+          out[o] = v; o = o + 1;
+        } else if (v < 2048) {
+          if (o + 2 >= cap) { return -1; }
+          out[o] = 192 + (v >> 6); o = o + 1;
+          out[o] = 128 + (v & 63); o = o + 1;
+        } else {
+          if (o + 3 >= cap) { return -1; }
+          out[o] = 224 + (v >> 12); o = o + 1;
+          out[o] = 128 + ((v >> 6) & 63); o = o + 1;
+          out[o] = 128 + (v & 63); o = o + 1;
+        }
+        i = i + 1;
+        continue;
+      }
+      else { return -1; }
+    }
+    if (o + 1 >= cap) { return -1; }
+    out[o] = c;
+    o = o + 1;
+    i = i + 1;
+  }
+  out[o] = 0;
+  return o;
+}
+
+// 数值（十进制整数；小数截断；超 int32 饱和）；-1 = 不是数字
+int std::json_num(char *src, struct JNode *nodes, int idx) {
+  int i = 0;
+  int neg = 0;
+  int v = 0;
+  int c = 0;
+  int off = 0;
+  int len = 0;
+  if (src == 0) { return -1; }
+  if (nodes == 0) { return -1; }
+  if (idx < 0) { return -1; }
+  if (nodes[idx].type != 3) { return -1; }
+  off = nodes[idx].valoff;
+  len = nodes[idx].vallen;
+  if (len < 1) { return -1; }
+  c = src[off] & 255;
+  if (c == 45) { neg = 1; i = 1; }
+  while (i < len) {
+    c = src[off + i] & 255;
+    if (c == 46) { break; }
+    if (c < 48 || c > 57) { return -1; }
+    if (v > 214748364) { v = 2147483647; }
+    else { v = v * 10 + (c - 48); }
+    if (v > 2147483647) { v = 2147483647; }
+    i = i + 1;
+  }
+  if (neg == 1) { v = 0 - v; }
+  return v;
+}

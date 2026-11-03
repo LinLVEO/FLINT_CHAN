@@ -1,0 +1,53 @@
+// f128_proc.fl -- sys_lib §7 进程创建探针（cmd.exe 真起真等，只用系统自带程序）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  proc_run_wait("cmd /c exit 0") == 0（退出码 0 透传）
+//   bit1  proc_run_wait("cmd /c exit 7") == 7（退出码非 0 也透传）
+//   bit2  proc_run_wait("") == -1（空串拒绝）
+//   bit3  proc_run_wait(0) == -1（空指针拒绝，且不崩）
+//   bit4  proc_run_nowait("cmd /c exit 0") > 0（拿到 PID）
+//   bit5  proc_run_nowait 连起两次的 PID 不相等（两次是不同进程）
+//   bit6  proc_run_wait("cmd /c echo hi > nul") == 0（真实命令 + 重定向）
+//   bit7  连续两次 proc_run_wait("cmd /c exit 3") 都 == 3（确定性，不漂）
+//
+// ⚠️ 本探针会真的起 cmd.exe 子进程（都很快退出）；不依赖任何外部程序/网络。
+// cmd 的退出码 = "exit n" 的 n（Windows 口径），所以判据直接比数字。
+include "../../lib/sys_lib.fl"
+
+int main() {
+  int mask = 0;
+  int p1 = 0;
+  int p2 = 0;
+
+  // bit0：退出码 0
+  if (std::proc_run_wait("cmd /c exit 0") == 0) { mask = mask | 1; }
+
+  // bit1：退出码 7 原样透传
+  if (std::proc_run_wait("cmd /c exit 7") == 7) { mask = mask | 2; }
+
+  // bit2：空串必须 -1
+  if (std::proc_run_wait("") == -1) { mask = mask | 4; }
+
+  // bit3：空指针必须 -1，且进程不崩
+  if (std::proc_run_wait(0) == -1) { mask = mask | 8; }
+
+  // bit4：异步档拿到 PID（> 0）
+  p1 = std::proc_run_nowait("cmd /c exit 0");
+  if (p1 > 0) { mask = mask | 16; }
+
+  // bit5：再起一个，PID 必须不同（两个进程同时活着 -> 不会撞号）
+  p2 = std::proc_run_nowait("cmd /c exit 0");
+  if (p1 > 0 && p2 > 0 && p1 != p2) { mask = mask | 32; }
+
+  // bit6：真实命令 + cmd 自己的重定向
+  if (std::proc_run_wait("cmd /c echo hi > nul") == 0) { mask = mask | 64; }
+
+  // bit7：同一条命令连跑两次，退出码都必须是 3
+  if (std::proc_run_wait("cmd /c exit 3") == 3) {
+    if (std::proc_run_wait("cmd /c exit 3") == 3) { mask = mask | 128; }
+  }
+
+  print(["f128 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

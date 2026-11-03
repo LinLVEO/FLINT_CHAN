@@ -1,0 +1,141 @@
+// f132_json.fl -- json_lib 探针：完整 JSON 解析（扁平节点池）
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+//   bit0  解析 {"a":1,"b":[2,3],"c":"hi"} 返回根 0
+//   bit1  根 type==6（object），有 3 个子节点
+//   bit2  键 "a"、type==3（number）、值 1
+//   bit3  键 "b" type==5（array），两个子值 2、3
+//   bit4  键 "c" type==4（string），值 "hi"
+//   bit5  转义：{"s":"a\nb"} → json_str 得 3 字节 a(10)b
+//   bit6  非法 {"a": 返回 -1
+//   bit7  嵌套 {"o":{"x":7}} 取 o.x == 7
+include "../../lib/json_lib.fl"
+
+int f132_len(char *s) {
+  int n = 0;
+  while (s[n] != 0) { n = n + 1; }
+  return n;
+}
+
+// 在对象 obj 的子节点里按键 key 找第一个匹配，返回下标；-1 = 没有
+int f132_find(char *src, struct JNode *nd, int obj, char *key) {
+  char kb[32];
+  int c = std::json_child(nd, obj);
+  int kl = 0;
+  int i = 0;
+  int ok = 0;
+  while (c >= 0) {
+    kl = std::json_key(src, nd, c, kb, 32);
+    if (kl >= 0) {
+      ok = 1;
+      i = 0;
+      while (i < kl) {
+        if (kb[i] != key[i]) { ok = 0; }
+        i = i + 1;
+      }
+      if (key[kl] != 0) { ok = 0; }
+      if (ok == 1) { return c; }
+    }
+    c = std::json_next(nd, c);
+  }
+  return -1;
+}
+
+int main() {
+  struct JNode nd[64];
+  char src[128];
+  char out[64];
+  int mask = 0;
+  int n = 0;
+  int root = 0;
+  int c = 0;
+  int k = 0;
+  int i = 0;
+  int ok = 0;
+
+  // bit0/1/2/3/4：主样例
+  src[0] = 0;
+  {
+    char *s = "{\"a\":1,\"b\":[2,3],\"c\":\"hi\"}";
+    n = f132_len(s);
+    i = 0;
+    while (i <= n) { src[i] = s[i]; i = i + 1; }
+  }
+  root = std::json_parse(src, n, nd, 64);
+  if (root == 0) { mask = mask | 1; }
+
+  if (root == 0 && std::json_type(nd, 0) == 6) {
+    ok = 0;
+    c = std::json_child(nd, 0);
+    while (c >= 0) { ok = ok + 1; c = std::json_next(nd, c); }
+    if (ok == 3) { mask = mask | 2; }
+  }
+
+  if (root == 0) {
+    k = f132_find(src, nd, 0, "a");
+    if (k >= 0 && std::json_type(nd, k) == 3 && std::json_num(src, nd, k) == 1) { mask = mask | 4; }
+    k = f132_find(src, nd, 0, "b");
+    if (k >= 0 && std::json_type(nd, k) == 5) {
+      c = std::json_child(nd, k);
+      if (c >= 0 && std::json_num(src, nd, c) == 2) {
+        c = std::json_next(nd, c);
+        if (c >= 0 && std::json_num(src, nd, c) == 3) { mask = mask | 8; }
+      }
+    }
+    k = f132_find(src, nd, 0, "c");
+    if (k >= 0 && std::json_type(nd, k) == 4) {
+      if (std::json_str(src, nd, k, out, 64) == 2) {
+        if (out[0] == 'h' && out[1] == 'i' && out[2] == 0) { mask = mask | 16; }
+      }
+    }
+  }
+
+  // bit5：转义
+  src[0] = 0;
+  {
+    char *s = "{\"s\":\"a\\nb\"}";
+    n = f132_len(s);
+    i = 0;
+    while (i <= n) { src[i] = s[i]; i = i + 1; }
+  }
+  root = std::json_parse(src, n, nd, 64);
+  if (root == 0) {
+    k = f132_find(src, nd, 0, "s");
+    if (k >= 0) {
+      if (std::json_str(src, nd, k, out, 64) == 3) {
+        if (out[0] == 'a' && out[1] == 10 && out[2] == 'b') { mask = mask | 32; }
+      }
+    }
+  }
+
+  // bit6：非法 JSON
+  src[0] = 0;
+  {
+    char *s = "{\"a\":";
+    n = f132_len(s);
+    i = 0;
+    while (i <= n) { src[i] = s[i]; i = i + 1; }
+  }
+  if (std::json_parse(src, n, nd, 64) == -1) { mask = mask | 64; }
+
+  // bit7：嵌套
+  src[0] = 0;
+  {
+    char *s = "{\"o\":{\"x\":7}}";
+    n = f132_len(s);
+    i = 0;
+    while (i <= n) { src[i] = s[i]; i = i + 1; }
+  }
+  root = std::json_parse(src, n, nd, 64);
+  if (root == 0) {
+    k = f132_find(src, nd, 0, "o");
+    if (k >= 0 && std::json_type(nd, k) == 6) {
+      k = f132_find(src, nd, k, "x");
+      if (k >= 0 && std::json_num(src, nd, k) == 7) { mask = mask | 128; }
+    }
+  }
+
+  print(["f132 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

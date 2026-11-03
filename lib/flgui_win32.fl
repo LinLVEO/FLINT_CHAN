@@ -52,6 +52,10 @@ api user32 int MapVirtualKeyA(int, int);
 //     真正吃 +1 的是 `MsgWaitForMultipleObjects` ⇒ `m2_float` 链 **95/96（余量 1）**。
 //     ⇒ **加"新名字"的声明前先 `objdump -p <产物>` 数导入条目**；顶爆**只在 `m2_float` 那条链先炸**。
 api kernel32 int GetTickCount();
+// 2026-11-02：计时器粒度提到 1ms（默认 15.6ms 会让「等一帧」变成 1~15.6ms 的随机值，
+//   游戏跑起来就是「一会儿快一会儿慢」）。winmm 的 timeBeginPeriod 是进程级设置。
+api winmm int timeBeginPeriod(int);
+api winmm int timeEndPeriod(int);
 api user32 int MsgWaitForMultipleObjects(int, int, int, int, int);
 // ===== M4e（2026-09-27）：**帧率档位**的另一条后端 —— 跟屏幕合成节拍 =====
 //   `DwmFlush()`（dwmapi.dll）等下一次屏幕合成（本机屏幕 144Hz ⇒ 实测帧周期 **6.94ms**、抖动 ±0.6ms、CPU 2.5% 单核）。
@@ -245,6 +249,20 @@ int gui_win_dpi_apply(struct GuiCtx *c) {
 // ⚠️ `kbd` = 建窗档位（0 = 纯后台档，1 = 键盘档）——**由建窗函数写死、不由调用方直接填**：
 //    2026-09-23 探针 `tmp\m4c\uninit2.fl` 实测（双端 3/3）：**局部 struct 字段不会被清零**
 //    （脏栈后读回上一轮的 999）⇒ 若让调用方"忘了填就用默认"，读到的是垃圾值 —— 档位必须是显式的参数。
+// 计时器粒度开关（2026-11-02）：on=1 调 timeBeginPeriod(1)，并把「格」的标定清零，
+// 让下一次 gui_win_frame_wait 重新测 —— 粒度从 15.6ms 变成 1ms 后，帧周期才稳得住。
+// 为什么必须在**第一次 frame_wait 之前**调：gui_win_tick 只标定一次（见下面注释）。
+int gui_win_timer_hi(int on) {
+  if (on == 1) {
+    timeBeginPeriod(1);
+    gui_win_tick = 0;
+    gui_win_fend = 0;
+  } else {
+    timeEndPeriod(1);
+  }
+  return 1;
+}
+
 // ===== M4e：帧率限速器的**模块级状态**（用法/理由见下方 gui_win_frame_wait）=====
 //   为什么放模块级而不是塞进 `GuiWin`：m2_float 那条链**不用 GuiWin**（老路自建窗口）⇒ 挂 GuiWin 就等于
 //   "只有新式 app 能限速"。放这里 ⇒ 谁都能调同一个入口（同族纪律：一个入口，别各写各的）。
@@ -1181,6 +1199,29 @@ int gui_win_wait(int ms) {
   return 0;
 }
 
+// 等够 ms —— **被输入消息提前唤醒后继续等剩余**（2026-11-02 库层修复：持续信号下不变速）。
+// 为什么必须有它：`gui_win_wait` 的 MsgWait 语义是「队列里没有输入才睡」——**按住键/持续鼠标时每帧的等待被截短**，
+//   帧周期变短；而游戏物理/动画是固定步长（每帧 +1）⇒ 整体加速。旧 `gui_win_frame_wait` 直接调 `gui_win_wait(rem)`，
+//   于是「按住方向键 = 游戏变快」（用户 2026-11-02 再次复现的老问题）。
+// 修法：把「睡够 ms」变成循环 —— 每次被消息唤醒就重算剩余、继续等；消息本身**不消费**（照旧留在队列里给 Pump）。
+// 代价：被唤醒后到目标时刻之间是短暂忙等（一帧就几条输入消息），CPU 增量可忽略；
+//   帧周期因此不再受"有没有输入"影响，物理步进重新稳定。
+// 边界：`GetTickCount` 量化到系统定时器粒度（≈15.6ms）——ms 小于一格时，第一次 sleep 就跨一格 = 原口径不变。
+int gui_win_wait_full(int ms) {
+  int t0 = 0;
+  int now = 0;
+  int rem = 0;
+  if (ms <= 0) { return 0; }
+  t0 = GetTickCount();
+  while (1) {
+    now = GetTickCount();
+    rem = ms - (now - t0);
+    if (rem <= 0) { break; }
+    gui_win_wait(rem);
+  }
+  return 0;
+}
+
 // ===== M4e：帧率限速（**唯一"等完这一帧"入口**，在每帧"上屏之后"调一次）=====
 // 为什么不是 `gui_win_wait(16)`（M4d 及以前的写法）：**固定等待值在粒度面前必翻车** ——
 //   ① 要 16ms ⇒ 被向上取整成 2 格（31.2ms）⇒ 只有 32.6fps；
@@ -1234,7 +1275,7 @@ int gui_win_frame_wait(struct GuiCtx *c) {
   //   ⇒ 顺带两条保证：① 请求值永不为 0（**天生不会空转**，粒度变成 1ms 时也只是 wait(1)=1ms）；
   //     ② 粒度细到 1ms 时同一个式子自动变精确（60fps ⇒ 16 格 ⇒ wait(16) = 16ms）。
   rem = (ticks - 1) * gui_win_tick + 1;
-  if (rem > 0) { gui_win_wait(rem); }
+  if (rem > 0) { gui_win_wait_full(rem); }   // 被输入消息唤醒后继续等剩余（持续信号不变速）
   gui_win_fend = GetTickCount();
   return 1;
 }

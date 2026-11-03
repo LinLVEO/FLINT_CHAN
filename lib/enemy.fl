@@ -5,6 +5,9 @@
 // 转移只看与玩家的距离（简单、可测、无随机）：
 //   dist < 16  -> 攻击；dist < 48 -> 追击；否则巡逻；死亡不可逆。
 // 为什么不做"视野/寻路"：M5 第一版只要"会动、会追、会打"，复杂 AI 留给内容层。
+// v2.15.0：状态枚举——给 switch 的 case 标签用（值与上面的 0/1/2/3 一字不差）。
+enum ESt { ST_PATROL, ST_CHASE, ST_ATK, ST_DEAD }
+
 int enemy_next_state(int state, int dist) {
   if (state == 3) { return 3; }
   if (dist < 16) { return 2; }

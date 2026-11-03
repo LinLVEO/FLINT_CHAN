@@ -1,0 +1,112 @@
+// f111_actor2.fl -- 第 2 个可玩角色（hero2）：精灵尺寸/帧数 + actor2 动画入口
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  sprite_hero2_w()==16、h()==16、frames()==3（3 帧：站/走/攻）
+//   bit1  load 成功 + 透明角落（buf[0]/buf[255]==0）+ 金色角 buf[18]==6
+//   bit2  站（state 0）任意 tick -> 帧 0（含大 tick）
+//   bit3  走前半段 tick 0/7 -> 帧 1，tick 16（下一轮）-> 帧 1
+//   bit4  走后半段 tick 8/15/24 -> 帧 2
+//   bit5  攻击（state 2）tick 0/17 -> 帧 2
+//   bit6  状态切换：state_for(0/1/-1) 与 state 0/1/2 在同一 tick 下的帧各异
+//   bit7  帧回绕 + 连续 tick 序列：tick 0..4095 与公式一致、序列两次相同、
+//         大 tick（999999 / 2000000000）不越界（帧只能是 1 或 2）
+include "../../lib/actor2.fl"
+include "../../games/huiye/hero2_sprite_data.fl"
+
+int main() {
+  int buf[768];
+  int seq[16];
+  int mask = 0;
+  int f = 0;
+  int t = 0;
+  int ok = 0;
+
+  if (sprite_hero2_w() == 16) {
+    if (sprite_hero2_h() == 16) {
+      if (sprite_hero2_frames() == 3) { mask = mask | 1; }
+    }
+  }
+
+  if (sprite_hero2_load(buf) == 1) {
+    if (buf[0] == 0) {
+      if (buf[255] == 0) {
+        if (buf[18] == 6) { mask = mask | 2; }
+      }
+    }
+  }
+
+  if (actor2_frame(0, 0) == 0) {
+    if (actor2_frame(0, 999999) == 0) { mask = mask | 4; }
+  }
+
+  if (actor2_frame(1, 0) == 1) {
+    if (actor2_frame(1, 7) == 1) {
+      if (actor2_frame(1, 16) == 1) { mask = mask | 8; }
+    }
+  }
+
+  if (actor2_frame(1, 8) == 2) {
+    if (actor2_frame(1, 15) == 2) {
+      if (actor2_frame(1, 24) == 2) { mask = mask | 16; }
+    }
+  }
+
+  if (actor2_frame(2, 0) == 2) {
+    if (actor2_frame(2, 17) == 2) { mask = mask | 32; }
+  }
+
+  if (actor2_state_for(0) == 0) {
+    if (actor2_state_for(1) == 1) {
+      if (actor2_state_for(-1) == 1) {
+        if (actor2_frame(0, 5) == 0) {
+          if (actor2_frame(1, 5) == 1) {
+            if (actor2_frame(2, 5) == 2) { mask = mask | 64; }
+          }
+        }
+      }
+    }
+  }
+
+  // bit7: 连续 tick 序列（两次必须一致）+ 长跑不越界 + 大 tick 回绕
+  ok = 1;
+  t = 0;
+  while (t < 16) {
+    seq[t] = actor2_frame(1, t);
+    if ((t / 8) % 2 == 0) {
+      if (seq[t] != 1) { ok = 0; }
+    } else {
+      if (seq[t] != 2) { ok = 0; }
+    }
+    t = t + 1;
+  }
+  t = 0;
+  while (t < 16) {
+    if (actor2_frame(1, t) != seq[t]) { ok = 0; }
+    t = t + 1;
+  }
+  t = 0;
+  while (t < 4096) {
+    f = actor2_frame(1, t);
+    if ((t / 8) % 2 == 0) {
+      if (f != 1) { ok = 0; }
+    } else {
+      if (f != 2) { ok = 0; }
+    }
+    t = t + 1;
+  }
+  f = actor2_frame(1, 999999);
+  if (f != 1) {
+    if (f != 2) { ok = 0; }
+  }
+  f = actor2_frame(1, 2000000000);
+  if (f != 1) {
+    if (f != 2) { ok = 0; }
+  }
+  f = actor2_frame(2, 2000000000);
+  if (f != 2) { ok = 0; }
+  if (ok == 1) { mask = mask | 128; }
+
+  print(["f111 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

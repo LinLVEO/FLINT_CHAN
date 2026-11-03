@@ -1,0 +1,95 @@
+// f117_base64.fl -- base64_lib 探针：8 位掩码全亮（255）→ 退出 42
+// 判据（全部真跑，期望值均为实测值，不是手推）：
+//   bit0  空输入编码结果长度 0（返回 0，dst[0] = 0）
+//   bit1  "Man" 编成 "TWFu"（逐字符比）
+//   bit2  "Ma" 编成 "TWE="（含 padding）
+//   bit3  "M" 编成 "TQ=="
+//   bit4  往返：二进制 {0,1,2,250,251,255}（char 数组 + 显式长度）编码再解码，长度与逐字节都相同
+//   bit5  非法字符：解码 "T@==" 返回 -1
+//   bit6  容量不足：cap=1 编码 "Man" 返回 -1，且 dst 一个字节都没被写
+//   bit7  b64_len 与 encode 实际返回值一致（n=0..6）
+include "../../lib/codec_lib.fl"
+
+// 逐字符比两段 0 结尾串：相等 1 / 不等 0
+int f117_eq(char *a, char *b) {
+  int i = 0;
+  while (a[i] != 0 && b[i] != 0) {
+    if (a[i] != b[i]) { return 0; }
+    i = i + 1;
+  }
+  if (a[i] != b[i]) { return 0; }
+  return 1;
+}
+
+int main() {
+  char e[64];
+  char d[16];
+  char bin[6];
+  int mask = 0;
+  int r = 0;
+  int n = 0;
+  int i = 0;
+  int ok = 1;
+  int bl = 0;
+  int br = 0;
+
+  // bit0：空输入编码结果长度 0（且补了 NUL）
+  r = std::b64_encode("", 0, e, 64);
+  if (r == 0 && e[0] == 0) { mask = mask | 1; }
+
+  // bit1："Man" → "TWFu"（实测 84 87 70 117）
+  r = std::b64_encode("Man", 3, e, 64);
+  if (r == 4 && f117_eq(e, "TWFu") == 1) { mask = mask | 2; }
+
+  // bit2："Ma" → "TWE="（含 padding，实测 84 87 69 61）
+  r = std::b64_encode("Ma", 2, e, 64);
+  if (r == 4 && f117_eq(e, "TWE=") == 1) { mask = mask | 4; }
+
+  // bit3："M" → "TQ=="（实测 84 81 61 61）
+  r = std::b64_encode("M", 1, e, 64);
+  if (r == 4 && f117_eq(e, "TQ==") == 1) { mask = mask | 8; }
+
+  // bit4：二进制往返（内嵌 0 字节；显式长度，不查 strlen）
+  bin[0] = 0;
+  bin[1] = 1;
+  bin[2] = 2;
+  bin[3] = 250;
+  bin[4] = 251;
+  bin[5] = 255;
+  r = std::b64_encode(bin, 6, e, 64);
+  if (r == 8 && f117_eq(e, "AAEC+vv/") == 1) {
+    n = std::b64_decode(e, r, d, 16);
+    if (n == 6) {
+      ok = 1;
+      i = 0;
+      while (i < 6) {
+        if ((d[i] & 255) != (bin[i] & 255)) { ok = 0; }
+        i = i + 1;
+      }
+      if (ok == 1) { mask = mask | 16; }
+    }
+  }
+
+  // bit5：非法字符 '@' → -1（不静默）
+  if (std::b64_decode("T@==", 4, d, 16) == -1) { mask = mask | 32; }
+
+  // bit6：cap=1 编码 "Man"（需要 5 字节）→ -1，且一个字节都不写
+  e[0] = 'Z';
+  r = std::b64_encode("Man", 3, e, 1);
+  if (r == -1 && e[0] == 'Z') { mask = mask | 64; }
+
+  // bit7：n=0..6，b64_len 必须等于 encode 的实际返回值
+  ok = 1;
+  i = 0;
+  while (i <= 6) {
+    bl = std::b64_len(i);
+    br = std::b64_encode("ABCDEF", i, e, 64);
+    if (bl != br) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { mask = mask | 128; }
+
+  print(["f117 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

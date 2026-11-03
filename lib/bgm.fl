@@ -1,0 +1,69 @@
+// bgm.fl -- 背景音乐（BGM）播放封装：循环播放 + 播放状态
+//
+// 用法：include "audio.fl" 由本文件代劳，直接 include "bgm.fl" 即可。
+// 路线：复用 audio.fl 的 PlaySoundA；BGM 一律走 SND_LOOP 循环档。
+// 判据：bgm_play 返回非 0 = 已开始；bgm_stop 返回非 0 = 已停止（PlaySound 口径）；
+//   bgm_playing() 是"本库记录的播放状态"，不是从声卡查询的实时状态。
+//
+// ---- 为什么本版没有 bgm_volume(int 0..100) ----
+// PlaySound 没有音量参数，要做音量必须换 waveOut，工作量不止"多几条导入"：
+//   1) 新增 waveOutOpen / waveOutPrepareHeader / waveOutWrite / waveOutPause /
+//      waveOutReset / waveOutClose / waveOutSetVolume / waveOutUnprepareHeader 等导入；
+//   2) 自己声明并填 WAVEFORMATEX（18 字节）与 WAVEHDR（64 位下 48 字节）两个结构；
+//   3) 自己解析 RIFF/WAVE（fmt + data），把 PCM 数据读进内存并保证整个播放期间不释放；
+//   4) 循环要么注册 CALLBACK_FUNCTION（回调签名、线程模型要单独验证），要么在游戏循环里
+//      轮询 WAVEHDR.dwFlags 的 WHDR_DONE 后重新 waveOutWrite —— 本库没有 tick API，
+//      后者必须让调用方每帧调一次，接口就不再是现在这个形状；
+//   5) waveOut 设备句柄与 PlaySound 会抢同一个输出设备，两套后端不能同时用。
+// waveOutSetVolume(0, ...) 改的是系统总音量，会波及其他程序，不能当折中。
+// 结论：这是一个独立的"第二音频后端"，本刀不做，避免硬塞半成品。
+// 边界：只有 开 / 停 / 状态；要调音量请用系统音量，或等后续 waveOut 后端。
+//
+// 其他边界：
+//   - bgm_stop() 走 PlaySound(NULL)，会停掉本进程所有 PlaySound 声音（音效也停），
+//     不只是 BGM；音效与 BGM 要并行请用后续 waveOut 混音后端。
+//   - 若调用方绕过本库直接 audio_play/audio_stop，g_bgm_on 会失真。
+//   - BGM 是 SND_LOOP 无限循环，所以"自然播完"不会发生；只有 bgm_stop 才把状态清 0。
+//   - PlaySoundA 异步档对"文件不存在"仍可能返回非 0（系统队列先接单），所以 bgm_play
+//     先用 GetFileAttributesA 预检；不存在/不可读直接返回 0，不碰播放状态。
+
+include "audio.fl"
+
+api kernel32 int GetFileAttributesA(ptr);
+
+// 播放状态：1 = 本库最后一次 bgm_play 成功且之后没 stop；0 = 未播放/已停止/播放失败。
+int g_bgm_on = 0;
+
+// 循环播放 WAV。返回非 0 = PlaySound 已接受并开始播放；0 = 文件不存在/格式不支持。
+int bgm_play(char *path) {
+  int r = 0;
+  int attr = 0;
+  if (path == 0) {
+    g_bgm_on = 0;
+    return 0;
+  }
+  attr = GetFileAttributesA(path);
+  if (attr == 0 - 1) {          // INVALID_FILE_ATTRIBUTES
+    g_bgm_on = 0;
+    return 0;
+  }
+  r = audio_play_loop(path);
+  if (r != 0) {
+    g_bgm_on = 1;
+  } else {
+    g_bgm_on = 0;
+  }
+  return r;
+}
+
+// 停止 BGM（以及本进程其他 PlaySound 声音）。返回非 0 = 已停止。
+int bgm_stop() {
+  int r = audio_stop();
+  g_bgm_on = 0;
+  return r;
+}
+
+// 1 = 本库记录的 BGM 正在播；0 = 没在播。
+int bgm_playing() {
+  return g_bgm_on;
+}

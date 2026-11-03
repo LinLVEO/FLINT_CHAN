@@ -1,0 +1,91 @@
+// camera.fl -- 2D 相机：死区跟随 + 世界边界 clamp
+//
+// 用法：include "camera.fl"（与本文件同目录；也可 include "../../lib/camera.fl"）
+// 依赖：无（纯整数坐标数学，不碰 gfx、不建窗，逻辑层可直接跑）
+//
+// 口径（2026-11-02 立）：
+//   x / y   = 视口左上角在世界里的像素坐标（可直接当 grid_draw 的 cam_x/cam_y）
+//   vw / vh = 视口宽高（像素，必须 > 0）
+//   dx / dy = 死区半径（半宽/半高，>= 0）
+//
+// 三条设计：
+//   ① 相机中心 = (x + vw/2, y + vh/2)。整数除法，奇数宽高时中心偏左上 1px ——
+//      全局统一口径，不随调用顺序漂移，好复现。
+//   ② 死区 = 以相机中心为心、半径 dx/dy 的矩形（**含边界**）：目标在框内相机一动不动；
+//      目标越界时相机**正好**追到「目标贴在死区边」的位置，不做平滑/惯性
+//      （要缓动/前瞻就由调用方在 tx/ty 上做，相机层只负责确定性的硬跟随）。
+//   ③ 最后 clamp 到 [0, ww-vw] / [0, wh-vh]；**世界比视口小时固定为 0**（左上对齐，不居中），
+//      这样 x/y 永远是非负的，tile 地图/精灵按 cam 偏移直接减，不会算出负屏幕坐标。
+//
+// 为什么单独拆出来：apps\tower\main.fl 原来手写 `cam_x = hero.px - 240` 再 clamp 0..maxcam，
+//   换地图/换视口就得重抄一遍；「死区 + 边界」是纯坐标数学，与 tile/精灵/渲染无关。
+struct Camera { int x; int y; int vw; int vh; int dx; int dy; }
+
+// 初始化：x/y 置 0，其余按参数落位。1 = 成功，0 = 参数非法（不做任何写）。
+// 非法：c == 0 / vw <= 0 / vh <= 0 / dx < 0 / dy < 0。
+int camera_init(struct Camera *c, int vw, int vh, int dx, int dy) {
+  if (c == 0) { return 0; }
+  if (vw <= 0) { return 0; }
+  if (vh <= 0) { return 0; }
+  if (dx < 0) { return 0; }
+  if (dy < 0) { return 0; }
+  c->x = 0;
+  c->y = 0;
+  c->vw = vw;
+  c->vh = vh;
+  c->dx = dx;
+  c->dy = dy;
+  return 1;
+}
+
+// 跟随一步：目标 (tx,ty) 是世界坐标，参考系是**相机中心**。
+// 流程：① 两轴各自看目标是否越过死区（严格大于半径才算越界，边界上不动）；
+//       ② 越界就把相机挪到「目标正好压在死区边」的位置；
+//       ③ 两轴分别 clamp：世界比视口小 -> 0，否则 [0, ww-vw]。
+// 返回 0（按库约定；c == 0 或相机字段非法时同样返回 0，不做写）。
+int camera_follow(struct Camera *c, int tx, int ty, int ww, int wh) {
+  int cx = 0;
+  int cy = 0;
+  int nx = 0;
+  int ny = 0;
+  if (c == 0) { return 0; }
+  if (c->vw <= 0) { return 0; }
+  if (c->vh <= 0) { return 0; }
+  cx = c->x + c->vw / 2;
+  cy = c->y + c->vh / 2;
+  nx = c->x;
+  ny = c->y;
+  if (tx - cx > c->dx) { nx = tx - c->dx - c->vw / 2; }
+  if (cx - tx > c->dx) { nx = tx + c->dx - c->vw / 2; }
+  if (ty - cy > c->dy) { ny = ty - c->dy - c->vh / 2; }
+  if (cy - ty > c->dy) { ny = ty + c->dy - c->vh / 2; }
+  if (ww <= c->vw) {
+    nx = 0;
+  } else {
+    if (nx < 0) { nx = 0; }
+    if (nx > ww - c->vw) { nx = ww - c->vw; }
+  }
+  if (wh <= c->vh) {
+    ny = 0;
+  } else {
+    if (ny < 0) { ny = 0; }
+    if (ny > wh - c->vh) { ny = wh - c->vh; }
+  }
+  c->x = nx;
+  c->y = ny;
+  return 0;
+}
+
+// 读相机中心 x（画准心/算视差/调试用）。c == 0 返回 0。
+int camera_cx(struct Camera *c) {
+  if (c == 0) { return 0; }
+  if (c->vw <= 0) { return c->x; }
+  return c->x + c->vw / 2;
+}
+
+// 读相机中心 y。c == 0 返回 0。
+int camera_cy(struct Camera *c) {
+  if (c == 0) { return 0; }
+  if (c->vh <= 0) { return c->y; }
+  return c->y + c->vh / 2;
+}

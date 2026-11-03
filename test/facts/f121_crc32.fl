@@ -1,0 +1,59 @@
+// f121_crc32.fl -- crc32_lib 探针：8 位掩码全亮（255）→ 退出 42
+// 判据（全部真跑；期望值 = 临时程序实测值，且逐个与 Python zlib.crc32 对过）：
+//   bit0  空输入：crc32("", 0) == 0
+//   bit1  标准校验值：crc32("123456789", 9) == 0xCBF43926（有符号位型 = -873187034）
+//   bit2  两入口恒等：crc32("1234", 4) == crc32_update(0, "1234", 4)
+//   bit3  增量拼接：update(0,"1234") → update(r,"56789") == crc32("123456789", 9)
+//   bit4  内嵌 0 字节：4 个 0x00 的 crc32 == 0x2144DF1C，且 != 空输入的 0（n 被尊重，不查 NUL）
+//   bit5  不同输入不同值：crc32("abc", 3) != crc32("abd", 3)
+//   bit6  单字节 0x00：crc32({0x00}, 1) == 0xD202EF8D（标准值）
+//   bit7  确定性：同一输入连续两次结果相同
+include "../../lib/codec_lib.fl"
+
+int main() {
+  int mask = 0;
+  int a = 0;
+  int b = 0;
+  char z4[4];
+  char z1[1];
+
+  // bit0：空输入 → 0
+  if (std::crc32("", 0) == 0) { mask = mask | 1; }
+
+  // bit1："123456789" 的标准 CRC-32（0x CBF4 3926；实测 -873187034）
+  if (std::crc32("123456789", 9) == 0xCBF43926) { mask = mask | 2; }
+
+  // bit2：两条入口给同一个值
+  a = std::crc32("1234", 4);
+  b = std::crc32_update(0, "1234", 4);
+  if (a == b) { mask = mask | 4; }
+
+  // bit3：增量拼接（先 "1234" 再 "56789"）== 一次算完 "123456789"
+  a = std::crc32_update(0, "1234", 4);
+  a = std::crc32_update(a, "56789", 5);
+  if (a == std::crc32("123456789", 9)) { mask = mask | 8; }
+
+  // bit4：内嵌 0 字节 —— 4 个 0x00 的 CRC（0x2144DF1C）既非 0、也不同于空输入
+  z4[0] = 0;
+  z4[1] = 0;
+  z4[2] = 0;
+  z4[3] = 0;
+  a = std::crc32(z4, 4);
+  if (a == 0x2144DF1C && a != std::crc32("", 0)) { mask = mask | 16; }
+
+  // bit5：一位之差必须改值
+  if (std::crc32("abc", 3) != std::crc32("abd", 3)) { mask = mask | 32; }
+
+  // bit6：单字节 0x00 的标准 CRC-32（0xD202EF8D）
+  z1[0] = 0;
+  if (std::crc32(z1, 1) == 0xD202EF8D) { mask = mask | 64; }
+
+  // bit7：确定性（同一输入两次结果相同）
+  a = std::crc32("123456789", 9);
+  b = std::crc32("123456789", 9);
+  if (a == b) { mask = mask | 128; }
+
+  print(["f121 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

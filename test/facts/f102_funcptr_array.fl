@@ -1,0 +1,44 @@
+// f102_funcptr_array.fl -- 函数指针数组（v2.6.0）
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+//   bit0  整体初始化 {&add,&sub} + 下标调用 ops[0]
+//   bit1  第二个元素 ops[1] 指向不同函数（不是同一个）
+//   bit2  运行时按下标赋值 ops[0] = &mul; 后调用生效
+//   bit3  元素顺序正确（不是反的：ops[0] 必须是先写进去的那个）
+//   bit4  参数传参正确（形参值原样进入被调函数）
+//   bit5  与直接调用同一函数结果相同（独立裁判）
+//   bit6  长度 3 的数组，取中间元素
+//   bit7  数组元素不被相邻写操作踩坏（写 ops[2] 不影响 ops[0]）
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
+int mul(int a, int b) { return a * b; }
+
+int apply(int (*cb)(int, int), int x, int y) { return cb(x, y); }
+
+int main() {
+  int mask = 0;
+
+  int (*ops[2])(int, int) = {&add, &sub};
+  if (ops[0](7, 3) == 10) { mask = mask | 1; }
+  if (ops[1](7, 3) == 4) { mask = mask | 2; }
+  if (ops[0](7, 3) != ops[1](7, 3)) { mask = mask | 4; }
+  if (ops[0](2, 5) == 7 && ops[0](1, 1) == 2) { mask = mask | 8; }
+
+  ops[0] = &mul;
+  if (ops[0](6, 7) == 42) { mask = mask | 16; }
+
+  if (ops[0](6, 7) == apply(&mul, 6, 7)) { mask = mask | 32; }
+
+  int (*ops3[3])(int, int);
+  ops3[0] = &add;
+  ops3[1] = &sub;
+  ops3[2] = &mul;
+  if (ops3[1](9, 4) == 5) { mask = mask | 64; }
+
+  ops3[2] = &add;
+  if (ops3[0](9, 4) == 13) { mask = mask | 128; }
+
+  print(["f102 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

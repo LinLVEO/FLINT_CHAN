@@ -23,7 +23,7 @@ disagree, the probes win.
 - 前端到 PE 全部自产：不借 LLVM / 汇编器 / 链接器 / C 运行时；
 - **自举**：`boot\` 里的自举编译器已到不动点（两代产物逐字节相同，<!--fact:boot-verify-->304/304<!--/fact--> 项自举验证全过）；
 - **语言面**（v<!--fact:version-->0.1.0<!--/fact-->，还在加）：C 子集 ＋ `enum` 常量组、二维数组、struct 值字段嵌套、局部数组整体初始化、`try` 错误传播、C 风格转型、`-strict` 诊断档；
-- **判据**：条数见 `test\边界探针.ps1`（当前 <!--fact:probe-cases-->58<!--/fact--> 条：支持 <!--fact:probe-ok-->25<!--/fact--> ／ 明确拒绝 <!--fact:probe-wall-->33<!--/fact--> ／ 静默缺口 <!--fact:probe-gap-->0<!--/fact-->）。
+- **判据**：条数见 `test\边界探针.ps1`（当前 <!--fact:probe-cases-->58<!--/fact--> 条：支持 <!--fact:probe-ok-->28<!--/fact--> ／ 明确拒绝 <!--fact:probe-wall-->30<!--/fact--> ／ 静默缺口 <!--fact:probe-gap-->0<!--/fact-->）。
 
 ## 阅读顺序
 

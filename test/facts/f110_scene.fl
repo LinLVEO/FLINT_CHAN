@@ -1,0 +1,217 @@
+// f110_scene.fl -- 场景 / 塔层切换（lib\scene.fl）：多层地图 + 传送门 + 出生点 + 相机重置
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+//
+// 跑法：仓库根目录下，cwd 必须是仓库根（地图是相对路径，和 f072 同口径）。
+// 地图：floor 1 = apps/tower/map.txt（60x17），floor 2 = games/huiye/floor2.txt（32x17）。
+// tile 约定：0 空 / 1 石砖 / 9 单向平台 / 7 出生标记 / 8 传送门（7/8 是数据标记，非碰撞）。
+//
+//   bit0  加载成功：init 后 ok=0；两层都能装（返回 1 且 ok=1）；非法参数全拒（s==0、
+//         path==0、mw<=0、mh<=0、mw*mh>1024）且**不写** Scene
+//   bit1  尺寸正确：floor1 60x17、floor2 32x17（mw/mh 与 scene_size 一致）；没这层返回 0
+//   bit2  地板格值对：两层的地面行/侧墙/平台/空位逐点核（含 9 与 1 的区别）
+//   bit3  切层：scene_next 后 floor 1->2、mw 60->32、地图内容真的变了（(6,4) 0->1、
+//         原图的 (42,6) 越界变 -1）；相机先弄脏到 999 后 scene_reset_camera 按新层落位 (0,2)
+//   bit4  不存在的层：顶层再切 0 且 s 不动；floor 0/3 装 0 且 s 不动；坏路径 0 且 s 不动；
+//         s==0 一律 0（不崩）
+//   bit5  传送点 tile 判定：门格 (28,15) 的四角/中心都 1、邻格 0、地板 0、floor1 无门全 0
+//   bit6  出生点：floor2 = 7 标记格的左上角 (48,240)（3,15 格）；floor1 无标记走兜底 (32,32)
+//   bit7  越界坐标不崩：负/超远/地图外的像素与格坐标全返回 0/-1；空指针相机重置不写；
+//         两个 Scene 跑同一序列逐值一致（确定性）
+include "../../lib/scene.fl"
+
+int main() {
+  struct Scene s;
+  struct Scene s2;
+  struct Scene *ns = &s;   // 先指 s（struct 指针初值只能给地址值），下面再置 0 测空指针
+  struct Camera cam;
+  struct Camera cam2;
+  char *np = 0;
+  int mask = 0;
+  int ok = 0;
+  int w = 0;
+  int h = 0;
+
+  ns = 0;   // 空指针（赋值可以，初值不行）
+
+  // ---- bit0：加载成功 / 非法参数拒 ----
+  ok = 1;
+  if (scene_init(&s) != 1) { ok = 0; }
+  if (s.ok != 0) { ok = 0; }
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (s.ok != 1) { ok = 0; }
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (s.ok != 1) { ok = 0; }
+  // 非法：全部 0
+  if (scene_init(ns) != 0) { ok = 0; }
+  if (scene_load(ns, "apps/tower/map.txt", 60, 17, 1) != 0) { ok = 0; }
+  if (scene_load(&s, np, 60, 17, 1) != 0) { ok = 0; }
+  if (scene_load(&s, "apps/tower/map.txt", 0, 17, 1) != 0) { ok = 0; }
+  if (scene_load(&s, "apps/tower/map.txt", 60, 0, 1) != 0) { ok = 0; }
+  if (scene_load(&s, "apps/tower/map.txt", 64, 17, 1) != 0) { ok = 0; }   // 1088 > 1024
+  // 上面几次失败不能把已装好的 2 层弄脏
+  if (s.ok != 1) { ok = 0; }
+  if (s.floor != 2) { ok = 0; }
+  if (s.mw != 32) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 1) { ok = 0; }
+  if (ok == 1) { mask = mask | 1; }
+
+  // ---- bit1：尺寸正确 ----
+  ok = 1;
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (s.mw != 60) { ok = 0; }
+  if (s.mh != 17) { ok = 0; }
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (s.mw != 32) { ok = 0; }
+  if (s.mh != 17) { ok = 0; }
+  if (scene_size(1, &w, &h) != 1) { ok = 0; }
+  if (w != 60) { ok = 0; }
+  if (h != 17) { ok = 0; }
+  if (scene_size(2, &w, &h) != 1) { ok = 0; }
+  if (w != 32) { ok = 0; }
+  if (h != 17) { ok = 0; }
+  if (scene_size(3, &w, &h) != 0) { ok = 0; }
+  if (scene_count() != 2) { ok = 0; }
+  if (scene_tile_px() != 16) { ok = 0; }
+  if (ok == 1) { mask = mask | 2; }
+
+  // ---- bit2：地板格值对（两层逐点核）----
+  ok = 1;
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (scene_at(&s, 0, 16) != 1) { ok = 0; }     // 地面行
+  if (scene_at(&s, 16, 16) != 1) { ok = 0; }
+  if (scene_at(&s, 59, 16) != 1) { ok = 0; }
+  if (scene_at(&s, 0, 0) != 1) { ok = 0; }      // 左侧墙
+  if (scene_at(&s, 59, 0) != 1) { ok = 0; }     // 右侧墙
+  if (scene_at(&s, 42, 6) != 9) { ok = 0; }     // 单向平台
+  if (scene_at(&s, 26, 9) != 9) { ok = 0; }
+  if (scene_at(&s, 34, 9) != 1) { ok = 0; }     // 石砖平台
+  if (scene_at(&s, 6, 4) != 0) { ok = 0; }      // 空位（2 层同格是 1，见 bit3）
+  if (s.map[16 * 60 + 0] != 1) { ok = 0; }      // 一维下标同口径
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (scene_at(&s, 0, 16) != 1) { ok = 0; }
+  if (scene_at(&s, 16, 16) != 1) { ok = 0; }
+  if (scene_at(&s, 31, 16) != 1) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 1) { ok = 0; }      // 2 层独有石台 6..11
+  if (scene_at(&s, 11, 4) != 1) { ok = 0; }
+  if (scene_at(&s, 17, 7) != 9) { ok = 0; }     // 单向平台 14..21
+  if (scene_at(&s, 24, 10) != 9) { ok = 0; }    // 单向平台 23..28
+  if (scene_at(&s, 22, 13) != 1) { ok = 0; }    // 石台 22..28
+  if (scene_at(&s, 5, 4) != 0) { ok = 0; }
+  if (ok == 1) { mask = mask | 4; }
+
+  // ---- bit3：切层（floor / 尺寸 / 内容都变）+ 相机重置 ----
+  ok = 1;
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 0) { ok = 0; }
+  if (scene_at(&s, 42, 6) != 9) { ok = 0; }
+  if (camera_init(&cam, 480, 270, 40, 0) != 1) { ok = 0; }
+  // 先把相机弄脏，证明 reset 真的重算了（而不是留着旧值）
+  cam.x = 999;
+  cam.y = 999;
+  if (scene_next(&s) != 1) { ok = 0; }
+  if (s.floor != 2) { ok = 0; }
+  if (s.mw != 32) { ok = 0; }
+  if (s.mh != 17) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 1) { ok = 0; }      // 内容变了
+  if (scene_at(&s, 42, 6) != -1) { ok = 0; }    // 旧图的 9 现在越界
+  if (scene_reset_camera(&s, &cam) != 1) { ok = 0; }
+  if (cam.x != 0) { ok = 0; }
+  if (cam.y != 2) { ok = 0; }
+  if (cam.vw != 480) { ok = 0; }                // 相机档不动
+  if (cam.dx != 40) { ok = 0; }
+  if (ok == 1) { mask = mask | 8; }
+
+  // ---- bit4：不存在的层 -> 0 且 s 不动（不崩）----
+  ok = 1;
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (scene_next(&s) != 0) { ok = 0; }          // 2 层是顶层
+  if (s.floor != 2) { ok = 0; }
+  if (s.ok != 1) { ok = 0; }
+  if (s.mw != 32) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 1) { ok = 0; }
+  if (scene_spawn_x(&s) != 48) { ok = 0; }
+  if (scene_load_floor(&s, 3) != 0) { ok = 0; }
+  if (scene_load_floor(&s, 0) != 0) { ok = 0; }
+  if (s.floor != 2) { ok = 0; }
+  if (scene_load(&s, "games/huiye/floor99.txt", 32, 17, 99) != 0) { ok = 0; }
+  if (s.floor != 2) { ok = 0; }
+  if (s.ok != 1) { ok = 0; }
+  if (scene_at(&s, 6, 4) != 1) { ok = 0; }
+  if (scene_path(3) != 0) { ok = 0; }
+  if (scene_next(ns) != 0) { ok = 0; }
+  if (scene_load_floor(ns, 1) != 0) { ok = 0; }
+  if (scene_at(ns, 0, 0) != -1) { ok = 0; }
+  if (scene_teleport_at(ns, 0, 0) != 0) { ok = 0; }
+  if (ok == 1) { mask = mask | 16; }
+
+  // ---- bit5：传送点 tile 判定（2 层门在 28,15 -> 像素 448..463 x 240..255）----
+  ok = 1;
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (scene_teleport_at(&s, 456, 248) != 1) { ok = 0; }   // 中心
+  if (scene_teleport_at(&s, 448, 240) != 1) { ok = 0; }   // 左上角
+  if (scene_teleport_at(&s, 463, 255) != 1) { ok = 0; }   // 右下角
+  if (scene_teleport_at(&s, 464, 248) != 0) { ok = 0; }   // 右邻格 (29,15)
+  if (scene_teleport_at(&s, 447, 248) != 0) { ok = 0; }   // 左邻格 (27,15)
+  if (scene_teleport_at(&s, 456, 224) != 0) { ok = 0; }   // 门上方 (28,14)
+  if (scene_teleport_at(&s, 16, 260) != 0) { ok = 0; }    // 地面砖
+  if (scene_teleport_at(&s, 48, 240) != 0) { ok = 0; }    // 出生标记不是门
+  if (scene_at(&s, 28, 15) != 8) { ok = 0; }              // 格值就是 8
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (scene_teleport_at(&s, 456, 248) != 0) { ok = 0; }   // 1 层没有门
+  if (ok == 1) { mask = mask | 32; }
+
+  // ---- bit6：出生点（7 标记 -> 该格左上角像素）----
+  ok = 1;
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (scene_spawn_x(&s) != 48) { ok = 0; }
+  if (scene_spawn_y(&s) != 240) { ok = 0; }
+  if (scene_at(&s, 3, 15) != 7) { ok = 0; }
+  if (scene_at(&s, 48 / 16, 240 / 16) != 7) { ok = 0; }   // 出生像素落在标记格上
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (scene_spawn_x(&s) != 32) { ok = 0; }                // 无 7 -> 兜底 (32,32)
+  if (scene_spawn_y(&s) != 32) { ok = 0; }
+  if (scene_spawn_x(ns) != 0) { ok = 0; }
+  if (scene_spawn_y(ns) != 0) { ok = 0; }
+  if (ok == 1) { mask = mask | 64; }
+
+  // ---- bit7：越界坐标不崩 + 空指针 + 确定性 ----
+  ok = 1;
+  if (scene_load_floor(&s, 2) != 1) { ok = 0; }
+  if (scene_teleport_at(&s, -1, 0) != 0) { ok = 0; }
+  if (scene_teleport_at(&s, 0, -1) != 0) { ok = 0; }
+  if (scene_teleport_at(&s, -100000, -100000) != 0) { ok = 0; }
+  if (scene_teleport_at(&s, 1000000, 1000000) != 0) { ok = 0; }
+  if (scene_teleport_at(&s, 512, 0) != 0) { ok = 0; }     // x 刚出界（mw*16）
+  if (scene_teleport_at(&s, 0, 272) != 0) { ok = 0; }     // y 刚出界（mh*16）
+  if (scene_at(&s, -1, 0) != -1) { ok = 0; }
+  if (scene_at(&s, 32, 0) != -1) { ok = 0; }
+  if (scene_at(&s, 0, 17) != -1) { ok = 0; }
+  if (scene_at(&s, 1000, 1000) != -1) { ok = 0; }
+  if (scene_to_grid(&s, 0, 1024) != 0) { ok = 0; }
+  if (camera_init(&cam, 480, 270, 40, 0) != 1) { ok = 0; }
+  if (scene_reset_camera(ns, &cam) != 0) { ok = 0; }
+  if (scene_reset_camera(&s, 0) != 0) { ok = 0; }
+  if (cam.x != 0) { ok = 0; }                             // 空指针那次没写相机
+  if (cam.y != 0) { ok = 0; }
+  // 确定性：第二台 Scene 跑同一序列，逐值一致
+  if (scene_init(&s2) != 1) { ok = 0; }
+  if (scene_load_floor(&s2, 1) != 1) { ok = 0; }
+  if (camera_init(&cam2, 480, 270, 40, 0) != 1) { ok = 0; }
+  if (scene_next(&s2) != 1) { ok = 0; }
+  if (scene_reset_camera(&s2, &cam2) != 1) { ok = 0; }
+  if (scene_load_floor(&s, 1) != 1) { ok = 0; }
+  if (scene_next(&s) != 1) { ok = 0; }
+  if (scene_reset_camera(&s, &cam) != 1) { ok = 0; }
+  if (s2.floor != s.floor) { ok = 0; }
+  if (s2.mw != s.mw) { ok = 0; }
+  if (s2.mh != s.mh) { ok = 0; }
+  if (s2.spawn_x != s.spawn_x) { ok = 0; }
+  if (s2.spawn_y != s.spawn_y) { ok = 0; }
+  if (cam2.x != cam.x) { ok = 0; }
+  if (cam2.y != cam.y) { ok = 0; }
+  if (ok == 1) { mask = mask | 128; }
+
+  print(["f110 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

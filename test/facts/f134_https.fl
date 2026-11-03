@@ -1,0 +1,75 @@
+// f134_https.fl -- http_lib §4 HTTPS（WinHTTP）探针
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+// 不依赖外网、不依赖本机 HTTPS 服务：全部走「参数非法 + 连不上」的失败路径 + 纯内存转换。
+//
+//   bit0  https_get("127.0.0.1", 1, "/", &hb) != 0     连不上（失败路径；实测 rc=2 = SendRequest 连不上），不崩
+//   bit1  https_get(0, 443, "/", &hb) != 0             host 空指针（参数非法；实测 rc=1）
+//   bit2  https_get("127.0.0.1", 0, "/", &hb) != 0     port=0 越界（实测 rc=1）
+//        （实测：WinHttpConnect 自己**收** port 0 —— 返回非 NULL、err=0；
+//          所以本库在碰网络前显式拒 port ∉ [1,65535]，判据用「返回非 0」= 我方参数校验）
+//   bit3  空缓冲指针：https_get(..., 0) != 0 且 hb.b==0 的 struct 也 != 0
+//   bit4  http_wide("abc", w, 32) == 8，且 w = 61 00 62 00 63 00 00 00
+//        （字节数**含结尾两字节 0**；这是内部件，探针靠 include 直接调）
+//   bit5  失败路径试过之后 std::https_ready() == 1（WinHttpOpen 成功；区分「网络不通」与「WinHTTP 起不来」）
+//   bit6  两次打到关闭端口都返回非 0（复测：不崩、不重复初始化坏状态）
+//   bit7  失败后 hb->n == 0（先把 hb.n 置 7 当哨兵，证明是函数清掉的）
+//
+// 期望值一律实测（2026-11-03，hlc 0.1.0 / Windows 11；WinHTTP 走系统 winhttp.dll，不自己实现 TLS）。
+include "../../lib/http_lib.fl"
+
+int main() {
+  int mask = 0;
+  char b[64];
+  char w[32];
+  struct HttpBuf hb;
+  struct HttpBuf hb0;
+  int rc0 = 0;
+  int rc6 = 0;
+  int ok = 0;
+
+  hb.b = b;
+  hb.cap = 64;
+  hb.n = 0;
+
+  // bit0：连不上（127.0.0.1:1 无服务）
+  rc0 = std::https_get("127.0.0.1", 1, "/", &hb);
+  if (rc0 != 0) { mask = mask | 1; }
+
+  // bit1：host 空指针
+  if (std::https_get(0, 443, "/", &hb) != 0) { mask = mask | 2; }
+
+  // bit2：port 0 越界（我方先拒；见头部实测说明）
+  if (std::https_get("127.0.0.1", 0, "/", &hb) != 0) { mask = mask | 4; }
+
+  // bit3：空缓冲指针（hb 本身 / hb.b 为 0）
+  ok = 0;
+  if (std::https_get("127.0.0.1", 1, "/", 0) != 0) { ok = ok + 1; }
+  hb0.b = 0;
+  hb0.cap = 64;
+  hb0.n = 0;
+  if (std::https_get("127.0.0.1", 1, "/", &hb0) != 0) { ok = ok + 1; }
+  if (ok == 2) { mask = mask | 8; }
+
+  // bit4：ANSI -> UTF-16LE 字节级判据（"abc" -> a,0,b,0,c,0,0,0 = 8 字节）
+  ok = http_wide("abc", w, 32);
+  if (ok == 8) {
+    if (w[0] == 97 && w[1] == 0 && w[2] == 98 && w[3] == 0 && w[4] == 99 && w[5] == 0 && w[6] == 0 && w[7] == 0) {
+      mask = mask | 16;
+    }
+  }
+
+  // bit5：WinHTTP 初始化缓存（上面失败路径已经跑过 WinHttpOpen）
+  if (std::https_ready() == 1) { mask = mask | 32; }
+
+  // bit6：第二次打到另一个关闭端口（9）——重复调用不崩、仍返回非 0
+  hb.n = 7;
+  rc6 = std::https_get("127.0.0.1", 9, "/", &hb);
+  if (rc6 != 0) { if (rc0 != 0) { mask = mask | 64; } }
+
+  // bit7：失败后 hb->n 被清 0（哨兵 7 应被清掉）
+  if (hb.n == 0) { mask = mask | 128; }
+
+  print(["f134 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

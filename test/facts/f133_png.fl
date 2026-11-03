@@ -1,0 +1,67 @@
+// f133_png.fl -- image_lib §2 PNG/GDI+ 解码探针
+// 判据：8 位掩码全亮（255）-> 退出 42。
+//
+// 用 bmp_save 先造一张 4x3 的图（BMP），再让 GDI+ 通过 png_info/png_load 解码它 ——
+// 不需要外部 PNG 素材，也顺带验证「GDI+ 按文件头识别格式、与扩展名无关」。
+//
+//   bit0  bmp_save("test\\tmp\\f133_src.bmp", src, 4, 3) == 1
+//   bit1  png_info 读回宽 4、高 3
+//   bit2  png_load 返回 48（4*3*4）
+//   bit3  12 个像素的 RGB 与源逐字节相同，A 全是 255（24 位 BMP 无 alpha）
+//   bit4  单点 (3,2) 再验一次（防整体偏移被平均掉）
+//   bit5  png_info 对不存在的文件返回 -1
+//   bit6  png_info 对文本文件返回 -1（GDI+ 解码失败，不崩）
+//   bit7  png_load 给 cap=47 返回 -1（容量不够响亮失败）
+include "../../lib/image_lib.fl"
+
+int main() {
+  char src[48];
+  char out[48];
+  int w = 0;
+  int h = 0;
+  int mask = 0;
+  int i = 0;
+  int n = 0;
+  int ok = 0;
+
+  i = 0;
+  while (i < 12) {
+    src[i * 4] = 10 + i * 3;
+    src[i * 4 + 1] = 20 + i * 5;
+    src[i * 4 + 2] = 30 + i * 7;
+    src[i * 4 + 3] = 255;
+    i = i + 1;
+  }
+
+  if (std::bmp_save("test\\tmp\\f133_src.bmp", src, 4, 3) == 1) { mask = mask | 1; }
+
+  if (std::png_info("test\\tmp\\f133_src.bmp", &w, &h) == 1) {
+    if (w == 4 && h == 3) { mask = mask | 2; }
+  }
+
+  n = std::png_load("test\\tmp\\f133_src.bmp", out, 48);
+  if (n == 48) {
+    ok = 1;
+    i = 0;
+    while (i < 12) {
+      if (out[i * 4] != src[i * 4]) { ok = 0; }
+      if (out[i * 4 + 1] != src[i * 4 + 1]) { ok = 0; }
+      if (out[i * 4 + 2] != src[i * 4 + 2]) { ok = 0; }
+      if (out[i * 4 + 3] != 255) { ok = 0; }
+      i = i + 1;
+    }
+    if (ok == 1) { mask = mask | 4; }
+    mask = mask | 8;                                  // 解码成功本身就是单点判据的前提
+  }
+
+  if (std::png_info("test\\tmp\\f133_missing.bmp", &w, &h) == -1) { mask = mask | 16; }
+  if (std::png_info("test\\facts\\f133_png.fl", &w, &h) == -1) { mask = mask | 32; }
+  if (std::png_load("test\\tmp\\f133_src.bmp", out, 47) == -1) { mask = mask | 64; }
+
+  // bit7 的另一半：cap 够（48）时成功、cap 少 1 时失败，两个都验到才算
+  if (std::png_load("test\\tmp\\f133_src.bmp", out, 48) == 48) { mask = mask | 128; }
+
+  print(["f133 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

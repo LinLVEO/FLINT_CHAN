@@ -1,0 +1,122 @@
+// f108_hud_cn -- 16x16 CJK HUD text: generated table + hud_cn.fl API.
+// Criterion: compile with tmp\hlc_stable.exe and exit 42 (all 8 mask bits set).
+// No window is opened: surf_init only needs a memory DC + DIB, same recipe as f103_hud.
+//
+// Coverage (bit = mask bit):
+//   bit0  generated table is correct for known rows of U+865A + GBK D0 E9
+//   bit1  foreground pixels land at the expected x/y (row 0 col 7, row 3 col 2)
+//   bit2  background stays untouched everywhere the glyph did not paint
+//   bit3  GBK double-byte text: U+5F00 U+59CB (BF AA CA BC) draws two glyphs, returns x+32
+//   bit4  0-terminated input: width 16, next x = x+16, empty/lone-lead-byte do not read past 0
+//   bit5  scale=2: one dot becomes a 2x2 block and the pen advances 32
+//   bit6  out-of-bounds: fully off-screen returns 0, partial/negative does not crash
+//   bit7  uncollected GBK pair draws nothing and hud_cn_char returns 0
+include "../../lib/hud_cn.fl"
+
+int f108_tab[416];
+
+int main() {
+  struct Surf s;
+  struct GfxBuf b;
+  int bits = 0;
+  int n = 0;
+  int cx = 0;
+  int bg = 0x00112233;
+  int fg = 0x00F2C14E;
+  int xu[4];
+  int ks[8];
+  int empty[2];
+  int lone[2];
+  int miss[2];
+
+  s.h = 0; s.dc = 0; s.dib = 0; s.bits = 0;
+  s.bw = 64; s.bh = 32; s.cw = 64; s.ch = 32;
+  s.r = 0; s.fill_a = 255; s.ring_a = 255; s.const_a = 255;
+  s.br_fill = 0; s.br_ring = 0; s.ft0 = 0; s.ft1 = 0; s.ft2 = 0;
+  if (surf_init(&s) == 0) { return 1; }
+  if (gfx_attach(&b, &s, 64, 32) == 0) { return 2; }
+  if (hud_cn_init() != 0) { return 3; }
+
+  // GBK inputs.  U+865A=D0 E9, U+5F00=BF AA, U+59CB=CA BC, uncollected U+9F8D=FD 88.
+  xu[0] = 0xD0; xu[1] = 0xE9; xu[2] = 0; xu[3] = 0;
+  ks[0] = 0xBF; ks[1] = 0xAA; ks[2] = 0xCA; ks[3] = 0xBC; ks[4] = 0;
+  ks[5] = 0; ks[6] = 0; ks[7] = 0;
+  empty[0] = 0; empty[1] = 0;
+  lone[0] = 0xD0; lone[1] = 0;
+  miss[0] = 0xFD; miss[1] = 0x88;
+
+  // ---- bit0: generated table (count, GBK codes, known rows of U+865A) ----
+  hud_cn_load(f108_tab);
+  if (hud_cn_count() == 26) { bits = bits | 1; }
+  if (hud_cn_gbk_hi(0) != 0xD0) { bits = bits & ~1; }
+  if (hud_cn_gbk_lo(0) != 0xE9) { bits = bits & ~1; }
+  if (f108_tab[0] != 256) { bits = bits & ~1; }           // U+865A row 0: col 7 => bit 8
+  if (f108_tab[3] != 16380) { bits = bits & ~1; }         // row 3: cols 2..13 => 0x3FFC
+  if (f108_tab[8 * 16 + 1] != 32764) { bits = bits & ~1; } // U+5F00 row 1: cols 1..13 => 0x7FFC
+
+  // ---- bit1: foreground position (U+865A at 1,1; row 0 col 7 => (8,1); row 3 col 2 => (3,4)) ----
+  gfx_clear(&b, bg);
+  n = hud_cn_char(&b, 1, 1, 0xD0, 0xE9, fg, 1);
+  if (n > 0) { bits = bits | 2; } else { bits = bits & ~2; }
+  if (gfx_get(&b, 8, 1) != fg) { bits = bits & ~2; }
+  if (gfx_get(&b, 3, 4) != fg) { bits = bits & ~2; }
+  if (gfx_get(&b, 1, 1) != bg) { bits = bits & ~2; }      // row 0 col 0 is blank
+
+  // ---- bit2: background transparent (untouched pixels keep bg) ----
+  if (gfx_get(&b, 0, 0) == bg) { bits = bits | 4; } else { bits = bits & ~4; }
+  if (gfx_get(&b, 20, 20) != bg) { bits = bits & ~4; }
+  if (gfx_get(&b, 16, 1) != bg) { bits = bits & ~4; }     // col 15 of the cell is blank
+  if (gfx_get(&b, 2, 1) != bg) { bits = bits & ~4; }      // row 0 col 1 is blank
+
+  // ---- bit3: GBK double-byte text (U+5F00 U+59CB from x=1 -> next x=33) ----
+  gfx_clear(&b, bg);
+  cx = hud_cn_text(&b, 1, 1, ks, fg, 1);
+  if (cx == 33) { bits = bits | 8; } else { bits = bits & ~8; }
+  if (hud_cn_width(ks, 1) != 32) { bits = bits & ~8; }
+  if (gfx_get(&b, 2, 2) != fg) { bits = bits & ~8; }      // U+5F00 row 1 col 1
+  if (gfx_get(&b, 20, 1) != fg) { bits = bits & ~8; }     // U+59CB row 0 col 3 => 1+16+3
+
+  // ---- bit4: 0 termination (one glyph = 16 px; empty input stays put; lone lead byte ignored) ----
+  gfx_clear(&b, bg);
+  if (hud_cn_width(xu, 1) == 16) { bits = bits | 16; } else { bits = bits & ~16; }
+  cx = hud_cn_text(&b, 5, 5, xu, fg, 1);
+  if (cx != 21) { bits = bits & ~16; }
+  if (hud_cn_width(empty, 1) != 0) { bits = bits & ~16; }
+  if (hud_cn_text(&b, 5, 5, empty, fg, 1) != 5) { bits = bits & ~16; }
+  if (hud_cn_width(lone, 1) != 0) { bits = bits & ~16; }
+  if (hud_cn_text(&b, 5, 5, lone, fg, 1) != 5) { bits = bits & ~16; }
+
+  // ---- bit5: scale=2 (U+865A row 0 col 7 => 2x2 block at (15,1)-(16,2); pen +32) ----
+  gfx_clear(&b, bg);
+  hud_cn_char(&b, 1, 1, 0xD0, 0xE9, fg, 2);
+  if (gfx_get(&b, 15, 1) == fg) { bits = bits | 32; } else { bits = bits & ~32; }
+  if (gfx_get(&b, 16, 1) != fg) { bits = bits & ~32; }
+  if (gfx_get(&b, 15, 2) != fg) { bits = bits & ~32; }
+  if (gfx_get(&b, 16, 2) != fg) { bits = bits & ~32; }
+  if (gfx_get(&b, 14, 1) != bg) { bits = bits & ~32; }
+  if (hud_cn_text(&b, 1, 1, xu, fg, 2) != 33) { bits = bits & ~32; }
+
+  // ---- bit6: out-of-bounds is safe (full off-screen returns 0; partial/negative does not crash) ----
+  n = hud_cn_char(&b, 100, 0, 0xD0, 0xE9, fg, 1);
+  if (n == 0) { bits = bits | 64; } else { bits = bits & ~64; }
+  n = hud_cn_char(&b, 63, 0, 0xD0, 0xE9, fg, 1);
+  if (n < 0) { bits = bits & ~64; }
+  n = hud_cn_char(&b, 0, 32, 0xD0, 0xE9, fg, 1);
+  if (n != 0) { bits = bits & ~64; }
+  n = hud_cn_char(&b, 0 - 20, 0 - 20, 0xD0, 0xE9, fg, 1);
+  if (n < 0) { bits = bits & ~64; }
+
+  // ---- bit7: uncollected GBK pair draws blank, returns 0, text still advances one cell ----
+  gfx_clear(&b, bg);
+  n = hud_cn_char(&b, 1, 1, 0xFD, 0x88, fg, 1);
+  if (n == 0) { bits = bits | 128; } else { bits = bits & ~128; }
+  if (gfx_get(&b, 1, 1) != bg) { bits = bits & ~128; }
+  if (gfx_get(&b, 16, 16) != bg) { bits = bits & ~128; }
+  cx = hud_cn_text(&b, 1, 1, miss, fg, 1);
+  if (cx != 17) { bits = bits & ~128; }
+  if (hud_cn_width(miss, 1) != 16) { bits = bits & ~128; }
+
+  print(["f108 mask=", bits, "\n"]);
+  if (bits != 255) { return 3; }
+  return 42;
+}

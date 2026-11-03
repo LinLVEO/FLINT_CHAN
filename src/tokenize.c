@@ -14,6 +14,16 @@
 #include <string.h>
 
 #include "flint.h"
+#include "diag_ids.h"   // 机器生成：文案 → [E-<类>-<哈希>]（tools\诊断ID.mjs --gen）
+
+// ===== C1 阶段：函数级错误恢复的全局状态 =====
+// 定义放这里（报错出口所在文件），声明在 flint.h。
+//   g_err_count      —— 已报错误总数；main 据此"有错不进 codegen、不产 exe"
+//   g_err_recovering —— 1 = 正处在 parse_funcdef 的可恢复窗口；报错后 longjmp 回该窗口
+//   g_err_jb         —— 当前恢复点（解析器单线程，不会嵌套 setjmp）
+int g_err_count = 0;
+int g_err_recovering = 0;
+jmp_buf g_err_jb;
 
 // —— 全局：源码首地址 + 当前行号 + 源文件名（报错定位用）——
 static char *current_input;
@@ -59,6 +69,22 @@ char *src_file_name(int i) {
 }
 
 
+// —— C2 阶段：稳定诊断 ID ——
+// 表由 tools\诊断ID.mjs --gen 生成到 src\diag_ids.h；key = 源码里 fmt 字面量的**正文**
+// （未反转义，与运行时 fmt 指针逐字节相同）⇒ strcmp 即可命中。
+// 返回 NULL 的三种情况都**不加** ID（保持原输出）：
+//   ① 手工码（-strict 那 10 处，正文已带 [E-...]，生成时就不收录）；
+//   ② 动态 fmt（经变量传进来，表里没有）；
+//   ③ 已格式化过的转发形态（error_at_nodef 的 buf，含数字，永远查不到）。
+static const char *diag_id_for(const char *msg) {
+  // 调用点保证 msg 非空（fmt 是字面量 / error_at_node 的 msg）；这里不再判空 ——
+  // 判空会让 gcc 反推 fmt 可能为 NULL，从而在 vfprintf 处多报一条
+  // `null format string`（warn 门基线是 7，不许漂）。
+  for (int i = 0; i < DIAG_ID_COUNT; i++)
+    if (strcmp(DIAG_ID_TABLE[i].msg, msg) == 0) return DIAG_ID_TABLE[i].id;
+  return NULL;
+}
+
 // —— 报错：指出源码具体位置 ——
 static void verror_at(char *loc, char *fmt, va_list ap) {
   // 从出错位置反查：loc 属于哪个已登记源码缓冲（默认退回当前全局）
@@ -83,6 +109,21 @@ static void verror_at(char *loc, char *fmt, va_list ap) {
     if (*p == '\n') line_no++;
   int col = (int)(loc - line_start) + 1;   // v0.9.1：列号（1 起，与 ^ 指位对应）
 
+  // C2：诊断 ID 查表。两种形态：
+  //   ① 绝大多数调用点直接给文案字面量（error_at 的第二参 / error 的第一参）；
+  //   ② 转发形态：error_at 收到 "%s"，真正的文案在第一个实参里
+  //      （codegen 的 error_at_node / error_at_nodef 家族）—— 取出来再查一次。
+  const char *diag_id = NULL;
+  if (fmt[0] == '%' && fmt[1] == 's' && fmt[2] == '\0') {
+    va_list ap2;
+    va_copy(ap2, ap);
+    char *text = va_arg(ap2, char *);
+    va_end(ap2);
+    diag_id = diag_id_for(text);
+  } else {
+    diag_id = diag_id_for(fmt);
+  }
+
   // v0.9.1：报错头带文件名 + 列号（原先只有行号、^ 前只有空格没有数字列）
   if (file)
     fprintf(stderr, "hlc 编译错误（%s 第 %d 行第 %d 列）:\n", file, line_no, col);
@@ -92,23 +133,39 @@ static void verror_at(char *loc, char *fmt, va_list ap) {
   fprintf(stderr, "  %*s^\n", (int)(loc - line_start), "");
   fprintf(stderr, "  ");
   vfprintf(stderr, fmt, ap);
+  if (diag_id) fprintf(stderr, "  %s", diag_id);   // 追加在文案行末尾：不新增行、不动行首
   fprintf(stderr, "\n");
-  exit(1);
 }
 
+// ===== C1：所有报错出口收敛到这里 =====
+// C2：打印时在文案行末尾追加稳定 ID [E-<类>-<哈希>]（表见 src\diag_ids.h；查不到就不加）。
+// "报完怎么走"统一在这里决定：
+//   可恢复窗口内 → longjmp 回 parse_funcdef 的恢复点（不 exit，继续报下一个函数）；
+//   否则        → 保持旧行为 exit(1)（预扫描/顶层错误等无处可恢复的场合）。
+// 注意：va_end 必须在 longjmp **之前**调用（longjmp 会跳过本帧的清理）。
 void error_at(char *loc, char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  verror_at(loc, fmt, ap);
+  verror_at(loc, fmt, ap);   // 只打印，不再 exit（C1：出口统一在下面）
   va_end(ap);
+  g_err_count++;
+  if (g_err_recovering) longjmp(g_err_jb, 1);
+  exit(1);
 }
 
 void error(char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
+  // C2：无定位的出口同样带 ID；`error((char*)msg)` 是 error_at_node 的转发形态，
+  //   fmt 本身就是文案字面量 ⇒ 直接查表即可。
+  const char *diag_id = diag_id_for(fmt);
   fprintf(stderr, "hlc 错误: ");
   vfprintf(stderr, fmt, ap);
+  if (diag_id) fprintf(stderr, "  %s", diag_id);
   fprintf(stderr, "\n");
+  va_end(ap);
+  g_err_count++;
+  if (g_err_recovering) longjmp(g_err_jb, 1);
   exit(1);
 }
 

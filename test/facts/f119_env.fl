@@ -1,0 +1,82 @@
+// f119_env.fl -- env_lib 探针：8 位掩码全亮（255）→ 退出 42
+// 判据（全部真跑，期望值均为实测值，不是手推）：
+//   bit0  env_set("FLINT_F119_X", "hello") == 1，随后 env_get 读到 "hello"（长度 5 + 逐字符）
+//   bit1  不存在的变量 env_get("FLINT_F119_NO_SUCH", ...) == -1
+//   bit2  cap=3 读 "hello" == -1，且 buf 一个字节都没被写（3 字节哨兵原样）
+//   bit3  系统变量 PATH 存在且 env_get("PATH", ...) > 0
+//   bit4  env_argc() >= 1
+//   bit5  env_arg(0, ...) > 0（exe 路径非空）
+//   bit6  env_set("FLINT_F119_X", "") 后 env_get == -1（空值 = 删除该变量，Windows 语义）
+//   bit7  同名变量连续两次 env_get 长度与内容一致（确定性）
+include "../../lib/sys_lib.fl"
+
+char e119_buf[512];
+char e119_buf2[512];
+char e119_big[4096];
+
+// 逐字节比两段 0 结尾串：相等 1 / 不等 0
+int e119_eq(char *a, char *b) {
+  int i = 0;
+  while (a[i] != 0 && b[i] != 0) {
+    if (a[i] != b[i]) { return 0; }
+    i = i + 1;
+  }
+  if (a[i] != b[i]) { return 0; }
+  return 1;
+}
+
+int main() {
+  char sml[3];
+  int mask = 0;
+  int n = 0;
+  int n2 = 0;
+
+  // bit0：写进去，再读回来（长度 + 逐字符）
+  if (std::env_set("FLINT_F119_X", "hello") == 1) {
+    n = std::env_get("FLINT_F119_X", e119_buf, 512);
+    if (n == 5) {
+      if (e119_eq(e119_buf, "hello") == 1) { mask = mask | 1; }
+    }
+  }
+
+  // bit1：不存在的变量必须 -1
+  if (std::env_get("FLINT_F119_NO_SUCH", e119_buf, 512) == -1) { mask = mask | 2; }
+
+  // bit2：容量不够必须响亮 -1，且一个字节都不写（哨兵 A/B/C 原样）
+  sml[0] = 65;
+  sml[1] = 66;
+  sml[2] = 67;
+  if (std::env_get("FLINT_F119_X", sml, 3) == -1) {
+    if (sml[0] == 65 && sml[1] == 66 && sml[2] == 67) { mask = mask | 4; }
+  }
+
+  // bit3：系统变量 PATH 存在且非空
+  n = std::env_get("PATH", e119_big, 4096);
+  if (n > 0) { mask = mask | 8; }
+
+  // bit4：参数个数至少 1（含 argv[0]）
+  if (std::env_argc() >= 1) { mask = mask | 16; }
+
+  // bit5：argv[0]（exe 路径）非空
+  n = std::env_arg(0, e119_buf, 512);
+  if (n > 0) { mask = mask | 32; }
+
+  // bit6：空值 = 删除；删完再读必须 -1
+  if (std::env_set("FLINT_F119_X", "") == 1) {
+    if (std::env_get("FLINT_F119_X", e119_buf, 512) == -1) { mask = mask | 64; }
+  }
+
+  // bit7：同名变量连续两次读取，长度与内容一致
+  std::env_set("FLINT_F119_D", "det");
+  n = std::env_get("FLINT_F119_D", e119_buf, 512);
+  n2 = std::env_get("FLINT_F119_D", e119_buf2, 512);
+  if (n > 0 && n == n2) {
+    if (e119_eq(e119_buf, e119_buf2) == 1 && e119_eq(e119_buf, "det") == 1) {
+      mask = mask | 128;
+    }
+  }
+
+  print(["f119 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

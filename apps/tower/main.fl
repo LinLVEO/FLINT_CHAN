@@ -1,0 +1,866 @@
+// apps\tower\main.fl -- 《虚妄之塔》切片（第一刀）：480x270 一屏、两屏宽横向滚屏
+//
+// 蓝本 = apps\game_probe.fl（M1~M7 汇合灰盒）。本文件按"正式游戏"的形状重写一遍：
+//   玩家（走 / 跳 / 砍 / 受击硬直 / 无敌帧 / 死 / R 重开）
+//   ＋ 1 种地面追击敌人（巡逻 / 追击 / 攻击 / 死亡，4 态复用 lib\enemy.fl）
+//   ＋ HUD（血条 + 击杀数，全用 gfx_rect 拼，不碰 GDI 文字）
+//   ＋ 打击感（hitstop / 震屏 / 闪白 / 三套音效）
+//
+// 运行（**仓库根目录**下）：hlc run apps\tower\main.fl
+//   或直接跑 tmp\tower\main.exe（音效路径是相对 CWD 的，换目录就没声）
+// 操作：A/D 走，W 跳（地面才跳），J 砍，R 重开，关窗退出。
+// 判据：建窗 / 加载各步失败返回 90..99 的错误码；正常关窗退 0。
+// 确定性：不取系统时间、不用随机数（hitfx 的 LCG 是固定 seed）⇒ 同输入序列同结果。
+api user32 int GetSystemMetrics(int);
+include "../../lib/flgui_win32.fl"
+include "../../lib/gfx.fl"
+include "../../lib/grid.fl"
+include "../../lib/mapload.fl"
+include "../../lib/sprite.fl"
+include "../../games/huiye/sprite_data.fl"
+include "../../lib/actor.fl"
+include "../../lib/body.fl"
+include "../../lib/attack.fl"
+include "../../lib/hitstun.fl"
+include "../../lib/hitfx.fl"
+include "../../lib/enemy.fl"
+include "../../lib/audio.fl"
+include "../../lib/hud.fl"
+include "../../lib/camera.fl"
+include "../../lib/enemy_sys.fl"
+include "../../lib/save.fl"
+include "../../lib/bgm.fl"
+include "../../games/huiye/hero2_sprite_data.fl"
+include "../../games/huiye/hero4b_sprite_data.fl"
+include "../../games/huiye/hero4l_sprite_data.fl"
+include "../../lib/actor2.fl"
+include "../../lib/hud_cn.fl"
+include "../../lib/shockwave.fl"
+include "../../lib/layer.fl"
+
+// 敌人：池 / 生成 / 回收 / AI / 物理统一走 lib\enemy_sys.fl（M10）；
+// 状态机用 lib\enemy.fl 的 enum ESt + switch（v2.15.0 起 enum 常量可当 case 标签）。
+// 本文件只保留表现层：「玩家攻击怎么打到敌人」「受击闪白 / 死亡火花」。
+// 历史：原 Ent 手工池（gaps.md G1/G3 的绕法）已由 enemy_sys 取代，ent_* 一并删除。
+
+// 全局状态：本来该是全局变量，语言不许 struct 全局（gaps.md G1）⇒ 只能是 main() 的局部量，
+// 然后一层层传指针。这就是整个 demo 里最丑的一块。
+struct Game {
+  struct HitStun hs;
+  int hp;
+  int invuln;
+  int face;
+  int kills;
+  int dead;
+  int fc;
+  int cam_x;
+  int last_step;
+  int hit_done;
+  int shake;
+  int wprev;
+  int jprev;
+  int rprev;
+  int sprev;
+}
+
+// HUD 文字统一走 lib\hud.fl（5x7 点阵）：hud_text / hud_num / hud_init
+
+// 左上血条（5 个方块）＋ 右上击杀数 ＋ 死亡横幅。W 固定 480（本 demo 一屏宽就是 480）。
+int hud_draw(struct GfxBuf *b, struct Game *g) {
+  int i = 0;
+  int x = 0;
+  int k = 0;
+  int cn_kill[5] = {0xBB, 0xF7, 0xC9, 0xB1, 0};       // 「击杀」GBK
+  int cn_an[3] = {0xB0, 0xB4, 0};                     // 「按」GBK
+  int cn_restart[5] = {0xD6, 0xD8, 0xBF, 0xAA, 0};    // 「重开」GBK
+  i = 0;
+  while (i < 5) {
+    x = 8 + i * 12;
+    if (i < g->hp) {
+      gfx_rect(b, x, 8, x + 10, 16, 0x00E8663C);      // 有血：橙红块
+    } else {
+      gfx_rect(b, x, 8, x + 10, 16, 0x00202830);      // 掉血：暗槽
+    }
+    gfx_box(b, x, 8, x + 10, 16, 0x00E8F0FF);
+    i = i + 1;
+  }
+  // 击杀数：中文「击杀」（hud_cn 16x16）+ 数字
+  k = g->kills;
+  if (k > 99) { k = 99; }
+  hud_cn_text(b, 396, 6, cn_kill, 0x00F2C14E, 1);
+  hud_num(b, 440, 6, k, 0x00F2C14E, 1);
+  // 死亡横幅：闪动的框 ＋ 「按 R 重开」（中文 + ASCII 混排）
+  if (g->dead == 1) {
+    if ((g->fc / 16) % 2 == 0) {
+      gfx_rect(b, 0, 112, 480, 158, 0x00140808);
+      gfx_box(b, 0, 112, 480, 158, 0x00E8663C);
+      hud_cn_text(b, 184, 126, cn_an, 0x00E8F0FF, 2);       // 按（32x32）
+      hud_text(b, 214, 128, "R", 0x00E8F0FF, 2);            // R（10x14）
+      hud_cn_text(b, 230, 126, cn_restart, 0x00E8F0FF, 2);  // 重开（64x32）
+    }
+  }
+  return 0;
+}
+
+// ===================== 地图绘制 =====================
+// 不用 grid_draw 的"tile 号调色"（1 和 9 都黑得看不见），按 tile 号画自己的塔内配色。
+// tile 1 = 石砖；tile 9 = 单向平台（只画顶部一条，视觉上就是"能跳上去的板"）。
+int map_draw(struct GfxBuf *b, struct Grid *g, int cam_x, int cam_y) {
+  int tx0 = 0;
+  int tx1 = 0;
+  int ty0 = 0;
+  int ty1 = 0;
+  int tx = 0;
+  int ty = 0;
+  int t = 0;
+  int px = 0;
+  int py = 0;
+  int n = 0;
+  tx0 = grid_floor_div(cam_x, g->tw);
+  ty0 = grid_floor_div(cam_y, g->th);
+  tx1 = grid_ceil_div(cam_x + b->w, g->tw);
+  ty1 = grid_ceil_div(cam_y + b->h, g->th);
+  if (tx0 < 0) { tx0 = 0; }
+  if (ty0 < 0) { ty0 = 0; }
+  if (tx1 > g->w) { tx1 = g->w; }
+  if (ty1 > g->h) { ty1 = g->h; }
+  ty = ty0;
+  while (ty < ty1) {
+    tx = tx0;
+    while (tx < tx1) {
+      t = grid_at(g, tx, ty);
+      px = tx * g->tw - cam_x;
+      py = ty * g->th - cam_y;
+      if (t == 1) {
+        n = n + gfx_rect(b, px, py, px + g->tw, py + g->th, 0x00222634);
+        n = n + gfx_rect(b, px, py, px + g->tw, py + 2, 0x00394A66);
+        n = n + gfx_rect(b, px, py, px + 1, py + g->th, 0x002E3A52);
+      }
+      if (t == 9) {
+        n = n + gfx_rect(b, px, py, px + g->tw, py + 4, 0x005A6E92);
+        n = n + gfx_rect(b, px, py, px + g->tw, py + 2, 0x008FA6C8);
+      }
+      tx = tx + 1;
+    }
+    ty = ty + 1;
+  }
+  return n;
+}
+
+// ===================== 敌人表现层 =====================
+// 朝向：vx<0 → 朝左（face=0），否则朝右（face=1）。与 sprite_blit_scale_flip 的 face 同口径。
+int enemy_face(struct EnemySys *en, int i) {
+  if (en->b[i].vx < 0) { return 0; }
+  return 1;
+}
+
+// 一次挥砍的判定：遍历池里的 live 槽，用攻击盒打（保持原 Ent 版的手感）。
+// 命中：扣血 + 闪白 + 硬直击退；打死则回收槽 + 击杀数 +1 + 火花计时。返回 1 = 命中。
+int atk_apply_sys(struct EnemySys *en, struct Game *g, struct Body *hero, struct HitFx *fx, int *eflash) {
+  int i = 0;
+  int hx = 0;
+  int hy = 0;
+  hx = hero->x / 65536;
+  hy = hero->y / 65536;
+  i = 0;
+  while (i < en->cap) {
+    if (en->live[i] == 1) {
+      if (attack_hit(hx, hy, hero->w, hero->h, g->face,
+                     en->b[i].x / 65536, en->b[i].y / 65536, en->b[i].w, en->b[i].h) == 1) {
+        en->hp[i] = en->hp[i] - 1;
+        eflash[i] = 6;
+        hitstun_start(&en->hs[i], g->face, 8);
+        en->b[i].vx = en->hs[i].vx;
+        en->b[i].vy = en->hs[i].vy;
+        if (en->hp[i] <= 0) {
+          en->hp[i] = 0;
+          enemy_sys_kill(en, i);
+          g->kills = g->kills + 1;
+          eflash[i] = 8;      // 死亡火花：live=0 但 eflash>0 期间还要画几帧
+        }
+        hitfx_start(fx, 6, 3, 2);
+        return 1;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 敌人 AI/物理已由 enemy_sys_tick 承担（见 lib\enemy_sys.fl）；本文件不再写 4 态机。
+
+// 玩家被敌人打中：扣血 ＋ 无敌 60 帧（1 秒）＋ 硬直击退。返回 1 = 真的扣到了。
+int player_hurt(struct Game *g, struct Body *hero, int face) {
+  if (g->invuln > 0) { return 0; }
+  g->hp = g->hp - 1;
+  g->invuln = 60;
+  hitstun_start(&g->hs, face, 6);
+  hero->vx = g->hs.vx;
+  hero->vy = g->hs.vy;
+  audio_play("games/huiye/hit.wav");
+  if (g->hp <= 0) {
+    g->hp = 0;
+    g->dead = 1;
+  }
+  return 1;
+}
+
+// 一次挥砍的判定已由 atk_apply_sys 承担（见上；池与状态由 enemy_sys 管）。
+
+// 重开：玩家回起点、血满、敌人全部复位重生成。
+int game_reset(struct Game *g, struct Body *hero, struct EnemySys *en, int *eflash, int n) {
+  int i = 0;
+  g->hp = 5;
+  g->invuln = 0;
+  g->face = 1;
+  g->kills = 0;
+  g->dead = 0;
+  g->cam_x = 0;
+  g->last_step = 0;
+  g->hit_done = 0;
+  g->shake = 0;
+  g->hs.stun = 0;
+  g->hs.vx = 0;
+  g->hs.vy = 0;
+  hero->x = 150 * 65536;
+  hero->y = 200 * 65536;
+  hero->vx = 0;
+  hero->vy = 0;
+  hero->onground = 0;
+  enemy_sys_init(en, n);
+  i = 0;
+  while (i < 8) {
+    eflash[i] = 0;
+    i = i + 1;
+  }
+  enemy_sys_spawn(en, 150, 200);
+  enemy_sys_spawn(en, 400, 200);
+  enemy_sys_spawn(en, 780, 200);
+  enemy_sys_spawn_ex(en, 300, 60, 12, 12, 3, 1);   // 第 4 个：飞行敌人（空中浮动，kind=1）
+  return 1;
+}
+
+// 刷怪：每 10 秒一波（600 帧）；每波 2~3 个，位置从固定候选点里轮（确定性，不用随机）。
+int spawn_wave(struct EnemySys *en, int wave) {
+  int pts[12] = {150, 200, 400, 200, 780, 200, 300, 60, 600, 200, 900, 60};
+  int cnt = 2;
+  int i = 0;
+  int idx = 0;
+  if (wave % 2 == 0) { cnt = 3; }
+  i = 0;
+  while (i < cnt) {
+    idx = ((wave * 3 + i) % 6) * 2;
+    if (i % 3 == 0) {
+      enemy_sys_spawn_ex(en, pts[idx], pts[idx + 1], 12, 12, 3, 0);   // 地面
+    } else {
+      enemy_sys_spawn_ex(en, pts[idx], pts[idx + 1], 12, 12, 3, 1);   // 飞行
+    }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// ===================== 存档（M7）=====================
+// 24 个 int：玩家 x/y、hp、kills ＋ 4 个敌人槽的 live/st/hp/x/y。魔数与版本由 save.fl 负责。
+int save_game(struct Game *g, struct Body *hero, struct EnemySys *en) {
+  int data[52];
+  char buf[256];
+  int len = 0;
+  int i = 0;
+  data[0] = hero->x;
+  data[1] = hero->y;
+  data[2] = g->hp;
+  data[3] = g->kills;
+  i = 0;
+  while (i < 8) {
+    data[4 + i * 6] = en->live[i];
+    data[4 + i * 6 + 1] = en->st[i];
+    data[4 + i * 6 + 2] = en->hp[i];
+    data[4 + i * 6 + 3] = en->b[i].x;
+    data[4 + i * 6 + 4] = en->b[i].y;
+    data[4 + i * 6 + 5] = en->kind[i];
+    i = i + 1;
+  }
+  len = save_pack(buf, 256, data, 52);
+  if (len < 0) { return 0; }
+  return std::file_write("tower.sav", buf, len);
+}
+
+// 读档：成功返回 1（覆盖默认开局），无档/坏档返回 0（保留默认开局）。
+int load_game(struct Game *g, struct Body *hero, struct EnemySys *en) {
+  char buf[256];
+  int data[52];
+  int len = 0;
+  int n = 0;
+  int i = 0;
+  len = std::file_read("tower.sav", buf, 128);
+  if (len <= 0) { return 0; }
+  n = save_unpack(buf, len, data, 52);
+  if (n != 52) { return 0; }
+  hero->x = data[0];
+  hero->y = data[1];
+  g->hp = data[2];
+  g->kills = data[3];
+  i = 0;
+  while (i < 8) {
+    en->live[i] = data[4 + i * 6];
+    en->st[i] = data[4 + i * 6 + 1];
+    en->hp[i] = data[4 + i * 6 + 2];
+    en->b[i].x = data[4 + i * 6 + 3];
+    en->b[i].y = data[4 + i * 6 + 4];
+    en->kind[i] = data[4 + i * 6 + 5];
+    i = i + 1;
+  }
+  return 1;
+}
+
+// ===================== main =====================
+int main() {
+  struct GuiCtx c;
+  struct GuiWin g;
+  struct Surf sf;
+  struct Surf sf2;
+  struct GfxBuf b;
+  struct GuiInput in;
+  struct Grid grid;
+  struct Body hero;
+  struct Combo combo;
+  struct HitFx fx;
+  struct Game st;
+  struct Camera cam;
+  struct EnemySys en;
+  int eflash[8];
+  int hmask = 0;
+  int map[1020];
+  int hbuf[768];
+  int hbuf2[768];
+  int hbuf4b[36608];
+  int hbuf4l[8448];
+  int ebuf[288];
+  int pal[7];
+  int pal2[7];
+  int pal3[10];
+  int wpal[7];
+  int wpal3[10];
+  int hero_kind = 2;
+  int vdown = 0;
+  int vprev = 0;
+  struct Shockwave sw;
+  int charge = 0;
+  int udown = 0;
+  int uprev = 0;
+  int udir[16] = {1, 0, 1, 1, 0, 1, 0 - 1, 1, 0 - 1, 0, 0 - 1, 0 - 1, 0, 0 - 1, 1, 0 - 1};
+  int d = 0;
+  int ay = 0;
+  int col = 0;
+  int W = 480;
+  int H = 270;
+  int mapw = 60;
+  int maph = 17;
+  int run = 1;
+  int i = 0;
+  int state = 0;
+  int frame = 0;
+  int hpx = 0;
+  int hpy = 0;
+  int ex = 0;
+  int ey = 0;
+  int sx = 0;
+  int sy = 0;
+  int ax = 0;
+  int mv = 0;
+  int wdown = 0;
+  int jdown = 0;
+  int rdown = 0;
+  int sdown = 0;
+  int moving = 0;
+  int r = 0;
+  int air = 0;
+  int jumps = 0;
+  int spawn_t = 0;
+  int wave = 0;
+  int rbtn = 0;
+  int rbtnprev = 0;
+  int hfl = 0;
+  int hldx = 0;
+  int hldy = 0;
+  int hby = 0;
+  int hbx = 0;
+  int lk = 0;
+  struct LayerSys ls;
+  int tprev = 0;
+  int tacc = 0;
+  int tn = 0;
+  int tavg = 0;
+  int tmx = 0;
+  int tnow = 0;
+  int hsn = 3;
+  int hsd = 4;
+
+  gui_init(&c);
+  gui_frame_set(&c, 60);
+  gui_win_timer_hi(1);   // 计时器粒度 1ms：A/B 实测 25/47ms -> 15/16ms（默认 15.6ms 粒度下帧周期在 15/31/47 之间跳）
+  g.cls = "TOWERFL";
+  g.w = W * 2;
+  g.h = H * 2;
+  g.x = (GetSystemMetrics(0) - g.w) / 2;
+  g.y = (GetSystemMetrics(1) - g.h) / 2;
+  g.alpha = 255;
+  if (gui_win_make_kbd(&g) == 0) { return 90; }
+  if (gui_win_surf(&sf, &g, 0) == 0) { return 91; }
+  // 游戏缓冲：独立的 480x270 内存 DIB（和窗口表面分开——gfx_zoom 的源/目标不能是同一块内存，
+  //   否则放大写目标时会踩坏还没读的源行，屏上只剩纯色）
+  sf2.bw = W;
+  sf2.bh = H;
+  sf2.cw = W;
+  sf2.ch = H;
+  if (surf_init(&sf2) == 0) { return 92; }
+  if (gfx_attach(&b, &sf2, W, H) == 0) { return 92; }
+  gui_win_dpi_apply(&c);
+
+  if (grid_init(&grid, map, mapw, maph, 16, 16) == 0) { return 93; }
+  if (mapload_ascii("apps/tower/map.txt", map, mapw, maph) == 0) { return 94; }
+  if (sprite_hero_load(hbuf) == 0) { return 95; }
+  if (sprite_hero2_load(hbuf2) == 0) { return 95; }
+  if (sprite_hero4b_load(hbuf4b) == 0) { return 95; }
+  if (sprite_hero4l_load(hbuf4l) == 0) { return 95; }
+  if (sprite_enemy_load(ebuf) == 0) { return 96; }
+  if (sprite_pal_fill(pal) != 7) { return 97; }
+  // hero2 调色板（红黑金）：1 黑边 / 2 深藏青披风 / 3 白护目 / 5 红橙甲 / 6 金角
+  pal2[0] = 0;
+  pal2[1] = 0x00101418;
+  pal2[2] = 0x00222E50;
+  pal2[3] = 0x00E8F0FF;
+  pal2[4] = 0x00222E50;
+  pal2[5] = 0x00E8563C;
+  pal2[6] = 0x00F2C14E;
+  // hero3 调色板（10 色）：1 深蓝黑 / 2 深蓝 / 3 白 / 4 青 / 5 橙红 / 6 金
+  //   7 肤色 / 8 灰蓝 / 9 深红（后三色只给 hero3 用，老精灵索引 1..6 不受影响）
+  pal3[0] = 0;
+  pal3[1] = 0x0007070A;
+  pal3[2] = 0x0023232B;
+  pal3[3] = 0x00282B4A;
+  pal3[4] = 0x003E4368;
+  pal3[5] = 0x005A5860;
+  pal3[6] = 0x00C3B0A2;
+  pal3[7] = 0x00D8D1D7;
+  pal3[8] = 0x00FBEACE;
+  pal3[9] = 0x00B03A3A;
+  if (body_init(&hero, 40, 200, 16, 16) == 0) { return 98; }
+  if (combo_start(&combo) == 0) { return 99; }
+  if (hitfx_start(&fx, 0, 3, 0) == 0) { return 100; }
+  hud_init();
+  hud_cn_init();
+  bgm_play("games/huiye/bgm.wav");
+  // 相机：视口 480x270；横向死区 40px（目标在中心 ±40 内不跟，超出才追）；竖向不滚（地图高 = 视口高）
+  if (camera_init(&cam, 480, 270, 40, 0) == 0) { return 101; }
+
+  // 闪白用调色板：索引 1..6 全推成近白 ⇒ 同一个 sprite_blit 就能画"受击白影"
+  i = 0;
+  while (i < 7) { wpal[i] = 0x00F2F6FF; i = i + 1; }
+  wpal[0] = 0;
+  // hero3 的 10 色闪白板
+  i = 0;
+  while (i < 10) { wpal3[i] = 0x00F2F6FF; i = i + 1; }
+  wpal3[0] = 0;
+
+  // 局部 struct 字段不清零（语言已知行为）⇒ 全部显式赋一遍
+  st.hp = 5;
+  st.invuln = 0;
+  st.face = 1;
+  st.kills = 0;
+  st.dead = 0;
+  st.fc = 0;
+  st.cam_x = 0;
+  st.last_step = 0;
+  st.hit_done = 0;
+  st.shake = 0;
+  st.wprev = 0;
+  st.jprev = 0;
+  st.rprev = 0;
+  st.sprev = 0;
+  st.hs.stun = 0;
+  st.hs.vx = 0;
+  st.hs.vy = 0;
+  game_reset(&st, &hero, &en, eflash, 8);
+  // 有档就读（M7）：读档失败 = 保留默认开局，不报错
+  load_game(&st, &hero, &en);
+
+  while (run == 1) {
+    if (gui_win_pump(&g, &in) == 0) { run = 0; }
+    if (run == 1) {
+      // ---- 输入（每帧轮询，按下沿自己算）----
+      mv = 0;
+      if ((GetAsyncKeyState(0x41) & 0x8000) != 0) { mv = 0 - 1; }
+      if ((GetAsyncKeyState(0x44) & 0x8000) != 0) { mv = 1; }
+      wdown = 0;
+      if ((GetAsyncKeyState(0x57) & 0x8000) != 0) { wdown = 1; }
+      jdown = 0;
+      if ((GetAsyncKeyState(0x4A) & 0x8000) != 0) { jdown = 1; }
+      rdown = 0;
+      if ((GetAsyncKeyState(0x52) & 0x8000) != 0) { rdown = 1; }
+      if (rdown == 1) {
+        if (st.rprev == 0) {
+          game_reset(&st, &hero, &en, eflash, 8);
+          combo_start(&combo);
+          hitfx_start(&fx, 0, 3, 0);
+        }
+      }
+      // ESC（按下沿）存档：M7 —— 关窗/重开后从存档继续
+      sdown = 0;
+      if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) { sdown = 1; }
+      if (sdown == 1) {
+        if (st.sprev == 0) { save_game(&st, &hero, &en); }
+      }
+      // V（按下沿）切换角色：huiye -> hero2 -> hero3 -> huiye
+      vdown = 0;
+      if ((GetAsyncKeyState(0x56) & 0x8000) != 0) { vdown = 1; }
+      if (vdown == 1) {
+        if (vprev == 0) {
+          hero_kind = hero_kind + 1;
+          if (hero_kind > 2) { hero_kind = 0; }
+        }
+      }
+      // U（按住）蓄力，松开释放七彩冲击波（蓄力 0..60 帧 -> power 1..3）
+      udown = 0;
+      if ((GetAsyncKeyState(0x55) & 0x8000) != 0) { udown = 1; }
+      if (udown == 1) {
+        if (charge < 60) { charge = charge + 1; }
+      } else {
+        if (uprev == 1) {
+          if (charge > 0) {
+            r = sw_charge_power(charge, 60);
+            sw_start(&sw, hero.x / 65536 + 8, hero.y / 65536 + 8, r);
+            st.shake = 6 * r;
+            hitfx_start(&fx, 0, 0, 4);
+            audio_play("games/huiye/hit.wav");
+          }
+          charge = 0;
+        }
+      }
+      // 右键（按下沿）关窗退出
+      rbtn = 0;
+      if ((GetAsyncKeyState(0x02) & 0x8000) != 0) { rbtn = 1; }
+      if (rbtn == 1) {
+        if (rbtnprev == 0) { run = 0; }
+      }
+
+      if (st.dead == 0) {
+        if (fx.freeze > 0) {
+          // hitstop：世界整个冻住，只留渲染
+        } else {
+          // ---- 玩家 ----
+          moving = 0;
+          if (hitstun_tick(&st.hs) > 0) {
+            hero.vx = st.hs.vx;                    // 受击硬直：不听输入，只剩击退
+          } else {
+            hero.vx = 0;
+            if (mv < 0) { hero.vx = 0 - 3 * 65536; st.face = 0; moving = 1; }
+            if (mv > 0) { hero.vx = 3 * 65536; st.face = 1; moving = 1; }
+            if (wdown == 1) {
+              if (st.wprev == 0) {
+                if (hero.onground == 1) {
+                  hero.vy = 0 - 8 * 65536;
+                  jumps = 1;
+                  audio_play("games/huiye/jump.wav");
+                } else {
+                  if (jumps < 2) {
+                    hero.vy = 0 - 7 * 65536;   // 二段跳（空中再按一次）
+                    jumps = 2;
+                    audio_play("games/huiye/jump.wav");
+                  }
+                }
+              }
+            }
+            if (jdown == 1) {
+              if (st.jprev == 0) { combo_press(&combo); }
+            }
+          }
+          if (st.invuln > 0) { st.invuln = st.invuln - 1; }
+          air = 0;
+          if (hero.onground == 0) { air = 1; }
+          body_step(&grid, &hero, 32768);
+          if (hero.onground == 1) { jumps = 0; }
+          if (air == 1) {
+            if (hero.onground == 1) { audio_play("games/huiye/land.wav"); }
+          }
+          combo_tick(&combo);
+          hpx = hero.x / 65536;
+          hpy = hero.y / 65536;
+
+          // ---- 攻击判定：一段挥砍只命中一次 ----
+          if (combo.step > 0) {
+            if (combo.step != st.last_step) {
+              st.last_step = combo.step;
+              st.hit_done = 0;
+            }
+            if (st.hit_done == 0) {
+              if (atk_apply_sys(&en, &st, &hero, &fx, eflash) == 1) {
+                st.hit_done = 1;
+                st.shake = 8;
+                audio_play("games/huiye/hit.wav");
+              }
+            }
+          } else {
+            st.last_step = 0;
+            st.hit_done = 0;
+          }
+
+          // ---- 敌人：池 / AI / 物理一次 tick（lib\enemy_sys.fl）----
+          hmask = enemy_sys_tick(&en, hpx, hpy, map, mapw, maph);
+          i = 0;
+          while (i < 8) {
+            if ((hmask & (1 << i)) != 0) {
+              if (player_hurt(&st, &hero, enemy_face(&en, i)) == 1) { st.shake = 6; }
+            }
+            i = i + 1;
+          }
+          // 受击闪白 / 死亡火花倒计时（画的时候只读）
+          i = 0;
+          while (i < 8) {
+            if (eflash[i] > 0) { eflash[i] = eflash[i] - 1; }
+            i = i + 1;
+          }
+
+          // ---- 刷怪：每 10 秒（600 帧）一波，每波 2~3 个 ----
+          spawn_t = spawn_t + 1;
+          if (spawn_t >= 600) {
+            spawn_t = 0;
+            wave = wave + 1;
+            spawn_wave(&en, wave);
+          }
+
+          // ---- 七彩冲击波：推进 + 环扫过敌人（lib\shockwave.fl）----
+          if (sw.active == 1) {
+            sw_tick(&sw);
+            i = 0;
+            while (i < 8) {
+              if (en.live[i] == 1) {
+                if (sw_hit(&sw, en.b[i].x / 65536, en.b[i].y / 65536, en.b[i].w, en.b[i].h) == 1) {
+                  en.hp[i] = en.hp[i] - 1;
+                  eflash[i] = 6;
+                  if (en.b[i].x / 65536 < sw.cx) { hitstun_start(&en.hs[i], 0, 14); }
+                  else { hitstun_start(&en.hs[i], 1, 14); }
+                  en.b[i].vx = en.hs[i].vx;
+                  en.b[i].vy = en.hs[i].vy;
+                  if (en.hp[i] <= 0) {
+                    en.hp[i] = 0;
+                    enemy_sys_kill(&en, i);
+                    st.kills = st.kills + 1;
+                    eflash[i] = 8;
+                  }
+                }
+              }
+              i = i + 1;
+            }
+          }
+
+          // ---- 相机：死区跟随 + 世界边界 clamp（lib\camera.fl）----
+          camera_follow(&cam, hpx, hpy, mapw * 16, 270);
+          st.cam_x = cam.x;
+        }
+      }
+      st.wprev = wdown;
+      st.jprev = jdown;
+      st.rprev = rdown;
+      st.sprev = sdown;
+      vprev = vdown;
+      uprev = udown;
+      rbtnprev = rbtn;
+
+      hitfx_tick(&fx);
+      if (st.shake > 0) {
+        st.shake = st.shake - 1;
+        sx = hitfx_shake_x(&fx);
+        sy = hitfx_shake_y(&fx);
+      } else {
+        sx = 0;
+        sy = 0;
+      }
+      hpx = hero.x / 65536;
+      hpy = hero.y / 65536;
+
+      // ===================== 渲染 =====================
+      gfx_clear(&b, 0x000B0E1A);
+      map_draw(&b, &grid, st.cam_x + sx, sy);
+
+      // 敌人（受击闪白 → 换全白调色板重画同一个精灵；死亡 → 几帧火花）
+      i = 0;
+      while (i < 8) {
+        ex = en.b[i].x / 65536 - st.cam_x + sx;
+        ey = en.b[i].y / 65536 + sy;
+        if (en.live[i] == 1) {
+          frame = (en.tick[i] / 8) % 2;
+          if (eflash[i] > 0) {
+            sprite_blit(&b, ex, ey, ebuf, 12, 12, frame, wpal, 7);
+          } else {
+            sprite_blit(&b, ex, ey, ebuf, 12, 12, frame, pal, 7);
+          }
+          // 头顶 3 格血
+          ax = 0;
+          while (ax < 3) {
+            if (ax < en.hp[i]) {
+              gfx_rect(&b, ex + ax * 4, ey - 5, ex + ax * 4 + 3, ey - 3, 0x00E8663C);
+            }
+            ax = ax + 1;
+          }
+          // 攻击态：身前亮一记（给玩家预警）
+          if (en.st[i] == ST_ATK) {
+            gfx_rect(&b, ex + 6, ey + 2, ex + 14, ey + 10, 0x00F2C14E);
+          }
+        } else {
+          if (eflash[i] > 0) {
+            ax = eflash[i];
+            gfx_rect(&b, ex + 6 - ax, ey + 6 - ax, ex + 6 + ax, ey + 6 + ax, 0x00E8663C);
+            gfx_rect(&b, ex + 6 - ax / 2, ey + 6 - ax / 2, ex + 6 + ax / 2, ey + 6 + ax / 2, 0x00F2C14E);
+          }
+        }
+        i = i + 1;
+      }
+
+      // 玩家（无敌帧闪烁；死了就不画）—— hero_kind 0=huiye / 1=hero2 / 2=hero3(32x32)
+      if (st.dead == 0) {
+        if (hero_kind == 2) {
+          // hero4：64x64 四视图（0 正面 / 1 背面 / 2 侧面），图层拆成「上身+头发」和「腿」两张表。
+          // 图层走 lib\layer.fl：z 序 + 分数缩放（3/4 -> 48 上屏）+ 层内偏移；
+          //   行走 = 上身 1px 起伏 + 腿层 3px 前后摆，不用存 N 张整图。
+          frame = 0;
+          hfl = 0;
+          hbx = 0;
+          hby = 0;
+          hldx = 0;
+          if (moving == 1) {
+            // 3..6 = 行走 4 帧（伸腿 + 摆臂已经画进帧里）
+            frame = 3 + ((st.fc / 5) % 4);
+            if (combo.step > 0) { frame = 6 + combo.step; }   // 7 拔刀 / 8 一斩 / 9 二斩
+            if (st.face == 0) { hfl = 1; }
+          } else {
+            if (hero.vy < 0) { frame = 1; }
+            // 站定也保留朝向：朝左 = 正面帧镜像（不再固定「脸朝右」）
+            if (st.face == 0) { hfl = 1; }
+            // 站定出刀：连击段数驱动攻击帧（7/8/9）
+            if (combo.step > 0) { frame = 6 + combo.step; }
+          }
+          if (st.invuln > 0) {
+            if ((st.fc / 3) % 2 == 0) {
+              layer_start(&ls);
+              layer_add(&ls, 0, hpx - st.cam_x + sx - 16, hpy + sy - 32, 10, hbx, hby, hsn, hsd, hfl);
+              layer_add(&ls, 1, hpx - st.cam_x + sx - 16, hpy + sy - 32, 11, hbx + hldx, hby + 39, hsn, hsd, hfl);
+              layer_order(&ls);
+              lk = 0;
+              while (lk < layer_count(&ls)) {
+                if (layer_slot(&ls, lk) == 0) {
+                  sprite_blit_frac(&b, layer_px(&ls, lk), layer_py(&ls, lk), hbuf4b, 64, 52, frame, pal3, 10, layer_snum(&ls, lk), layer_sden(&ls, lk), layer_flip(&ls, lk));
+                } else {
+                  sprite_blit_frac(&b, layer_px(&ls, lk), layer_py(&ls, lk), hbuf4l, 64, 12, frame, pal3, 10, layer_snum(&ls, lk), layer_sden(&ls, lk), layer_flip(&ls, lk));
+                }
+                lk = lk + 1;
+              }
+            }
+          } else {
+            layer_start(&ls);
+            layer_add(&ls, 0, hpx - st.cam_x + sx - 16, hpy + sy - 32, 10, hbx, hby, hsn, hsd, hfl);
+            layer_add(&ls, 1, hpx - st.cam_x + sx - 16, hpy + sy - 32, 11, hbx + hldx, hby + 39, hsn, hsd, hfl);
+            layer_order(&ls);
+            lk = 0;
+            while (lk < layer_count(&ls)) {
+              if (layer_slot(&ls, lk) == 0) {
+                sprite_blit_frac(&b, layer_px(&ls, lk), layer_py(&ls, lk), hbuf4b, 64, 52, frame, pal3, 10, layer_snum(&ls, lk), layer_sden(&ls, lk), layer_flip(&ls, lk));
+              } else {
+                sprite_blit_frac(&b, layer_px(&ls, lk), layer_py(&ls, lk), hbuf4l, 64, 12, frame, pal3, 10, layer_snum(&ls, lk), layer_sden(&ls, lk), layer_flip(&ls, lk));
+              }
+              lk = lk + 1;
+            }
+          }
+        } else if (hero_kind == 1) {
+          state = actor2_state_for(moving);
+          frame = actor2_frame(state, st.fc);
+          if (combo.step > 0) { frame = 2; }   // hero2 的 3 帧：2 = 走B/攻击
+          if (st.invuln > 0) {
+            if ((st.fc / 3) % 2 == 0) {
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf2, 16, 16, frame, pal2, 7);
+            }
+          } else {
+            if (charge > 20) {
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf2, 16, 16, frame, wpal, 7);
+            } else {
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf2, 16, 16, frame, pal2, 7);
+            }
+          }
+        } else {
+          state = actor_state_for(moving);
+          frame = actor_frame(state, st.fc);
+          if (st.invuln > 0) {
+            if ((st.fc / 3) % 2 == 0) {
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf, 16, 16, frame, pal, 7);
+            }
+          } else {
+            if (charge > 20) {
+              // 蓄力发光：白影（和受击闪白同一个 wpal 调色板）
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf, 16, 16, frame, wpal, 7);
+            } else {
+              sprite_blit(&b, hpx - st.cam_x + sx, hpy + sy, hbuf, 16, 16, frame, pal, 7);
+            }
+          }
+        }
+        // 挥砍：身前一道亮条（3 段越长越亮）
+        if (combo.step > 0) {
+          ax = hpx - st.cam_x + sx;
+          if (st.face == 1) { ax = ax + 16; } else { ax = ax - 12; }
+          gfx_rect(&b, ax, hpy + sy + 2, ax + 12, hpy + sy + 14, 0x00A8C8F0);
+          gfx_rect(&b, ax + 2, hpy + sy + 4, ax + 10, hpy + sy + 12, 0x00E8F0FF);
+          if (combo.step >= 3) {
+            gfx_rect(&b, ax, hpy + sy, ax + 12, hpy + sy + 2, 0x00F2C14E);
+          }
+        }
+      }
+
+      // ---- 蓄力：16 个粒子（内外两圈向心汇聚）+ 中心能量球 ----
+      if (charge > 0) {
+        if (st.dead == 0) {
+          i = 0;
+          while (i < 16) {
+            d = 34 - charge / 2 - (i / 8) * 10;
+            if (d < 2) { d = 2; }
+            ax = hpx - st.cam_x + sx + 8 + udir[(i % 8) * 2] * d;
+            ay = hpy + sy + 8 + udir[(i % 8) * 2 + 1] * d;
+            col = sw_hue((charge * 6 + i * 16) & 255);
+            gfx_rect(&b, ax, ay, ax + 2, ay + 2, col);
+            i = i + 1;
+          }
+          // 中心能量球：随蓄力变大
+          d = charge / 3 + 2;
+          col = sw_hue((charge * 8 + 128) & 255);
+          gfx_rect(&b, hpx - st.cam_x + sx + 8 - d, hpy + sy + 8 - d,
+                   hpx - st.cam_x + sx + 8 + d, hpy + sy + 8 + d, col);
+        }
+      }
+      // ---- 七彩冲击波（世界层，随相机/震屏）----
+      if (sw.active == 1) {
+        sw_draw(&b, &sw, st.cam_x + sx, sy);
+      }
+
+      if (fx.flash > 0) { gfx_flash(&b, 96); }
+      hud_draw(&b, &st);
+      // 帧周期调试：右上角两个数（平均 ms / 本组最大 ms）。16 = 正常，31+ = 掉帧
+      hud_num(&b, 452, 26, tavg, 0x00F2C14E, 1);
+      hud_num(&b, 452, 34, tmx, 0x00E8663C, 1);
+      // 窗口 2x：逻辑 480x270 先在内存放大到 960x540，再 1:1 推上屏（ULW 不拉伸，像素清晰）
+      gfx_zoom(&b, &sf, 2);
+      gfx_present(&sf);
+      gui_win_frame_wait(&c);
+      st.fc = st.fc + 1;
+      // 帧周期统计：每帧记一次间隔，60 帧出一组平均/最大（HUD 右上角，单位 ms）
+      tnow = GetTickCount();
+      if (tprev != 0) {
+        d = tnow - tprev;
+        tacc = tacc + d;
+        tn = tn + 1;
+        if (d > tmx) { tmx = d; }
+      }
+      tprev = tnow;
+      if (tn >= 60) { tavg = tacc / tn; tacc = 0; tn = 0; tmx = 0; }
+    }
+  }
+  return 0;
+}

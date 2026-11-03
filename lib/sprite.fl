@@ -80,8 +80,7 @@ int sprite_blit_scale_flip(struct GfxBuf *b, int x, int y, int *data, int w, int
 
 // 放大绘制：每个精灵像素画成 scale×scale 的方块（scale=1 等同 sprite_blit）。
 // 为什么不用 surf_alpha：游戏画面 1:1 直贴，放大是整数倍、不会糊。
-int sprite_blit_scale(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol, int scale) {
-  int fx = 0;
+int sprite_blit_scale(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol, int scale) {  int fx = 0;
   int fy = 0;
   int v = 0;
   int n = 0;
@@ -104,6 +103,50 @@ int sprite_blit_scale(struct GfxBuf *b, int x, int y, int *data, int w, int h, i
       fx = fx + 1;
     }
     fy = fy + 1;
+  }
+  return n;
+}
+
+// 分数缩放绘制（最近邻）：snum/sden 是缩放比，snum < sden 就是缩小。
+// 为什么需要：AI 稿是 64x64 高保真素材，游戏里常常要缩到 40~48 显示；
+// sprite_blit_scale 只能整数倍，做不到 3/4、5/8 这种。flip 非 0 时左右镜像。
+// 目标矩形 (x, y) 到 (x+ow, y+oh)，ow = w*snum/sden、oh = h*snum/sden。
+int sprite_blit_frac(struct GfxBuf *b, int x, int y, int *data, int w, int h, int frame, int *pal, int ncol, int snum, int sden, int flip) {
+  int dx = 0;
+  int dy = 0;
+  int sx = 0;
+  int sy = 0;
+  int ow = 0;
+  int oh = 0;
+  int v = 0;
+  int n = 0;
+  int base = 0;
+  if (data == 0) { return 0; }
+  if (pal == 0) { return 0; }
+  if (w <= 0) { return 0; }
+  if (h <= 0) { return 0; }
+  if (snum <= 0) { return 0; }
+  if (sden <= 0) { return 0; }
+  base = frame * w * h;
+  ow = (w * snum) / sden;
+  oh = (h * snum) / sden;
+  while (dy < oh) {
+    sy = (dy * sden) / snum;
+    if (sy > h - 1) { sy = h - 1; }
+    dx = 0;
+    while (dx < ow) {
+      sx = (dx * sden) / snum;
+      if (sx > w - 1) { sx = w - 1; }
+      if (flip != 0) { sx = w - 1 - sx; }
+      v = data[base + sy * w + sx];
+      if (v > 0) {
+        if (v < ncol) {
+          n = n + gfx_px(b, x + dx, y + dy, pal[v]);
+        }
+      }
+      dx = dx + 1;
+    }
+    dy = dy + 1;
   }
   return n;
 }

@@ -528,7 +528,9 @@ static void pe_write_sections(Buf *out, const PeBodyPack *b, GenResult *gen) {
     for (uint32_t i = 0; i < b->data_vsize; i++) buf_byte(out, 0);
     for (int i = 0; i < gen->nglobals; i++) {
       GlobalVar *g = &gen->globals[i];
-      if (g->init_len <= 0) continue;
+      // 2026-11-03：init 是**按实际长度 malloc 的指针**（不再是内嵌的 64 字节缓冲）⇒ 没有初值时是 NULL，
+      //   init_len > 0 必然非 NULL；两个条件都查是为了别让将来「先置 init_len 再填指针」的改动读空指针。
+      if (g->init_len <= 0 || !g->init) continue;
       size_t at = b->data_raw_ptr + (size_t)g->doff;
       for (int k = 0; k < g->init_len; k++)
         out->data[at + (size_t)k] = g->init[k];

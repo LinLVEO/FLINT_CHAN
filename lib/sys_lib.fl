@@ -1,0 +1,808 @@
+// sys_lib.fl — FLINT 标准库（系统上下文批）：环境变量 + 命令行参数 + 路径 / 目录
+// 用法：include "../../lib/sys_lib.fl"（路径相对本文件目录解析）
+// 整合：2026-11-03 由 env_lib.fl + path_lib.fl 合并 —— 两者同属"进程与文件系统上下文"；
+//       函数名与语义一字未改，旧 include 改指本文件即可。
+// 自包含：不 include 其它库；api 声明集中在文件顶部（collect_apis 只认最开头连续的那批）。
+// 无全局缓冲 ⇒ 输出缓冲由调用方给，本库只写 [0, cap)（cap 含结尾 NUL）；
+// §4 例外：每个打开的 Dir 分配一块 336 字节状态块（dir_close 负责释放），§1~§3、§5 不分配。
+//
+// 分区：
+//   §1 环境变量   std::env_get / std::env_set
+//   §2 命令行     std::env_argc / std::env_arg
+//   §3 路径 / 目录 std::path_join / path_full / path_dir / path_name / path_ext / path_exists / path_mkdir
+//
+// 返回口径（两区一致）：
+//   * 成功 = 写进 out 的字符数（不含结尾 NUL），并补 NUL；
+//   * 失败 = -1（参数非法 / cap 不够）——先判后写，失败时 out 一个字节都不动；
+//   * "没有对应部分" = 返回 0 且写空串（out[0] = 0），不是 -1。
+api kernel32 ptr GetCommandLineA();
+api kernel32 int GetEnvironmentVariableA(int, int, int);
+api kernel32 int SetEnvironmentVariableA(int, int);
+api kernel32 int GetFullPathNameA(int, int, int, int);
+api kernel32 int GetFileAttributesA(int);
+api kernel32 int CreateDirectoryA(int, int);
+api kernel32 int GetCurrentDirectoryA(int, int);
+api kernel32 ptr FindFirstFileA(int, int);
+api kernel32 int FindNextFileA(int, int);
+api kernel32 int FindClose(int);
+api user32 int OpenClipboard(int);
+api user32 int CloseClipboard();
+api user32 int EmptyClipboard();
+api user32 ptr SetClipboardData(int, int);
+api user32 ptr GetClipboardData(int);
+api kernel32 ptr GlobalAlloc(int, int);
+api kernel32 ptr GlobalLock(int);
+api kernel32 int GlobalUnlock(int);
+api kernel32 ptr GlobalFree(int);
+api advapi32 int RegOpenKeyExA(int, int, int, int, int);
+api advapi32 int RegCreateKeyExA(int, int, int, int, int, int, int, int, int);
+api advapi32 int RegQueryValueExA(int, int, int, int, int, int);
+api advapi32 int RegSetValueExA(int, int, int, int, int, int);
+api advapi32 int RegDeleteValueA(int, int);
+api advapi32 int RegDeleteKeyA(int, int);
+api advapi32 int RegCloseKey(int);
+api kernel32 int CreateProcessA(int, int, int, int, int, int, int, int, int, int);
+api kernel32 int WaitForSingleObject(int, int);
+api kernel32 int GetExitCodeProcess(int, int);
+api kernel32 int CloseHandle(int);
+api kernel32 int DeleteFileA(int);
+api kernel32 int RemoveDirectoryA(int);
+api kernel32 int GetFileAttributesExA(int, int, int);
+
+// ==================== §1 环境变量 ====================
+// GetEnvironmentVariableA 两个口径（实测 2026-11-03）：
+//   探测 (name, 0, 0) 返回所需缓冲大小（含 NUL）；真读成功返回写入字节数（不含 NUL）。
+//   返回 0 = 不存在或空值（Windows 无法区分，本库统一按不存在）。
+// 本库先探长度再读：cap 不够时一个字节都不写（响亮 -1）。
+
+// 取环境变量（ANSI 字节串）。返回字节长度（不含 NUL）；-1 = 不存在/空值/参数非法/cap 不够。
+int std::env_get(char *name, char *buf, int cap) {
+  int need = 0;
+  int n = 0;
+  if (name == 0) { return -1; }
+  if (name[0] == 0) { return -1; }
+  if (buf == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  need = GetEnvironmentVariableA(name, 0, 0);
+  if (need <= 0) { return -1; }
+  if (need > cap) { return -1; }
+  n = GetEnvironmentVariableA(name, buf, cap);
+  if (n <= 0) { return -1; }
+  if (n >= cap) { return -1; }
+  buf[n] = 0;
+  return n;
+}
+
+// 写/删环境变量。1 = 成功，0 = 失败。val == 0 或 val == "" 都是删除（Windows 语义）。
+int std::env_set(char *name, char *val) {
+  if (name == 0) { return 0; }
+  if (name[0] == 0) { return 0; }
+  if (val == 0) {
+    if (SetEnvironmentVariableA(name, 0) != 0) { return 1; }
+    return 0;
+  }
+  if (val[0] == 0) {
+    if (SetEnvironmentVariableA(name, 0) != 0) { return 1; }
+    return 0;
+  }
+  if (SetEnvironmentVariableA(name, val) != 0) { return 1; }
+  return 0;
+}
+
+// ==================== §2 命令行 ====================
+// 解析 GetCommandLineA（与 apps\jsonq\jsonq.fl 的 jq_args 同口径：argv[0] 可带引号、
+// 引号内空格不拆、引号本身不写进结果），区别是参数个数不限。
+
+// 在命令行里定位第 idx 个参数（idx = 0 是 exe 路径）。找到 → 1 并写 *ps/*pe = [start, end)；越界 → 0。
+int env_bounds(char *cmd, int idx, int *ps, int *pe) {
+  int i = 0;
+  int n = 0;
+  int s = 0;
+  int q = 0;
+  if (cmd == 0) { return 0; }
+  if (idx < 0) { return 0; }
+  while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+  while (cmd[i] != 0) {
+    s = i;
+    q = 0;
+    if (cmd[i] == 34) {
+      q = 1;
+      i = i + 1;
+      s = i;
+    }
+    if (q == 1) {
+      while (cmd[i] != 0 && cmd[i] != 34) { i = i + 1; }
+    } else {
+      while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9) { i = i + 1; }
+    }
+    if (n == idx) {
+      *ps = s;
+      *pe = i;
+      return 1;
+    }
+    n = n + 1;
+    if (q == 1) {
+      if (cmd[i] == 34) { i = i + 1; }
+    }
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+  }
+  return 0;
+}
+
+// 参数个数（含 argv[0]），至少 1。
+int std::env_argc() {
+  char *cmd = GetCommandLineA();
+  int i = 0;
+  int n = 1;
+  int q = 0;
+  if (cmd == 0) { return 1; }
+  while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+  if (cmd[i] == 34) {
+    i = i + 1;
+    while (cmd[i] != 0 && cmd[i] != 34) { i = i + 1; }
+    if (cmd[i] == 34) { i = i + 1; }
+  } else {
+    while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9) { i = i + 1; }
+  }
+  while (1) {
+    while (cmd[i] == 32 || cmd[i] == 9) { i = i + 1; }
+    if (cmd[i] == 0) { break; }
+    n = n + 1;
+    q = 0;
+    if (cmd[i] == 34) {
+      q = 1;
+      i = i + 1;
+    }
+    if (q == 1) {
+      while (cmd[i] != 0 && cmd[i] != 34) { i = i + 1; }
+      if (cmd[i] == 34) { i = i + 1; }
+    } else {
+      while (cmd[i] != 0 && cmd[i] != 32 && cmd[i] != 9) { i = i + 1; }
+    }
+  }
+  if (n < 1) { return 1; }
+  return n;
+}
+
+// 取第 idx 个命令行参数。返回字节长度（不含 NUL）；-1 = idx 越界/参数非法/cap 不够。
+int std::env_arg(int idx, char *buf, int cap) {
+  char *cmd = 0;
+  int s = 0;
+  int e = 0;
+  int len = 0;
+  int k = 0;
+  if (buf == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (idx < 0) { return -1; }
+  cmd = GetCommandLineA();
+  if (env_bounds(cmd, idx, &s, &e) == 0) { return -1; }
+  len = e - s;
+  if (len + 1 > cap) { return -1; }
+  while (k < len) {
+    buf[k] = cmd[s + k];
+    k = k + 1;
+  }
+  buf[len] = 0;
+  return len;
+}
+
+// ==================== §3 路径 / 目录 ====================
+// 分隔符口径（实测 2026-11-03）：读入侧 '\'（92）与 '/'（47）都当分隔符；
+// path_join 补的是 '\'；path_dir / path_name / path_ext 原样拷贝输入字节（不做归一化）。
+// path_dir 含末尾分隔符："C:\a\b.txt" → "C:\a\"；根例外 "C:\b.txt" → "C:\"；无分隔符 → 0+空串。
+// path_ext 只在最后一段找最后一个 '.'，".gitignore" / "a." / 无点 → 0+空串。
+
+// 内部件：把 src[soff .. soff+n-1] 写到 out[ooff .. ooff+n-1]（不补 NUL）
+int path_copyn(char *src, int soff, int n, char *out, int ooff) {
+  int i = 0;
+  while (i < n) {
+    out[ooff + i] = src[soff + i];
+    i = i + 1;
+  }
+  return n;
+}
+
+// 内部件：C 串长度（不含 NUL）
+int path_clen(char *s) {
+  int i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  return i;
+}
+
+// 内部件：这个字节是不是路径分隔符（'\' = 92 或 '/' = 47）
+int path_issep(int c) {
+  if (c == 92) { return 1; }
+  if (c == 47) { return 1; }
+  return 0;
+}
+
+// 拼接：out = a + (按需 '\') + b，补 NUL。返回字符数；失败 -1。
+int std::path_join(char *a, char *b, char *out, int cap) {
+  int la = 0;
+  int lb = 0;
+  int need = 0;
+  int sep = 0;
+  int i = 0;
+  if (a == 0) { return -1; }
+  if (b == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  la = path_clen(a);
+  lb = path_clen(b);
+  need = la + lb;
+  if (la > 0 && lb > 0) {
+    if (path_issep(a[la - 1]) == 0) { sep = 1; need = need + 1; }
+  }
+  if (need >= cap) { return -1; }
+  path_copyn(a, 0, la, out, 0);
+  i = la;
+  if (sep == 1) { out[i] = 92; i = i + 1; }
+  path_copyn(b, 0, lb, out, i);
+  i = i + lb;
+  out[i] = 0;
+  return i;
+}
+
+// 取绝对路径（GetFullPathNameA）。返回长度；失败/cap 不够 → -1（先探测再真读，失败不动 out）。
+int std::path_full(char *in, char *out, int cap) {
+  int need = 0;
+  int n = 0;
+  if (in == 0) { return -1; }
+  if (in[0] == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  need = GetFullPathNameA(in, 0, 0, 0);
+  if (need <= 0) { return -1; }
+  if (need > cap) { return -1; }
+  n = GetFullPathNameA(in, cap, out, 0);
+  if (n <= 0) { return -1; }
+  if (n >= cap) { return -1; }
+  out[n] = 0;
+  return n;
+}
+
+// 取目录部分（含末尾 '\'）。返回长度；没有目录部分 → 0+空串；失败 -1。
+int std::path_dir(char *path, char *out, int cap) {
+  int n = 0;
+  int i = 0;
+  int last = -1;
+  if (path == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  n = path_clen(path);
+  i = 0;
+  while (i < n) {
+    if (path_issep(path[i]) == 1) { last = i; }
+    i = i + 1;
+  }
+  if (last < 0) {
+    out[0] = 0;
+    return 0;
+  }
+  if (last + 1 >= cap) { return -1; }
+  path_copyn(path, 0, last + 1, out, 0);
+  out[last + 1] = 0;
+  return last + 1;
+}
+
+// 取文件名部分（最后一个 '\' 或 '/' 之后）。返回长度；没有名字 → 0+空串；失败 -1。
+int std::path_name(char *path, char *out, int cap) {
+  int n = 0;
+  int i = 0;
+  int last = -1;
+  int len = 0;
+  if (path == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  n = path_clen(path);
+  i = 0;
+  while (i < n) {
+    if (path_issep(path[i]) == 1) { last = i; }
+    i = i + 1;
+  }
+  len = n - (last + 1);
+  if (len >= cap) { return -1; }
+  path_copyn(path, last + 1, len, out, 0);
+  out[len] = 0;
+  return len;
+}
+
+// 取扩展名（最后一个 '.' 之后，不含 '.'；只在最后一段里找）。返回长度；没有 → 0+空串；失败 -1。
+int std::path_ext(char *path, char *out, int cap) {
+  int n = 0;
+  int i = 0;
+  int last = -1;
+  int dot = -1;
+  int len = 0;
+  if (path == 0) { return -1; }
+  if (out == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  n = path_clen(path);
+  i = 0;
+  while (i < n) {
+    if (path_issep(path[i]) == 1) { last = i; }
+    i = i + 1;
+  }
+  i = last + 1;
+  while (i < n) {
+    if (path[i] == 46) { dot = i; }
+    i = i + 1;
+  }
+  if (dot < 0) { out[0] = 0; return 0; }
+  if (dot == last + 1) { out[0] = 0; return 0; }
+  len = n - (dot + 1);
+  if (len >= cap) { return -1; }
+  path_copyn(path, dot + 1, len, out, 0);
+  out[len] = 0;
+  return len;
+}
+
+// 路径是否存在（文件/目录）：1 = 存在；0 = 不存在/参数非法。
+int std::path_exists(char *path) {
+  int a = 0;
+  if (path == 0) { return 0; }
+  if (path[0] == 0) { return 0; }
+  a = GetFileAttributesA(path);
+  if (a == -1) { return 0; }
+  return 1;
+}
+
+// 建目录（CreateDirectoryA，只建一级）：1 = 建成；0 = 失败/已存在。
+int std::path_mkdir(char *path) {
+  if (path == 0) { return 0; }
+  if (path[0] == 0) { return 0; }
+  if (CreateDirectoryA(path, 0) != 0) { return 1; }
+  return 0;
+}
+
+// ==================== §4 目录枚举 ====================
+// FIND 句柄归调用方持有（随 struct Dir 的 h 字段走），本库不开全局缓冲。
+// 口径：dir_open 1 = 开成功 / 0 = 失败（d->h 一定是 0）；
+//       dir_next 1 = 取到名字 / 0 = 没有更多 / -1 = 参数错或 cap 不够（name 一个字节都不写）；
+//       dir_close 1 = 这次真关了 / 0 = 本来就没开（或句柄为空）。
+// WIN32_FIND_DATAA 共 320 字节，按字节偏移写死（本机 WIN64 布局）：
+//   dwFileAttributes@0(4) ftCreationTime@4(8) ftLastAccessTime@12(8) ftLastWriteTime@20(8)
+//   nFileSizeHigh@28(4) nFileSizeLow@32(4) dwReserved0@36(4) dwReserved1@40(4)
+//   cFileName@44(260，0 结尾) cAlternateFileName@304(14)
+// FindFirstFileA 失败返回 INVALID_HANDLE_VALUE = -1（不是 0）；这里必须比 -1。
+// 实测 2026-11-03：指针比较写 `h == -1` 是按 64 位符号扩展比的；写成 `char *bad = 0 - 1;`
+// 再 `h == bad` 反而比不到（0-1 走 32 位无符号折叠），别用后者。
+//
+// 首条目：FindFirstFileA 成功时已经把第一个匹配项写进 WIN32_FIND_DATAA；dir_next 第一次
+// 必须原样返回它，否则单文件通配符一个名字都枚举不到。struct Dir 只有 h 一个字段，所以
+// 本区把「FIND 句柄 + 首条目 + 待取标记」打包成一块 336 字节状态块（GlobalAlloc GMEM_ZEROINIT，
+// 布局 h@0(8) fd@8(320) pending@328(4)，按 8 对齐补到 336），d->h 指向它（0 = 未打开）。
+// 句柄仍随 d 归调用方持有；dir_close 负责 FindClose + GlobalFree。
+
+struct DirSt {
+  int *h;
+  char fd[320];
+  int pending;
+}
+
+struct Dir { int *h; }
+
+// 打开枚举。1 = 成功；0 = 失败（d->h 置 0；参数非法/分配失败/模式不存在都走这条）。
+int std::dir_open(struct Dir *d, char *pattern) {
+  struct DirSt *st;
+  int *h = 0;
+  if (d == 0) { return 0; }
+  d->h = 0;
+  if (pattern == 0) { return 0; }
+  if (pattern[0] == 0) { return 0; }
+  st = GlobalAlloc(0x40, 336);
+  if (st == 0) { return 0; }
+  h = FindFirstFileA(pattern, &st->fd[0]);
+  if (h == -1) {
+    GlobalFree(st);
+    return 0;
+  }
+  st->h = h;
+  st->pending = 1;
+  d->h = (int*)st;
+  return 1;
+}
+
+// 取下一个名字（写进 name，补 NUL）。1 = 取到；0 = 没有更多；-1 = 参数错/cap 不够。
+// cap 是 name 的字节数（含结尾 NUL）：名字长度 + 1 > cap 时返回 -1，name 一个字节都不写。
+// 首条目 cap 不够时待取标记不清，下次给够 cap 还能拿到同一个名字（不丢条目）。
+int std::dir_next(struct Dir *d, char *name, int cap) {
+  struct DirSt *st;
+  int i = 0;
+  int n = 0;
+  if (d == 0) { return -1; }
+  if (name == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (d->h == 0) { return -1; }
+  st = d->h;
+  if (st->pending == 0) {
+    if (FindNextFileA(st->h, &st->fd[0]) == 0) { return 0; }
+  }
+  n = 0;
+  while (n < 259) {
+    if (st->fd[44 + n] == 0) { break; }
+    n = n + 1;
+  }
+  if (n >= cap) { return -1; }
+  i = 0;
+  while (i < n) {
+    name[i] = st->fd[44 + i];
+    i = i + 1;
+  }
+  name[n] = 0;
+  st->pending = 0;
+  return 1;
+}
+
+// 关闭枚举。1 = 这次真关了；0 = 本来就没开（d->h 已是 0 / 参数非法）。
+int std::dir_close(struct Dir *d) {
+  struct DirSt *st;
+  int *h = 0;
+  int r = 0;
+  if (d == 0) { return 0; }
+  if (d->h == 0) { return 0; }
+  st = d->h;
+  h = st->h;
+  d->h = 0;
+  r = FindClose(h);
+  GlobalFree(st);
+  if (r == 0) { return 0; }
+  return 1;
+}
+
+// ==================== §5 剪贴板文本 ====================
+// 只做 CF_TEXT（格式 1，ANSI 单字节串）；UTF-16/图片/文件列表都不碰。
+// 所有权：SetClipboardData 成功后那块内存归系统所有，**绝不能再 GlobalFree**（会崩）；
+//         只有 SetClipboardData 失败才自己 GlobalFree。GlobalAlloc 用 0x2 = GMEM_MOVEABLE（CF_TEXT 要求）。
+// 返回口径：clip_set_text 1 = 成功 / 0 = 失败；clip_get_text 长度 / -1 = 无文本/失败/cap 不够。
+// cap 不够时 buf 一个字节都不写（先量长度、再判 cap、最后才拷）。
+
+// 写文本到剪贴板（n 字节，不含结尾 NUL；本函数自己补 NUL）。1 = 成功；0 = 失败。
+int std::clip_set_text(char *s, int n) {
+  int *h = 0;
+  char *mem = 0;
+  int i = 0;
+  if (n < 0) { return 0; }
+  if (n > 0 && s == 0) { return 0; }
+  if (OpenClipboard(0) == 0) { return 0; }
+  if (EmptyClipboard() == 0) { CloseClipboard(); return 0; }
+  h = GlobalAlloc(0x2, n + 1);
+  if (h == 0) { CloseClipboard(); return 0; }
+  mem = GlobalLock(h);
+  if (mem == 0) {
+    GlobalFree(h);
+    CloseClipboard();
+    return 0;
+  }
+  i = 0;
+  while (i < n) {
+    mem[i] = s[i];
+    i = i + 1;
+  }
+  mem[n] = 0;
+  GlobalUnlock(h);
+  if (SetClipboardData(1, h) == 0) {
+    GlobalFree(h);
+    CloseClipboard();
+    return 0;
+  }
+  CloseClipboard();
+  return 1;
+}
+
+// 读剪贴板文本到 buf（cap 含结尾 NUL）。返回字节长度（不含 NUL）；-1 = 无文本/失败/cap 不够。
+int std::clip_get_text(char *buf, int cap) {
+  int *h = 0;
+  char *mem = 0;
+  int n = 0;
+  int i = 0;
+  if (buf == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (OpenClipboard(0) == 0) { return -1; }
+  h = GetClipboardData(1);
+  if (h == 0) { CloseClipboard(); return -1; }
+  mem = GlobalLock(h);
+  if (mem == 0) { CloseClipboard(); return -1; }
+  n = 0;
+  while (mem[n] != 0) { n = n + 1; }
+  if (n >= cap) {
+    GlobalUnlock(h);
+    CloseClipboard();
+    return -1;
+  }
+  i = 0;
+  while (i < n) {
+    buf[i] = mem[i];
+    i = i + 1;
+  }
+  buf[n] = 0;
+  GlobalUnlock(h);
+  CloseClipboard();
+  return n;
+}
+
+// ==================== §6 注册表读写 ====================
+// 只认两个根前缀（必须大写，且后面紧跟一个 '\'、子键非空）：
+//   "HKCU\..." -> HKEY_CURRENT_USER  (0x80000001)
+//   "HKLM\..." -> HKEY_LOCAL_MACHINE (0x80000002)
+// 其它形态（小写 / "BADROOT\..." / 只有 "HKCU" / "HKCU\"）一律拒绝：set / del -> 0，get -> -1。
+// 值只做 REG_SZ（类型 1）：写时长度 = n + 1（含结尾 0），读回长度不含 0。
+// 口径：reg_set_str / reg_del_str / reg_del_key -> 1 成功、0 失败；
+//       reg_get_str -> 长度 / -1（键或值不存在、类型不是 REG_SZ、cap 不够、参数非法）。
+// 先判后写：读时先用 RegQueryValueExA(lpData = 0) 探长度，cap 不够直接 -1，buf 一个字节都不动。
+// 句柄一律用局部 int 承接、每条路径都 RegCloseKey；本区不分配堆内存（子键名用 1024 字节局部缓冲）。
+// 删除：RegDeleteKeyA 不递归 —— 键下若还有子键，reg_del_key 返回 0（不假装成功）。
+
+// 内部件：拆 root_sub。1 = 合法（*phk = 根句柄值；sub = 去掉前缀和 '\' 的子键，补 NUL）；
+// 0 = 非法（前缀不是 HKCU/HKLM、第 5 字节不是 '\'、子键为空、子键装不下 cap）。
+int reg_parse(char *root_sub, int *phk, char *sub, int cap) {
+  int i = 0;
+  int j = 0;
+  int hk = 0;
+  if (root_sub == 0) { return 0; }
+  if (phk == 0) { return 0; }
+  if (sub == 0) { return 0; }
+  if (cap < 2) { return 0; }
+  if (root_sub[0] == 72 && root_sub[1] == 75 && root_sub[2] == 67 && root_sub[3] == 85) {
+    hk = 0x80000001;
+  } else {
+    if (root_sub[0] == 72 && root_sub[1] == 75 && root_sub[2] == 76 && root_sub[3] == 77) {
+      hk = 0x80000002;
+    } else {
+      return 0;
+    }
+  }
+  if (root_sub[4] != 92) { return 0; }
+  i = 5;
+  while (root_sub[i] != 0) {
+    if (j + 1 >= cap) { return 0; }
+    sub[j] = root_sub[i];
+    j = j + 1;
+    i = i + 1;
+  }
+  if (j == 0) { return 0; }
+  sub[j] = 0;
+  *phk = hk;
+  return 1;
+}
+
+// 建键 + 写字符串值（REG_SZ）。1 = 成功；0 = 失败（参数非法 / 建键失败 / 写值失败）。
+// n = val 的字节长度（不含结尾 NUL）。先自己数一遍长度：与 n 不符按参数非法返回 0（不猜、不越界读）。
+int std::reg_set_str(char *root_sub, char *name, char *val, int n) {
+  char sub[1024];
+  int hk = 0;
+  int hk2 = 0;
+  int rc = 0;
+  int k = 0;
+  int ok = 0;
+  if (root_sub == 0) { return 0; }
+  if (name == 0) { return 0; }
+  if (name[0] == 0) { return 0; }
+  if (val == 0) { return 0; }
+  if (n < 0) { return 0; }
+  while (val[k] != 0) {
+    if (k >= n) { return 0; }
+    k = k + 1;
+  }
+  if (k != n) { return 0; }
+  if (reg_parse(root_sub, &hk, sub, 1024) == 0) { return 0; }
+  hk2 = 0;
+  rc = RegCreateKeyExA(hk, sub, 0, 0, 0, 0x20006, 0, &hk2, 0);
+  if (rc != 0) { return 0; }
+  if (hk2 == 0) { return 0; }
+  rc = RegSetValueExA(hk2, name, 0, 1, val, n + 1);
+  if (rc == 0) { ok = 1; }
+  RegCloseKey(hk2);
+  return ok;
+}
+
+// 读字符串值（REG_SZ）到 buf（cap 含结尾 NUL）。返回字节长度（不含 NUL）；-1 = 失败/cap 不够。
+// 先探长度：cap 不够直接 -1，buf 一个字节都不写。
+int std::reg_get_str(char *root_sub, char *name, char *buf, int cap) {
+  char sub[1024];
+  int hk = 0;
+  int hk2 = 0;
+  int rc = 0;
+  int ty = 0;
+  int cb = 0;
+  int n = 0;
+  if (root_sub == 0) { return -1; }
+  if (name == 0) { return -1; }
+  if (name[0] == 0) { return -1; }
+  if (buf == 0) { return -1; }
+  if (cap < 1) { return -1; }
+  if (reg_parse(root_sub, &hk, sub, 1024) == 0) { return -1; }
+  hk2 = 0;
+  rc = RegOpenKeyExA(hk, sub, 0, 0x20019, &hk2);   // KEY_READ
+  if (rc != 0) { return -1; }
+  if (hk2 == 0) { return -1; }
+  ty = 0;
+  cb = 0;
+  rc = RegQueryValueExA(hk2, name, 0, &ty, 0, &cb);   // 只问长度，不碰 buf
+  if (rc != 0) { RegCloseKey(hk2); return -1; }
+  if (ty != 1) { RegCloseKey(hk2); return -1; }
+  if (cb < 1) { RegCloseKey(hk2); return -1; }
+  if (cb > cap) { RegCloseKey(hk2); return -1; }
+  cb = cap;
+  rc = RegQueryValueExA(hk2, name, 0, &ty, buf, &cb);
+  if (rc != 0) { RegCloseKey(hk2); return -1; }
+  n = 0;
+  while (n < cb) {
+    if (buf[n] == 0) { break; }
+    n = n + 1;
+  }
+  if (n >= cap) { RegCloseKey(hk2); return -1; }
+  buf[n] = 0;
+  RegCloseKey(hk2);
+  return n;
+}
+
+// 删值。1 = 成功（RegDeleteValueA 返回 0）；0 = 失败（键不存在 / 值不存在 / 参数非法）。
+int std::reg_del_str(char *root_sub, char *name) {
+  char sub[1024];
+  int hk = 0;
+  int hk2 = 0;
+  int rc = 0;
+  int ok = 0;
+  if (root_sub == 0) { return 0; }
+  if (name == 0) { return 0; }
+  if (name[0] == 0) { return 0; }
+  if (reg_parse(root_sub, &hk, sub, 1024) == 0) { return 0; }
+  hk2 = 0;
+  rc = RegOpenKeyExA(hk, sub, 0, 0x20006, &hk2);   // KEY_WRITE
+  if (rc != 0) { return 0; }
+  if (hk2 == 0) { return 0; }
+  rc = RegDeleteValueA(hk2, name);
+  if (rc == 0) { ok = 1; }
+  RegCloseKey(hk2);
+  return ok;
+}
+
+// 删键（RegDeleteKeyA，单层、不递归）。1 = 成功；0 = 失败（键不存在 / 还有子键 / 参数非法）。
+int std::reg_del_key(char *root_sub) {
+  char sub[1024];
+  int hk = 0;
+  int rc = 0;
+  if (root_sub == 0) { return 0; }
+  if (reg_parse(root_sub, &hk, sub, 1024) == 0) { return 0; }
+  rc = RegDeleteKeyA(hk, sub);
+  if (rc == 0) { return 1; }
+  return 0;
+}
+
+// ==================== §7 进程创建 ====================
+// 只做「起一个子进程」：同步档（等它结束、拿退出码）+ 异步档（拿 PID 就走）。
+// 命令行原样交给 CreateProcessA 的 lpCommandLine —— 引号/重定向/PATH 查找全由它自己按
+// Windows 规则解析，本库不拼接、不加引号、不解释（"cmd /c x" 与 "\"C:\\a b\\x.exe\"" 都照给）。
+// 结构按 x64 实测布局写死（FLINT 没有 sizeof，字段自己数）：
+//   STARTUPINFOA 68 字节：cb@0(4) = 68，其余字段全 0（cb 4 + rest 64）
+//   PROCESS_INFORMATION 24 字节：hProcess@0(8) hThread@8(8) dwProcessId@16(4) dwThreadId@20(4)
+// 句柄：等待档等完再关两个；异步档起完立刻关两个（CloseHandle 不影响子进程继续跑）。
+// 返回口径：proc_run_wait -> 退出码（0..255 语义同被起程序）/ -1 = 启动失败或参数非法；
+//           proc_run_nowait -> PID（> 0）/ -1 = 启动失败或参数非法。
+
+struct Si { int cb; char rest[64]; }
+struct Pi { int *hProcess; int *hThread; int pid; int tid; }
+
+// 同步跑：CreateProcessA -> WaitForSingleObject(INFINITE) -> GetExitCodeProcess -> 关句柄。
+// 返回退出码；-1 = 启动失败（CreateProcessA 返回 0）/ cmdline 为 0 或空串 / 等或取码失败。
+int std::proc_run_wait(char *cmdline) {
+  struct Si si = {0};
+  struct Pi pi = {0};
+  int code = 0;
+  int w = 0;
+  if (cmdline == 0) { return -1; }
+  if (cmdline[0] == 0) { return -1; }
+  si.cb = 68;
+  if (CreateProcessA(0, cmdline, 0, 0, 0, 0, 0, 0, &si, &pi) == 0) { return -1; }
+  w = WaitForSingleObject(pi.hProcess, 0 - 1);   // 0 - 1 = INFINITE(0xFFFFFFFF)
+  code = 0;
+  if (GetExitCodeProcess(pi.hProcess, &code) == 0) { code = -1; }
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  if (w == -1) { return -1; }
+  return code;
+}
+
+// 异步跑：始终 CreateProcessA，起完只取 PID、立刻关两个句柄（不等待、不阻塞）。
+// 返回 PID（> 0）；-1 = 启动失败 / cmdline 为 0 或空串 / 拿不到 PID。
+int std::proc_run_nowait(char *cmdline) {
+  struct Si si = {0};
+  struct Pi pi = {0};
+  int npid = 0;
+  if (cmdline == 0) { return -1; }
+  if (cmdline[0] == 0) { return -1; }
+  si.cb = 68;
+  if (CreateProcessA(0, cmdline, 0, 0, 0, 0, 0, 0, &si, &pi) == 0) { return -1; }
+  npid = pi.pid;
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  if (npid <= 0) { return -1; }
+  return npid;
+}
+
+// ==================== §8 目录递归删除 ====================
+// 递归删 path 下全部文件与子目录，最后删 path 本身；1 = 成功（或本来不存在 ⇒ 幂等）；
+// 0 = 失败（参数非法 / 路径过长 / 任一删除失败）。
+// 用 FindFirstFileA 枚举（WIN32_FIND_DATAA 布局同 §4，cFileName@44）；跳过 "." 与 ".."；
+// GetFileAttributesA 的 FILE_ATTRIBUTE_DIRECTORY(0x10) 判目录；不跟随重解析点。
+int std::dir_remove_tree(char *path) {
+  char full[1024];
+  char fd[320];
+  int *h = 0;
+  int n = 0;
+  int a = 0;
+  int ok = 1;
+  int i = 0;
+  if (path == 0) { return 0; }
+  if (path[0] == 0) { return 0; }
+  if (GetFileAttributesA(path) == -1) { return 1; }   // 本来就不存在 = 幂等成功
+  n = 0;
+  while (path[n] != 0) {
+    if (n >= 1018) { return 0; }
+    full[n] = path[n];
+    n = n + 1;
+  }
+  if (n > 0) {
+    if (full[n - 1] != 92 && full[n - 1] != 47) { full[n] = 92; n = n + 1; }
+  }
+  full[n] = 42;                                       // '*'
+  full[n + 1] = 0;
+  h = FindFirstFileA(full, &fd[0]);
+  if (h != 0 - 1) {
+    while (1) {
+      if (!(fd[44] == 46 && (fd[45] == 0 || (fd[45] == 46 && fd[46] == 0)))) {
+        i = 0;
+        while (path[i] != 0) {
+          if (i >= 1018) { ok = 0; break; }
+          full[i] = path[i];
+          i = i + 1;
+        }
+        if (ok == 1 && i > 0) {
+          if (full[i - 1] != 92 && full[i - 1] != 47) { full[i] = 92; i = i + 1; }
+          n = 0;
+          while (fd[44 + n] != 0) {
+            if (i + n >= 1023) { ok = 0; break; }
+            full[i + n] = fd[44 + n];
+            n = n + 1;
+          }
+          full[i + n] = 0;
+        }
+        if (ok == 1) {
+          a = GetFileAttributesA(full);
+          if (a != -1 && (a & 16) != 0) {
+            if (std::dir_remove_tree(full) == 0) { ok = 0; }
+          } else {
+            if (DeleteFileA(full) == 0) { ok = 0; }
+          }
+        }
+      }
+      if (FindNextFileA(h, &fd[0]) == 0) { break; }
+    }
+    FindClose(h);
+  }
+  if (ok == 0) { return 0; }
+  if (RemoveDirectoryA(path) == 0) { return 0; }
+  return 1;
+}
+
+// ==================== §9 文件时间 ====================
+// 取最后写入时间（FILETIME：自 1601-01-01 起的 100ns 计数），低/高 32 位写回。
+// 1 = 成功；-1 = 失败（不存在 / 参数非法 / 时间为 0）。
+// WIN32_FILE_ATTRIBUTE_DATA 36 字节（按 4 对齐，用 40 字节缓冲接）：
+//   attributes@0(4) creation@4(8) lastAccess@12(8) lastWrite@20(8) sizeHigh@28(4) sizeLow@32(4)
+// 所以最后写入时间的 lo 在 @20、hi 在 @24（小端）。
+int std::file_mtime(char *path, int *lo, int *hi) {
+  char d[40];
+  int i = 0;
+  if (path == 0) { return -1; }
+  if (lo == 0) { return -1; }
+  if (hi == 0) { return -1; }
+  i = 0;
+  while (i < 40) { d[i] = 0; i = i + 1; }
+  if (GetFileAttributesExA(path, 0, &d[0]) == 0) { return -1; }
+  *lo = d[20] | (d[21] << 8) | (d[22] << 16) | (d[23] << 24);
+  *hi = d[24] | (d[25] << 8) | (d[26] << 16) | (d[27] << 24);
+  if (*lo == 0 && *hi == 0) { return -1; }
+  return 1;
+}

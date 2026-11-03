@@ -90,7 +90,11 @@ function main() {
     console.error(`sprite2fl: 目录不存在 ${SRC_DIR}`);
     process.exit(1);
   }
-  const files = fs.readdirSync(SRC_DIR).filter((f) => f.endsWith(".txt")).sort();
+  // hero2/hero3/… 由 tools\sprite2fl2.js（--name）单独生成，避免同符号重复定义
+  const EXCLUDE = ["hero2", "hero4"];
+  const files = fs.readdirSync(SRC_DIR)
+    .filter((f) => f.endsWith(".txt") && !EXCLUDE.includes(path.basename(f, ".txt")))
+    .sort();
   if (files.length === 0) {
     console.error("sprite2fl: sprites\\ 下没有 .txt");
     process.exit(1);

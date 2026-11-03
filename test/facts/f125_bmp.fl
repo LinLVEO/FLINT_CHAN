@@ -1,0 +1,93 @@
+// f125_bmp.fl -- image_lib 探针：BMP 24 位写 / 24 位读回；8 位掩码全亮（255）-> 退出 42
+// 判据（期望值 = 本机实测，全部真跑）：
+//   bit0  4x3 rgba 造图 -> bmp_save 返回 1
+//   bit1  bmp_info 读回：宽 4、高 3、bpp 24
+//   bit2  bmp_load 读回像素与原始 rgba 逐字节 RGB 相同（原图 alpha 全 255，24 位不丢 RGB）
+//   bit3  文件确实存在且大小 > 54
+//   bit4  读不存在的文件 -> bmp_info 返回 -1
+//   bit5  非法尺寸 w=0 -> bmp_save 返回 0
+//   bit6  bmp_load 给 cap 不够（47 < 48）-> -1
+//   bit7  再存再读一次，像素仍与原图相同（幂等）
+include "../../lib/image_lib.fl"
+api kernel32 int GetFileSize(int, int);
+
+int main() {
+  char src[48];
+  char out[48];
+  int w = 0;
+  int h = 0;
+  int bpp = 0;
+  int mask = 0;
+  int i = 0;
+  int ok = 0;
+  int *fh = 0;
+  int sz = 0;
+
+  // 造 4x3 rgba（12 像素 x 4 字节）：RGB 按像素递变、各通道可辨；alpha 全 255（24 位会丢 alpha）
+  i = 0;
+  while (i < 12) {
+    src[i * 4] = 10 + i * 3;
+    src[i * 4 + 1] = 20 + i * 5;
+    src[i * 4 + 2] = 30 + i * 7;
+    src[i * 4 + 3] = 255;
+    i = i + 1;
+  }
+
+  // bit0：存盘
+  if (std::bmp_save("test\\tmp\\f125.bmp", src, 4, 3) == 1) { mask = mask | 1; }
+
+  // bit1：读文件头
+  if (std::bmp_info("test\\tmp\\f125.bmp", &w, &h, &bpp) == 1) {
+    if (w == 4 && h == 3 && bpp == 24) { mask = mask | 2; }
+  }
+
+  // bit2：像素逐字节回读（RGB 三通道 + 补出的 A=255）
+  if (std::bmp_load("test\\tmp\\f125.bmp", out, 48) == 48) {
+    ok = 1;
+    i = 0;
+    while (i < 12) {
+      if (out[i * 4] != src[i * 4]) { ok = 0; }
+      if (out[i * 4 + 1] != src[i * 4 + 1]) { ok = 0; }
+      if (out[i * 4 + 2] != src[i * 4 + 2]) { ok = 0; }
+      if (out[i * 4 + 3] != 255) { ok = 0; }
+      i = i + 1;
+    }
+    if (ok == 1) { mask = mask | 4; }
+  }
+
+  // bit3：文件存在且大小 > 54（54 = 14 + 40，至少要有像素）
+  fh = CreateFileA("test\\tmp\\f125.bmp", 0x80000000, 0, 0, 3, 0x80, 0);
+  if (fh != 0) {
+    sz = GetFileSize(fh, 0);
+    CloseHandle(fh);
+    if (sz > 54) { mask = mask | 8; }
+  }
+
+  // bit4：不存在的文件 -> -1
+  if (std::bmp_info("test\\tmp\\f125_missing.bmp", &w, &h, &bpp) == -1) { mask = mask | 16; }
+
+  // bit5：非法尺寸 w=0 -> 0（在开文件之前就拒）
+  if (std::bmp_save("test\\tmp\\f125_bad.bmp", src, 0, 3) == 0) { mask = mask | 32; }
+
+  // bit6：cap 不够（4*3*4 = 48，这里只给 47）-> -1
+  if (std::bmp_load("test\\tmp\\f125.bmp", out, 47) == -1) { mask = mask | 64; }
+
+  // bit7：幂等——再存一次到另一个文件、再读回，像素仍与原图相同
+  if (std::bmp_save("test\\tmp\\f125b.bmp", src, 4, 3) == 1) {
+    if (std::bmp_load("test\\tmp\\f125b.bmp", out, 48) == 48) {
+      ok = 1;
+      i = 0;
+      while (i < 12) {
+        if (out[i * 4] != src[i * 4]) { ok = 0; }
+        if (out[i * 4 + 1] != src[i * 4 + 1]) { ok = 0; }
+        if (out[i * 4 + 2] != src[i * 4 + 2]) { ok = 0; }
+        i = i + 1;
+      }
+      if (ok == 1) { mask = mask | 128; }
+    }
+  }
+
+  print(["f125 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

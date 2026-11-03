@@ -1,0 +1,84 @@
+// apps\scene_probe.fl -- 场景 / 塔层切换的无头探针（**不建窗**）：两层来回切，正常退 0
+//
+// 运行（必须在**仓库根目录**下，地图路径是相对 CWD 的）：
+//   tmp\hlc_stable.exe -o tmp\scene_probe.exe apps\scene_probe.fl
+//   tmp\scene_probe.exe            (echo $LASTEXITCODE -> 0)
+//
+// 干什么：round 1/2 各跑一遍「装 1 层 -> 切到 2 层 -> 再装回 1 层」，每一步都验
+//   层号 / 尺寸 / 出生点 / 传送门 / 地图内容 / 相机复位，并打一行到 stdout。
+// 判据：全部通过 ⇒ 退出 0；出错 ⇒ 90..99（码见每个 return）。
+include "../lib/scene.fl"
+
+// 验一层：floor 的期望尺寸 / 出生点 / 传送门判定；返回 1 = 全对。
+int check_floor(struct Scene *s, int floor, int mw, int mh, int sx, int sy) {
+  if (s->floor != floor) { return 0; }
+  if (s->mw != mw) { return 0; }
+  if (s->mh != mh) { return 0; }
+  if (scene_spawn_x(s) != sx) { return 0; }
+  if (scene_spawn_y(s) != sy) { return 0; }
+  return 1;
+}
+
+int main() {
+  struct Scene s;
+  struct Camera cam;
+  int round = 1;
+  int fails = 0;
+  int tp = 0;
+  int cbuf[1024];
+  int n = 0;
+
+  if (scene_init(&s) == 0) { return 90; }
+  // 视口 480x270、横向死区 40（与 apps\tower\main.fl 同档）
+  if (camera_init(&cam, 480, 270, 40, 0) == 0) { return 91; }
+
+  while (round <= 2) {
+    // ---- 1 层 ----
+    if (scene_load_floor(&s, 1) != 1) { print(["round ", round, " load1 FAIL\n"]); return 92; }
+    if (check_floor(&s, 1, 60, 17, 32, 32) == 0) {
+      print(["round ", round, " floor1 fields FAIL\n"]);
+      fails = fails + 1;
+    }
+    if (scene_at(&s, 0, 16) != 1) { fails = fails + 1; }
+    if (scene_teleport_at(&s, 48, 256) != 0) { fails = fails + 1; }
+    if (scene_reset_camera(&s, &cam) != 1) { fails = fails + 1; }
+    print(["round ", round, " floor=1 mw=", s.mw, " mh=", s.mh,
+           " spawn=", scene_spawn_x(&s), ",", scene_spawn_y(&s),
+           " cam=", cam.x, ",", cam.y, "\n"]);
+
+    // ---- 切到 2 层 ----
+    if (scene_next(&s) != 1) { print(["round ", round, " next FAIL\n"]); return 93; }
+    if (check_floor(&s, 2, 32, 17, 48, 240) == 0) {
+      print(["round ", round, " floor2 fields FAIL\n"]);
+      fails = fails + 1;
+    }
+    if (scene_at(&s, 6, 4) != 1) { fails = fails + 1; }   // 2 层独有的实心台
+    if (scene_at(&s, 17, 7) != 9) { fails = fails + 1; }  // 单向平台
+    tp = scene_teleport_at(&s, 456, 248);
+    if (tp != 1) { fails = fails + 1; }
+    if (scene_reset_camera(&s, &cam) != 1) { fails = fails + 1; }
+    if (cam.x != 0) { fails = fails + 1; }
+    if (cam.y != 2) { fails = fails + 1; }
+    // 碰撞口径：7/8 拷贝时变 0，Scene 自己不动
+    n = scene_to_grid(&s, cbuf, 1024);
+    if (n != 544) { fails = fails + 1; }
+    if (cbuf[15 * 32 + 3] != 0) { fails = fails + 1; }
+    if (scene_at(&s, 3, 15) != 7) { fails = fails + 1; }
+    print(["round ", round, " floor=2 mw=", s.mw, " mh=", s.mh,
+           " spawn=", scene_spawn_x(&s), ",", scene_spawn_y(&s),
+           " tp=", tp, " cam=", cam.x, ",", cam.y, "\n"]);
+
+    // ---- 已是顶层：再切一层必须 0 且不动 ----
+    if (scene_next(&s) != 0) { fails = fails + 1; }
+    if (s.floor != 2) { fails = fails + 1; }
+
+    round = round + 1;
+  }
+
+  if (fails != 0) {
+    print(["fails=", fails, "\n"]);
+    return 99;
+  }
+  print(["scene_probe OK (2 rounds, 2 floors, back and forth)\n"]);
+  return 0;
+}

@@ -195,3 +195,60 @@ int gfx_flash(struct GfxBuf *b, int alpha) {
   }
   return 1;
 }
+
+// 最近邻整数放大：把帧缓冲 b（w×h）按 scale 倍写进表面 dst 的**左上区域**（dst.bw = DIB 行宽）。
+// 为什么在库里做（而不是让 ULW 拉伸）：ULW 的 psize 是「源尺寸」，窗口尺寸变了它会把源图平滑缩放
+//   （像素风会糊）；先在内存里最近邻放大成 1:1 尺寸，ULW 只负责一字不差推上屏。
+// 用法：逻辑分辨率 480x270、窗口 960x540 时 gfx_zoom(&b, &win_surf, 2) 再 gfx_present(&win_surf)。
+int gfx_zoom(struct GfxBuf *src, struct Surf *dst, int scale) {
+  char *sp = 0;
+  char *dp = 0;
+  int sw = 0;
+  int sh = 0;
+  int y = 0;
+  int x = 0;
+  int yy = 0;
+  int xx = 0;
+  int si = 0;
+  int di = 0;
+  int bl = 0;
+  int gr = 0;
+  int rd = 0;
+  if (src == 0) { return 0; }
+  if (dst == 0) { return 0; }
+  if (src->bits == 0) { return 0; }
+  if (dst->bits == 0) { return 0; }
+  if (scale < 1) { scale = 1; }
+  sp = src->bits;
+  dp = dst->bits;
+  sw = src->w;
+  sh = src->h;
+  if (sw * scale > dst->bw) { return 0; }
+  if (sh * scale > dst->bh) { return 0; }
+  y = 0;
+  while (y < sh) {
+    yy = 0;
+    while (yy < scale) {
+      x = 0;
+      while (x < sw) {
+        si = (y * src->stride + x) * 4;
+        bl = sp[si] & 255;
+        gr = sp[si + 1] & 255;
+        rd = sp[si + 2] & 255;
+        xx = 0;
+        while (xx < scale) {
+          di = ((y * scale + yy) * dst->bw + x * scale + xx) * 4;
+          dp[di] = bl;
+          dp[di + 1] = gr;
+          dp[di + 2] = rd;
+          dp[di + 3] = 255;
+          xx = xx + 1;
+        }
+        x = x + 1;
+      }
+      yy = yy + 1;
+    }
+    y = y + 1;
+  }
+  return 1;
+}

@@ -825,6 +825,12 @@ int main(int argc, char **argv) {
   slotmap_set_no_regs(want_debug ? 1 : 0);
   Program prog = parse(all);
 
+  // ===== C1：有错就不产 exe、不进 codegen =====
+  // parse 已经把能恢复的错误都报完了（函数级恢复），但 AST 里仍有半截函数；
+  //   在坏 AST 上生成机器码是"产出错误产物"的最短路径，所以一刀切：有错直接退 1。
+  //   无错时这里 g_err_count == 0，产物与 C1 之前逐字节相同（等价门守着）。
+  if (g_err_count > 0) return 1;
+
   // —— 阶段 3：代码生成（自写机器码编码器）——
   GenResult gen = codegen_main(prog);
 

@@ -1,0 +1,215 @@
+// scene.fl -- 场景 / 塔层切换：多层地图 + 传送门 + 出生点 + 相机重置
+//
+// 用法：include "scene.fl"（与本文件同目录；也可 include "../../lib/scene.fl"）
+// 依赖：mapload.fl（→ grid.fl / io_lib.fl）、camera.fl（只给 scene_reset_camera 用）
+//
+// 口径（2026-11-02 立，第一刀 = 「数据 + 判定」层：不建窗、不画图、不跑物理）：
+//   ① Scene **自己持有**地图（int map[1024]），调用方不用另备 int 数组；
+//      单层上限 1024 格 —— 现有两层 60x17 = 1020、32x17 = 544，都装得下。
+//   ② tile 号 16px 一格，约定与 apps\tower\map.txt 完全一致，另加两个**数据标记格**：
+//        0 = 空      1 = 石砖（硬实心）      9 = 单向平台（只有下落时挡脚）
+//        7 = 出生标记（进层时扫第一个；出生像素 = 该格左上角，即 tx*16, ty*16）
+//        8 = 传送门（scene_teleport_at 判定）
+//      ⚠️ body.fl / grid.fl 的口径是「t > 0 全算实心」⇒ 7/8 会被当墙。
+//         要把 Scene 的地图丢给碰撞用，先 scene_to_grid() 拷一份（7/8 写 0）；
+//         Scene 自己的 map 保持原样，传送判定还要用。
+//   ③ 没有 sprintf ⇒ 路径与尺寸用 if 链"查表"。加一层 = 加一个 .txt
+//      ＋ 在 scene_path() / scene_size() / scene_count() 各加一行（扩展点就这三处）：
+//        floor 1 -> apps/tower/map.txt     60 x 17（现有塔一层，无 7/8 标记）
+//        floor 2 -> games/huiye/floor2.txt 32 x 17
+//      查不到的层：scene_path() 返回 0 ⇒ scene_next() 返回 0，**不动** Scene。
+//   ④ 出生点：扫 map 里第一个 7 标记，落成像素坐标；没有 7 ⇒ 兜底 (32,32)（= 2,2 格）。
+//   ⑤ 切层 / 相机重置的口径：
+//        scene_next(s)               = floor+1 装进**同一个** s（尺寸也跟着换）
+//        scene_reset_camera(s, c)    = c->x/y 归零，再按新层出生点跟一步
+//                                      （世界尺寸 = mw*16 x mh*16；c 的 vw/vh/dx/dy 不动）
+//        相机档（视口/死区）归调用方；本库只负责"换层后把相机按新地图重新落位"。
+//   ⑥ 失败一律返回 0 且**不写** Scene（先读进临时缓冲，成功了才提交）——
+//      坏路径/不存在的层不会把已装好的层弄脏。
+include "mapload.fl"
+include "camera.fl"
+
+struct Scene { int map[1024]; int mw; int mh; int floor; int spawn_x; int spawn_y; int ok; }
+
+// 单 tile 像素（与 grid_init 的 tw/th 同口径）。
+int scene_tile_px() {
+  return 16;
+}
+
+// 层的文件路径；不存在的层返回 0。加层就加 if 分支。
+char *scene_path(int floor) {
+  if (floor == 1) { return "apps/tower/map.txt"; }
+  if (floor == 2) { return "games/huiye/floor2.txt"; }
+  return 0;
+}
+
+// 层的尺寸（出参）；1 = 有这层，0 = 没这层 / 出参非法（不写）。
+int scene_size(int floor, int *pw, int *ph) {
+  if (pw == 0) { return 0; }
+  if (ph == 0) { return 0; }
+  if (floor == 1) { *pw = 60; *ph = 17; return 1; }
+  if (floor == 2) { *pw = 32; *ph = 17; return 1; }
+  return 0;
+}
+
+// 塔层总数（floor 1..scene_count()）。加层就要一起改。
+int scene_count() {
+  return 2;
+}
+
+// 清空：map 全 0、元数据归零、ok = 0。1 = 成功，0 = s == 0。
+int scene_init(struct Scene *s) {
+  int i = 0;
+  if (s == 0) { return 0; }
+  i = 0;
+  while (i < 1024) {
+    s->map[i] = 0;
+    i = i + 1;
+  }
+  s->mw = 0;
+  s->mh = 0;
+  s->floor = 0;
+  s->spawn_x = 0;
+  s->spawn_y = 0;
+  s->ok = 0;
+  return 1;
+}
+
+// 装一层：path 的 ASCII 地图读进 s（mw x mh，floor 记成第几层）。
+// 1 = 成功（s->ok = 1、出生点已落位）；0 = 参数非法 / 文件读不到 / 尺寸放不下（s 不变）。
+// 非法：s == 0、path == 0、mw <= 0、mh <= 0、mw*mh > 1024。
+int scene_load(struct Scene *s, char *path, int mw, int mh, int floor) {
+  int tmp[1024];
+  int i = 0;
+  int n = 0;
+  int t = 0;
+  if (s == 0) { return 0; }
+  if (path == 0) { return 0; }
+  if (mw <= 0) { return 0; }
+  if (mh <= 0) { return 0; }
+  if (mw * mh > 1024) { return 0; }
+  // 先读进临时缓冲：读失败就原样返回，不碰 s
+  if (mapload_ascii(path, tmp, mw, mh) == 0) { return 0; }
+  n = mw * mh;
+  i = 0;
+  while (i < 1024) {
+    s->map[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < n) {
+    s->map[i] = tmp[i];
+    i = i + 1;
+  }
+  s->mw = mw;
+  s->mh = mh;
+  s->floor = floor;
+  // 出生点：第一个 7 标记的左上角像素；没有就兜底 (32,32)
+  s->spawn_x = 32;
+  s->spawn_y = 32;
+  i = 0;
+  while (i < n) {
+    t = s->map[i];
+    if (t == 7) {
+      s->spawn_x = (i % mw) * scene_tile_px();
+      s->spawn_y = (i / mw) * scene_tile_px();
+      i = n;
+    } else {
+      i = i + 1;
+    }
+  }
+  s->ok = 1;
+  return 1;
+}
+
+// 按层号装（路径 + 尺寸都走上面的表）。1 = 成功，0 = 没这层 / 读失败（s 不变）。
+int scene_load_floor(struct Scene *s, int floor) {
+  char *p = 0;
+  int w = 0;
+  int h = 0;
+  p = scene_path(floor);
+  if (p == 0) { return 0; }
+  if (scene_size(floor, &w, &h) == 0) { return 0; }
+  return scene_load(s, p, w, h, floor);
+}
+
+// 下一层：floor+1 装进同一个 s。1 = 成功；0 = 已是最顶层 / 没这层 / 读失败（s 不变）。
+int scene_next(struct Scene *s) {
+  if (s == 0) { return 0; }
+  if (s->ok != 1) { return 0; }
+  return scene_load_floor(s, s->floor + 1);
+}
+
+// 读格（越界返回 -1，与 grid_at 同口径）。
+int scene_at(struct Scene *s, int tx, int ty) {
+  if (s == 0) { return -1; }
+  if (tx < 0) { return -1; }
+  if (ty < 0) { return -1; }
+  if (tx >= s->mw) { return -1; }
+  if (ty >= s->mh) { return -1; }
+  return s->map[ty * s->mw + tx];
+}
+
+// 像素点 (x,y) 所在的格是不是传送门（tile 8）。1 = 是，0 = 不是 / 越界 / s 无效。
+// 负坐标直接判 0（C 的整除向零截断会把 -1..-15 算成 0 号格，这里掐掉）。
+int scene_teleport_at(struct Scene *s, int x, int y) {
+  int tx = 0;
+  int ty = 0;
+  if (s == 0) { return 0; }
+  if (s->ok != 1) { return 0; }
+  if (x < 0) { return 0; }
+  if (y < 0) { return 0; }
+  tx = x / scene_tile_px();
+  ty = y / scene_tile_px();
+  if (tx >= s->mw) { return 0; }
+  if (ty >= s->mh) { return 0; }
+  if (s->map[ty * s->mw + tx] == 8) { return 1; }
+  return 0;
+}
+
+// 出生点（像素）。s == 0 返回 0。
+int scene_spawn_x(struct Scene *s) {
+  if (s == 0) { return 0; }
+  return s->spawn_x;
+}
+
+int scene_spawn_y(struct Scene *s) {
+  if (s == 0) { return 0; }
+  return s->spawn_y;
+}
+
+// 相机重置：x/y 归零后按新层出生点跟一步（世界尺寸 = mw*16 x mh*16）。
+// 1 = 成功；0 = 参数非法 / 层没装好（不写 c）。vw/vh/dx/dy 保持调用方给的档。
+int scene_reset_camera(struct Scene *s, struct Camera *c) {
+  if (s == 0) { return 0; }
+  if (c == 0) { return 0; }
+  if (s->ok != 1) { return 0; }
+  if (c->vw <= 0) { return 0; }
+  if (c->vh <= 0) { return 0; }
+  c->x = 0;
+  c->y = 0;
+  camera_follow(c, s->spawn_x, s->spawn_y, s->mw * scene_tile_px(), s->mh * scene_tile_px());
+  return 1;
+}
+
+// 拷一份「可碰撞」的地图到 buf（7/8 标记格写 0，其余原样）：返回写入格数，
+// 参数非法返回 0。要拿地图跑 body/grid 又不想改 Scene 时用这个。
+int scene_to_grid(struct Scene *s, int *buf, int cap) {
+  int i = 0;
+  int n = 0;
+  int t = 0;
+  if (s == 0) { return 0; }
+  if (buf == 0) { return 0; }
+  if (s->ok != 1) { return 0; }
+  n = s->mw * s->mh;
+  if (cap < n) { return 0; }
+  i = 0;
+  while (i < n) {
+    t = s->map[i];
+    if (t == 7) { t = 0; }
+    if (t == 8) { t = 0; }
+    buf[i] = t;
+    i = i + 1;
+  }
+  return n;
+}

@@ -1,0 +1,159 @@
+// hud.fl — 像素 HUD 文字（5x7 点阵）：G6 缺口的最小解
+//
+// 为什么有这个库：GDI 的 gui_text_put 画在 DC 上，与直写 Surf.bits 的像素画面互相覆盖
+// （见 apps\tower\gaps.md G6）；而每个 HUD 元素（血条数字、伤害数字、菜单、对话）都手搓
+// 7 段数码管/手拼字母，等于每个新元素都重造一次轮子。
+// 本库给像素画面一个 5x7 ASCII 字库 + 写文字/数字的入口：只画前景像素，背景（DIB 里已有
+// 的画面）一律不动 ⇒ 可以叠在任何画面上。
+//
+// 依赖：gfx.fl（GfxBuf / gfx_px）。字库数据由 tools\font5x7.js 生成进 hud_font.fl。
+// 用法：
+//   int hud_font_buf[665];        （或直接用本库的全局缓冲，见下）
+//   hud_init();                   （启动调一次）
+//   hud_text(&b, 8, 8, "HP 3/5", 0x00F2C14E, 1);
+//   hud_num(&b, 8, 20, score, 0x00FFFFFF, 1);
+//
+// 全局缓冲的取舍：字库 665 个 int，若每次 hud_text 都现场初始化会白跑 665 次赋值/帧。
+// 这里用一个**全局 int 数组**（语言允许全局 int 数组，见 global_scalar_array）：
+// 启动时 hud_init() 填一次，之后只读。跨帧状态走全局 int 数组是本仓已认可的写法
+// （T1 只禁"把地址装进全局 int"）。
+include "gfx.fl"
+include "hud_font.fl"
+
+int hud_font_buf[665];
+
+// 启动时调一次：把 95 个字符 x 7 行填进全局缓冲。返回 0。
+int hud_init() {
+  hud_font_load(hud_font_buf);
+  return 0;
+}
+
+// 取某字符第 row 行（0..6）的 5 位掩码；bit4 = 最左列。越界/未绘字符返回 0。
+// 小写自动映射大写（字库只画了大写）；其它未绘字符显示为空白。
+int hud_glyph(int ch, int row) {
+  int idx = 0;
+  if (row < 0) { return 0; }
+  if (row > 6) { return 0; }
+  if (ch < 32) { return 0; }
+  if (ch > 126) { return 0; }
+  if (ch >= 97) {
+    if (ch <= 122) { ch = ch - 32; }
+  }
+  idx = (ch - 32) * 7 + row;
+  if (idx < 0) { return 0; }
+  if (idx >= 665) { return 0; }
+  return hud_font_buf[idx];
+}
+
+// 画一个字符（左上角 x0,y0；scale>=1 时每个点放大成 scale x scale 方块）。
+// 只写前景像素，背景不动。返回写入的像素数（0 = 整字在屏外/空白字符）。
+int hud_char(struct GfxBuf *b, int x0, int y0, int ch, int col, int scale) {
+  int row = 0;
+  int c = 0;
+  int bits = 0;
+  int n = 0;
+  int px = 0;
+  int py = 0;
+  int i = 0;
+  int j = 0;
+  if (scale < 1) { scale = 1; }
+  row = 0;
+  while (row < 7) {
+    bits = hud_glyph(ch, row);
+    c = 0;
+    while (c < 5) {
+      if ((bits & (16 >> c)) != 0) {
+        px = x0 + c * scale;
+        py = y0 + row * scale;
+        i = 0;
+        while (i < scale) {
+          j = 0;
+          while (j < scale) {
+            n = n + gfx_px(b, px + i, py + j, col);
+            j = j + 1;
+          }
+          i = i + 1;
+        }
+      }
+      c = c + 1;
+    }
+    row = row + 1;
+  }
+  return n;
+}
+
+// 画一串字符（C 字符串，0 结尾）。字符宽 5 列、字间 1 列（即步长 6*scale）。
+// 返回下一个字符的 x（= 画完后的笔位），方便续画。
+int hud_text(struct GfxBuf *b, int x, int y, char *s, int col, int scale) {
+  int i = 0;
+  int cx = x;
+  if (scale < 1) { scale = 1; }
+  i = 0;
+  while (s[i] != 0) {
+    hud_char(b, cx, y, s[i], col, scale);
+    cx = cx + 6 * scale;
+    i = i + 1;
+  }
+  return cx;
+}
+
+// 画十进制整数（负数带 '-'）。返回下一个字符的 x。
+int hud_num(struct GfxBuf *b, int x, int y, int n, int col, int scale) {
+  int digits[12];
+  int nd = 0;
+  int v = 0;
+  int cx = x;
+  int k = 0;
+  int d = 0;
+  if (scale < 1) { scale = 1; }
+  v = n;
+  if (v < 0) {
+    hud_char(b, cx, y, '-', col, scale);
+    cx = cx + 6 * scale;
+    v = 0 - v;
+  }
+  nd = 0;
+  if (v == 0) {
+    digits[0] = 0;
+    nd = 1;
+  } else {
+    while (v > 0) {
+      digits[nd] = v % 10;
+      nd = nd + 1;
+      v = v / 10;
+    }
+  }
+  k = nd - 1;
+  while (k >= 0) {
+    d = digits[k];
+    hud_char(b, cx, y, '0' + d, col, scale);
+    cx = cx + 6 * scale;
+    k = k - 1;
+  }
+  return cx;
+}
+
+// 量一串字符的像素宽（末字不留字间空隙）；空串 = 0。
+int hud_width(char *s, int scale) {
+  int i = 0;
+  if (scale < 1) { scale = 1; }
+  i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  if (i == 0) { return 0; }
+  return (i * 6 - 1) * scale;
+}
+
+// 量十进制整数的像素宽（只算位数与负号，不画）。
+int hud_num_width(int n, int scale) {
+  int v = 0;
+  int nd = 1;
+  if (scale < 1) { scale = 1; }
+  v = n;
+  if (v < 0) { v = 0 - v; }
+  while (v >= 10) {
+    v = v / 10;
+    nd = nd + 1;
+  }
+  if (n < 0) { nd = nd + 1; }
+  return (nd * 6 - 1) * scale;
+}

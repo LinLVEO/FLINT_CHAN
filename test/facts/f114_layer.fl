@@ -1,0 +1,92 @@
+// f114_layer.fl -- 图层（z 序 + 分数缩放 + 层内偏移）+ sprite_blit_frac：8 位掩码
+// 判据：8 位掩码全亮 -> 42；否则退当前掩码。
+//
+//   bit0  layer_start 后层数 = 0
+//   bit1  layer_add 3 层：count=3、slot 顺序保留
+//   bit2  层坐标 = x+ox / y+oy（初始偏移 0 / 42）
+//   bit3  layer_pose 改偏移：px/py 跟着变
+//   bit4  layer_scale 生效；非法缩放（snum=0）返回 0 且不改原值
+//   bit5  layer_order 按 z 升序：z=5 的层排到最前
+//   bit6  满 16 层后再 add 返回 -1，层数仍是 16
+//   bit7  sprite_blit_frac 3/4：8x8 不透明块 -> 6x6 = 36 像素
+include "../../lib/layer.fl"
+include "../../lib/sprite.fl"
+
+int main() {
+  struct LayerSys ls;
+  struct GfxBuf b;
+  int mem[4096];
+  int pal[3];
+  int data[64];
+  int m = 0;
+  int i = 0;
+  int n = 0;
+
+  // ---- bit0：start ----
+  layer_start(&ls);
+  if (layer_count(&ls) == 0) { m = m | 1; }
+
+  // ---- bit1：加三层 ----
+  layer_add(&ls, 0, 10, 20, 10, 0, 0, 3, 4, 0);
+  layer_add(&ls, 1, 10, 20, 11, 0, 42, 3, 4, 0);
+  layer_add(&ls, 2, 10, 20, 5, 0, 0, 1, 1, 0);
+  if (layer_count(&ls) == 3) {
+    if (layer_slot(&ls, 1) == 1) { m = m | 2; }
+  }
+
+  // ---- bit2：坐标 = x+ox / y+oy ----
+  if (layer_px(&ls, 1) == 10) {
+    if (layer_py(&ls, 1) == 62) { m = m | 4; }
+  }
+
+  // ---- bit3：pose 改偏移 ----
+  layer_pose(&ls, 1, 5, 7);
+  if (layer_px(&ls, 1) == 15) {
+    if (layer_py(&ls, 1) == 27) { m = m | 8; }
+  }
+
+  // ---- bit4：scale 生效 + 非法拒绝 ----
+  layer_scale(&ls, 0, 1, 2);
+  if (layer_snum(&ls, 0) == 1) {
+    if (layer_sden(&ls, 0) == 2) {
+      if (layer_scale(&ls, 0, 0, 2) == 0) {
+        if (layer_snum(&ls, 0) == 1) { m = m | 16; }
+      }
+    }
+  }
+
+  // ---- bit5：z 序 ----
+  layer_order(&ls);
+  if (layer_slot(&ls, 0) == 2) {
+    if (layer_slot(&ls, 2) == 1) { m = m | 32; }
+  }
+
+  // ---- bit6：满 16 层 ----
+  layer_start(&ls);
+  i = 0;
+  while (i < 16) {
+    layer_add(&ls, 0, 0, 0, i, 0, 0, 1, 1, 0);
+    i = i + 1;
+  }
+  if (layer_add(&ls, 0, 0, 0, 99, 0, 0, 1, 1, 0) == 0 - 1) {
+    if (layer_count(&ls) == 16) { m = m | 64; }
+  }
+
+  // ---- bit7：sprite_blit_frac 3/4 ----
+  b.bits = mem;
+  b.w = 16;
+  b.h = 16;
+  b.stride = 16;
+  i = 0;
+  while (i < 256) { mem[i] = 0; i = i + 1; }
+  pal[0] = 0;
+  pal[1] = 0x00FFFFFF;
+  pal[2] = 0;
+  i = 0;
+  while (i < 64) { data[i] = 1; i = i + 1; }
+  n = sprite_blit_frac(&b, 0, 0, data, 8, 8, 0, pal, 3, 3, 4, 0);
+  if (n == 36) { m = m | 128; }
+
+  if (m == 255) { return 42; }
+  return m;
+}

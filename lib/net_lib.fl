@@ -1,0 +1,337 @@
+// net_lib.fl — FLINT 标准库（网络批）：TCP 客户端（ws2_32 原生 socket）
+// 自包含：api 声明 + sockaddr_in 组装 + 错误口径全在本文件，不依赖其它库。
+//
+// 用法：
+//   struct Tcp t;
+//   if (std::tcp_open(&t, "127.0.0.1", 8080) == 1) {          // 1 = 连上
+//     std::tcp_send(&t, "ping", 4);                            // 返回写入字节数 / -1
+//     n = std::tcp_recv(&t, buf, 512);                         // 返回读到的字节数 / 0 = 对端关 / -1 = 没连
+//     std::tcp_close(&t);                                      // 1 = 关了 / 0 = 本来没开
+//   }
+//
+// 口径（响亮失败原则）：
+//   - 没连上就收发 → 一律 -1，不静默返回 0（0 只留给「对端正常关闭」这种真信息）
+//   - tcp_open 失败时 t->s 恒为 0（调用方不用猜句柄状态）；tcp_close 幂等
+//   - tcp_ready 内部幂等：全局 g_tcp_ready 缓存 0=未初始化 / 1=成功 / -1=失败
+//
+// 边界（第一版，够用即止）：
+//   - 只支持 IPv4 字面地址（inet_addr，不做 DNS）
+//   - 阻塞式 connect：**没有超时参数**。本机实测「连没人监听的本地端口」也要 ~2 秒才返回
+//     （Windows 在本环境的 SYN 重试，127.0.0.1:1 与 :9 都 ~2050 ms；.NET 同样慢 ⇒ 不是本库的锅）；
+//     连不可达的公网地址要等系统 TCP 超时（更久）⇒ 别在 UI 线程里直接调
+//   - 不自动 WSACleanup：进程退出由系统回收；一次 WSAStartup 全局共享（WinSock 引用计数）
+//
+// ⚠️ 三条实测坑（写 socket 代码前必看）：
+//   ① SOCKET 是 64 位句柄 → socket 必须按 `ptr` 返回，用 `int *` 承接；
+//      想判 INVALID_SOCKET 就写 `if (sk == 0 - 1)`（与 64 位 ~0 同型比较，实测成立）。
+//   ② sockaddr_in 是 16 字节手工布局：family@0（2B，小端）、port@2（2B，**大端**=htons）、
+//      addr@4（4B，inet_addr 已给网络序）、zero@8（8B 全 0）。逐字节清零后再填。
+//   ③ FLINT 没有 sizeof、局部数组不能整体初始化 → 16 字节一律 while 循环逐字节写 0。
+api ws2_32 int WSAStartup(int, int);
+api ws2_32 int WSACleanup();
+api ws2_32 ptr socket(int, int, int);
+api ws2_32 int connect(int, int, int);
+api ws2_32 int send(int, int, int, int);
+api ws2_32 int recv(int, int, int, int);
+api ws2_32 int closesocket(int);
+api ws2_32 int inet_addr(int);
+api ws2_32 int htons(int);
+api ws2_32 int sendto(int, int, int, int, int, int);
+api ws2_32 int recvfrom(int, int, int, int, int, int);
+api ws2_32 int bind(int, int, int);
+api ws2_32 int setsockopt(int, int, int, int, int);
+api ws2_32 ptr gethostbyname(int);
+
+// TCP 连接句柄盒：s = 0 表示没开（指针字段是真 64 位槽，装得下 SOCKET）
+struct Tcp { int *s; }
+
+// 全局缓存（只缓存「WSAStartup 有没有成功」这一位状态；不装任何指针）
+int g_tcp_ready;
+
+// —— WinSock 初始化（幂等）——
+// 返回 1 = WSAStartup 已成功；0 = 失败。失败也缓存，不反复重试。
+// WSADATA 实际 400 字节 → 给 512 保险（局部 char 缓冲，逐字节清零）。
+int std::tcp_ready() {
+  char wsa[512];
+  int i = 0;
+  int r = 0;
+  if (g_tcp_ready == 1) return 1;
+  if (g_tcp_ready == 0 - 1) return 0;
+  i = 0;
+  while (i < 512) { wsa[i] = 0; i = i + 1; }
+  r = WSAStartup(0x0202, wsa);          // 0x0202 = WinSock 2.2
+  if (r != 0) { g_tcp_ready = 0 - 1; return 0; }
+  g_tcp_ready = 1;
+  return 1;
+}
+
+// —— 连 TCP：ip 为 IPv4 字面串（如 "127.0.0.1"），port 1..65535 ——
+// 返回 1 = 连上；0 = 失败（参数非法 / WSA 没起来 / IP 非法 / socket 或 connect 失败）
+// t->s 恒为 0 除非连上（失败路径不清残留 → 入口先清）。
+int std::tcp_open(struct Tcp *t, char *ip, int port) {
+  char sa[16];
+  int *sk = 0;
+  int *pw = 0;
+  int a = 0;
+  int pb = 0;
+  int i = 0;
+  int r = 0;
+
+  if (t == 0) return 0;                        // 空盒指针：非法，直接 0（不崩）
+  t->s = 0;
+  if (ip == 0) return 0;                       // 空指针参数：非法，直接 0（不崩）
+  if (port < 1) return 0;
+  if (port > 65535) return 0;
+  if (std::tcp_ready() == 0) return 0;         // WSA 起不来：0
+  a = inet_addr(ip);
+  if (a == 0 - 1) return 0;                    // INADDR_NONE → 非法 IP 串，直接 0（不崩）
+
+  // 组装 sockaddr_in（16 字节）
+  i = 0;
+  while (i < 16) { sa[i] = 0; i = i + 1; }
+  sa[0] = 2; sa[1] = 0;                        // sin_family = AF_INET(2)，小端
+  pb = htons(port);                            // sin_port 要网络序（大端）
+  sa[2] = pb & 255;
+  sa[3] = (pb >> 8) & 255;
+  pw = sa;                                     // 4..7 这 4 字节 = sin_addr（inet_addr 已是网络序）
+  pw[1] = a;
+
+  sk = socket(2, 1, 6);                        // AF_INET / SOCK_STREAM / IPPROTO_TCP
+  if (sk == 0 - 1) return 0;                   // INVALID_SOCKET（64 位 ~0）
+  r = connect(sk, sa, 16);
+  if (r != 0) { closesocket(sk); return 0; }   // -1 / SOCKET_ERROR → 关掉再 0
+  t->s = sk;
+  return 1;
+}
+
+// —— 发：返回实际写入的字节数；-1 = 没连 / 参数非法 / 发送失败 ——
+int std::tcp_send(struct Tcp *t, char *buf, int n) {
+  int r = 0;
+  if (t == 0) return 0 - 1;
+  if (t->s == 0) return 0 - 1;
+  if (buf == 0) return 0 - 1;
+  if (n <= 0) return 0 - 1;
+  r = send(t->s, buf, n, 0);
+  if (r < 0) return 0 - 1;
+  return r;
+}
+
+// —— 收：返回读到的字节数；0 = 对端关闭；-1 = 没连 / 参数非法 / 接收失败 ——
+int std::tcp_recv(struct Tcp *t, char *buf, int cap) {
+  int r = 0;
+  if (t == 0) return 0 - 1;
+  if (t->s == 0) return 0 - 1;
+  if (buf == 0) return 0 - 1;
+  if (cap <= 0) return 0 - 1;
+  r = recv(t->s, buf, cap, 0);
+  if (r < 0) return 0 - 1;
+  return r;                                    // 0 原样透传 = 对端正常关闭
+}
+
+// —— 关：1 = 关了（本来开着）；0 = 本来没开。幂等，可连调 ——
+int std::tcp_close(struct Tcp *t) {
+  if (t == 0) return 0;
+  if (t->s == 0) return 0;
+  closesocket(t->s);
+  t->s = 0;
+  return 1;
+}
+
+// ============================================================================
+// §2 UDP（2026-11-03 追加）—— 只做「无连接收发」这一件事
+//
+// 用法：
+//   struct Udp u;
+//   u.s = 0;                                          // 局部 struct 字段不清零 -> 先赋值
+//   if (std::udp_open(&u, "0.0.0.0", 0) == 1) {       // 1 = 开好（只 bind 本机任意端口）
+//     std::udp_send(&u, "127.0.0.1", 9, "x", 1);      // 返回发出的字节数 / -1
+//     std::udp_recv(&u, buf, 8);                      // 返回字节数 / -1（含 500 ms 超时）
+//     std::udp_close(&u);                             // 1 = 关了 / 0 = 本来没开
+//   }
+//
+// 口径（与 TCP 段一致）：
+//   - 没开就收发 → 一律 -1；udp_open 失败时 u->s 恒为 0；udp_close 幂等
+//   - recv 靠 SO_RCVTIMEO=500 ms 兜底：没人回包时 500 ms 后返回 -1，不会死等
+//   - 不自动 WSACleanup；WSAStartup 与 TCP 段共用 tcp_ready / g_tcp_ready
+//
+// 边界（第一版）：
+//   - 只支持 IPv4 字面地址（inet_addr；要主机名先用 §3 dns_resolve）
+//   - udp_open 的 ip / port 参数**保留**（本版恒绑 0.0.0.0:0，不参与 bind）
+// ============================================================================
+
+// UDP 句柄盒：s = 0 表示没开
+struct Udp { int *s; }
+
+// —— 开 UDP：socket(AF_INET=2, SOCK_DGRAM=2, IPPROTO_UDP=17) + bind 到 0.0.0.0:0 ——
+// 返回 1 = 开好；0 = 失败（空盒 / WSA 没起来 / socket、bind、setsockopt 失败；失败时 u->s = 0）
+int std::udp_open(struct Udp *u, char *ip, int port) {
+  char sa[16];
+  char tv[8];
+  int *sk = 0;
+  int i = 0;
+  int r = 0;
+
+  if (u == 0) return 0;                        // 空盒指针：非法，直接 0（不崩）
+  u->s = 0;
+  if (std::tcp_ready() == 0) return 0;         // WSA 起不来：0
+
+  sk = socket(2, 2, 17);                       // AF_INET / SOCK_DGRAM / IPPROTO_UDP
+  if (sk == 0 - 1) return 0;                   // INVALID_SOCKET
+
+  // bind 到 0.0.0.0:0（任意本机端口）：family=2、port=0、addr=0、zero 全 0
+  i = 0;
+  while (i < 16) { sa[i] = 0; i = i + 1; }
+  sa[0] = 2; sa[1] = 0;
+  r = bind(sk, sa, 16);
+  if (r != 0) { closesocket(sk); return 0; }
+
+  // 收超时 500 ms：Windows 口径 SO_RCVTIMEO 的 optval 是 **DWORD 毫秒**（不是 BSD 的 timeval）
+  i = 0;
+  while (i < 8) { tv[i] = 0; i = i + 1; }
+  tv[0] = 244; tv[1] = 1;                      // 500 = 0x000001F4，小端
+  r = setsockopt(sk, 0xFFFF, 0x1006, tv, 4);   // SOL_SOCKET / SO_RCVTIMEO
+  if (r != 0) { closesocket(sk); return 0; }   // 设不上就不算开：否则 recv 可能永久阻塞
+
+  u->s = sk;
+  return 1;
+}
+
+// —— 发：返回实际发出的字节数；-1 = 没开 / 参数非法 / 发送失败 ——
+// 目标 sockaddr_in 与 TCP 段同一套手工布局（family@0=2、port@2=htons、addr@4=inet_addr）
+int std::udp_send(struct Udp *u, char *ip, int port, char *buf, int n) {
+  char sa[16];
+  int *pw = 0;
+  int a = 0;
+  int pb = 0;
+  int i = 0;
+  int r = 0;
+
+  if (u == 0) return 0 - 1;
+  if (u->s == 0) return 0 - 1;
+  if (ip == 0) return 0 - 1;
+  if (buf == 0) return 0 - 1;
+  if (n <= 0) return 0 - 1;
+  if (port < 1) return 0 - 1;
+  if (port > 65535) return 0 - 1;
+  a = inet_addr(ip);
+  if (a == 0 - 1) return 0 - 1;                // INADDR_NONE → 非法 IP 串
+
+  i = 0;
+  while (i < 16) { sa[i] = 0; i = i + 1; }
+  sa[0] = 2; sa[1] = 0;
+  pb = htons(port);
+  sa[2] = pb & 255;
+  sa[3] = (pb >> 8) & 255;
+  pw = sa;
+  pw[1] = a;
+
+  r = sendto(u->s, buf, n, 0, sa, 16);
+  if (r < 0) return 0 - 1;
+  return r;
+}
+
+// —— 收：返回收到的字节数；-1 = 没开 / 参数非法 / 接收失败 / 500 ms 超时 ——
+int std::udp_recv(struct Udp *u, char *buf, int cap) {
+  int r = 0;
+
+  if (u == 0) return 0 - 1;
+  if (u->s == 0) return 0 - 1;
+  if (buf == 0) return 0 - 1;
+  if (cap <= 0) return 0 - 1;
+  r = recvfrom(u->s, buf, cap, 0, 0, 0);       // 不关心对端地址：from / fromlen 传 0
+  if (r < 0) return 0 - 1;                     // WSAETIMEDOUT 也走这里
+  return r;
+}
+
+// —— 关：1 = 关了（本来开着）；0 = 本来没开。幂等，可连调 ——
+int std::udp_close(struct Udp *u) {
+  if (u == 0) return 0;
+  if (u->s == 0) return 0;
+  closesocket(u->s);
+  u->s = 0;
+  return 1;
+}
+
+// ============================================================================
+// §3 DNS 解析（2026-11-03 追加）—— gethostbyname 老接口，只做 IPv4 字面串
+//
+// 用法：
+//   char out[32];
+//   n = std::dns_resolve("127.0.0.1", out, 32);   // n = 写出的字符数（不含结尾 0）
+//   if (n < 0) { /* 解析失败 / out 不够 / WSA 没起来 */ }
+//
+// 口径：-1 = 失败；成功返回长度（不含结尾 0）。失败时**不写 out**。
+// 依赖：与 TCP 段共用 tcp_ready()（WSAStartup 必须先成功）。
+//
+// hostent 的 x64 布局（8 字节对齐）：
+//   h_name@0(8)  h_aliases@8(8)  h_addrtype@16(2)  h_length@18(2)  h_addr_list@24(8)
+// ⚠️ FLINT 没有 char **（指针的指针），所以 h_addr_list 声明成 struct NetAddrSlot *
+//    （8 字节指针字段），再用 ->p 读出数组第 0 个元素（= 指向 4 字节 in_addr 的 char*）。
+//    char 字段各占 1 字节，C 对齐把后面的指针顶到偏移 24 —— 与真 ABI 逐字节一致
+//    （实测 127.0.0.1 → raw 0x0100007F，低字节 127 在前）。
+// ============================================================================
+
+// h_addr_list 数组里的一个元素（真身是 char*，8 字节槽）
+struct NetAddrSlot { int *p; }
+
+// hostent 的字段布局镜像（不用 system 的头文件，全靠手工对齐）
+struct NetHostEnt { int *h_name; int *h_aliases; char h_addrtype; char h_length; struct NetAddrSlot *h_addr_list; }
+
+// 十进制字节转字符：v 只可能是 0..255
+int net_dns_digits(int v) {
+  if (v >= 100) return 3;
+  if (v >= 10) return 2;
+  return 1;
+}
+
+// —— 把主机名解析成 IPv4 点分串写 out：返回长度（不含结尾 0）；-1 = 失败 ——
+int std::dns_resolve(char *host, char *out, int cap) {
+  struct NetHostEnt *he;
+  struct NetAddrSlot *slot;
+  int *ip = 0;
+  int parts[4];
+  int raw = 0;
+  int need = 0;
+  int pos = 0;
+  int i = 0;
+
+  if (host == 0) return 0 - 1;
+  if (out == 0) return 0 - 1;
+  if (cap < 1) return 0 - 1;
+  if (std::tcp_ready() == 0) return 0 - 1;
+
+  he = gethostbyname(host);
+  if (he == 0) return 0 - 1;                   // 解析失败（HOST_NOT_FOUND 等）
+  slot = he->h_addr_list;
+  if (slot == 0) return 0 - 1;
+  ip = slot->p;
+  if (ip == 0) return 0 - 1;
+
+  raw = ip[0];                                 // 4 字节网络序（小端机上倒着读）
+  parts[0] = raw & 255;                        // 网络序第 1 字节 = 低字节
+  parts[1] = (raw >> 8) & 255;
+  parts[2] = (raw >> 16) & 255;
+  parts[3] = (raw >> 24) & 255;
+
+  // 先算总长（3 个点 + 4 段十进制 + 结尾 0），放不下就响亮失败、不写 out
+  need = 4;
+  i = 0;
+  while (i < 4) {
+    need = need + net_dns_digits(parts[i]);
+    i = i + 1;
+  }
+  if (need > cap) return 0 - 1;
+
+  pos = 0;
+  i = 0;
+  while (i < 4) {
+    if (i > 0) { out[pos] = 46; pos = pos + 1; }        // '.'
+    if (parts[i] >= 100) { out[pos] = 48 + parts[i] / 100; pos = pos + 1; }
+    if (parts[i] >= 10) { out[pos] = 48 + (parts[i] / 10) % 10; pos = pos + 1; }
+    out[pos] = 48 + parts[i] % 10;
+    pos = pos + 1;
+    i = i + 1;
+  }
+  out[pos] = 0;
+  return pos;
+}
