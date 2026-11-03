@@ -24,7 +24,8 @@
 //   ② FLINT 函数参数上限 4 个 → 复杂接口一律「结构体 in/out」，别堆参数。
 api ws2_32 int WSAStartup(int, int);
 api ws2_32 int WSACleanup();
-api ws2_32 int socket(int, int, int);
+// socket 返回 SOCKET（64 位句柄）→ 按 ptr 返回、用 int * 承接；与 net_lib.fl 文件头 ① 同口径
+api ws2_32 ptr socket(int, int, int);
 api ws2_32 int connect(int, int, int);
 api ws2_32 int send(int, int, int, int);
 api ws2_32 int recv(int, int, int, int);
@@ -72,7 +73,7 @@ int std::http_get(char *host, int port, char *path, struct HttpBuf *hb) {
   char rq[512];
   int i = 0;
   int n = 0;
-  int sk = 0;
+  int *sk = 0;
   int r = 0;
   int nn = 0;
   int got = 0;
@@ -80,6 +81,14 @@ int std::http_get(char *host, int port, char *path, struct HttpBuf *hb) {
   int hip = 0;
   char *pp = 0;
   char *qq = 0;
+
+  // 参数校验（2026-11-04 补：此前 host 传 0 会直接解引用崩成 0xC0000005；与 http_post 同口径）
+  if (hb == 0) return 1;
+  if (hb->b == 0) return 1;
+  if (host == 0) return 1;
+  if (path == 0) return 1;
+  if (port < 1) return 1;
+  if (port > 65535) return 1;
 
   hb->n = 0;
   i = 0;
@@ -411,7 +420,7 @@ int std::http_post(char *host, int port, char *path, char *body, int blen, struc
   char rq[8192];
   int i = 0;
   int n = 0;
-  int sk = 0;
+  int *sk = 0;
   int r = 0;
   int nn = 0;
   int got = 0;

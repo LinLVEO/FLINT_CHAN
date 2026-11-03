@@ -3074,6 +3074,19 @@ compileCases.push(
   }
 }
 
+// —— http_lib + net_lib 同编译单元（2026-11-03）：ws2_32 socket 口径统一 ——
+//   判据 = test\facts\f135_both.fl（同单元先 http 后 net；8 位掩码全亮 → 退 42；约 6 秒，含三处阻塞 connect）。
+{
+  const src = path.join(__dirname, "facts", "f135_both.fl");
+  const exe = path.join(TMP, "f135_both.exe");
+  const r = run(["-o", exe, src]);
+  check("http+net 同单元探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("http+net 同单元探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
 // —— sys §8/§9 目录递归删除 + 文件时间（2026-11-03）——
 //   判据 = test\facts\f131_sys3.fl（8 位掩码全亮 → 退 42）。
 {

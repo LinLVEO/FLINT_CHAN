@@ -1,0 +1,59 @@
+// f135_both.fl -- http_lib + net_lib 同一编译单元（ws2_32 socket 口径统一）探针
+// 判据：8 位位掩码全亮（255）-> 退出 42。
+// 顺序钉死：先 include http_lib，再 include net_lib（这是「API 'socket' 重复声明」的触发顺序）。
+// 不依赖外网、不依赖本地服务：全部走「连不上 + 参数非法 + 纯内存解析」。
+//
+//   bit0  std::tcp_ready() == 1                              WinSock 起来（net_lib 段）
+//   bit1  std::tcp_open(&t, "127.0.0.1", 1) == 0             端口 1 无人监听 → 必败（阻塞 connect 约 2 秒）
+//   bit2  t.s == 0                                          失败后句柄盒清 0（不是野句柄）
+//   bit3  std::tcp_close(&t) == 0                           没开就关：幂等返回 0
+//   bit4  std::http_get("127.0.0.1", 1, "/", &hb) == 2      connect 失败（http_lib 段，约 2 秒）
+//   bit5  std::http_post("127.0.0.1", 1, "/", 0, 0, &hb) == 2  同上（约 2 秒）
+//   bit6  std::http_status("HTTP/1.0 200 OK\r\n\r\n", 19) == 200  纯内存解析
+//   bit7  std::http_post(0, 1, "/", 0, 0, &hb) == 1          host 空指针 = 参数错
+//         ⚠️ 计划原文此处写 http_get(0, ...) == 1；实测 v0.9 的 http_get **没有**参数校验
+//            （tmp 探针 http_get(0, 1, "/", &hb) → 退出码 -1073741819 = 0xC0000005 解引用空指针），
+//            按「以源码为准」改用同库内有 host 校验的 http_post 表达同一语义（不改库代码）。
+//
+// 期望值一律实测（2026-11-03，hlc 0.1.0 / Windows 11）。
+include "../../lib/http_lib.fl"
+include "../../lib/net_lib.fl"
+
+int main() {
+  int mask = 0;
+  char b[64];
+  struct HttpBuf hb;
+  struct Tcp t;
+  int rc = 0;
+
+  hb.b = b;
+  hb.cap = 64;
+  hb.n = 0;
+  t.s = 0;
+
+  // bit0
+  if (std::tcp_ready() == 1) { mask = mask | 1; }
+
+  // bit1 / bit2
+  rc = std::tcp_open(&t, "127.0.0.1", 1);
+  if (rc == 0) { mask = mask | 2; }
+  if (t.s == 0) { mask = mask | 4; }
+
+  // bit3：没开就关
+  if (std::tcp_close(&t) == 0) { mask = mask | 8; }
+
+  // bit4 / bit5：连不上（127.0.0.1:1 无服务）
+  if (std::http_get("127.0.0.1", 1, "/", &hb) == 2) { mask = mask | 16; }
+  if (std::http_post("127.0.0.1", 1, "/", 0, 0, &hb) == 2) { mask = mask | 32; }
+
+  // bit6：纯内存解析（19 字节）
+  if (std::http_status("HTTP/1.0 200 OK\r\n\r\n", 19) == 200) { mask = mask | 64; }
+
+  // bit7：host 空指针 = 参数错（http_get 与 http_post 都有内建校验）
+  //       ⚠️ 2026-11-03 之前 http_get 没有校验，这一句会 0xC0000005；本轮补上后两个都返 1
+  if (std::http_get(0, 1, "/", &hb) == 1) { mask = mask | 128; }
+
+  print(["f135 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

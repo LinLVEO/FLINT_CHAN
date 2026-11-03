@@ -108,6 +108,8 @@ const OUTWARD = [
   'docs/设计决策.md', 'docs/语言边界.md',
   // 2026-10-19 重写的对外技术文档（公开仓库只发这批 ＋ 根 README）
   'docs/README.md', 'docs/快速上手.md', 'docs/语言参考.md', 'docs/标准库.md', 'docs/FLGUI.md',
+  // 2026-11-03 文档收敛：唯一结论页（新增的对外文档必须登记在这里，否则 UNCLASSIFIED）
+  'docs/现状.md',
 ];
 const SNAP_PATTERNS = [
   /^工单-/, /^待拍板-/, /^开工简报/, /^调研/, /^帧节拍-/, /^任务-/, /^人类试写-/,
