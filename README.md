@@ -1,10 +1,8 @@
 # FLINT_CHAN
 
-> ⚠️ **现行结论见 [`docs\现状.md`](docs/现状.md)**（唯一结论页）：**成功判据 = 被参考**；位置不变、不做生态；主线 = 游戏。
-
 > 🧭 元信息（机检）：类型=对外 ｜ 快照=否
 > 真值源=`docs\数字台账.md` ｜ 取数器=`tools\文档事实.ps1`
-> 引用我=—（本文是入口） ｜ 我引用=`docs\现状.md`、`docs\README.md`、`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md` ｜ 最后复核=2026-11-04 `test\docgate.mjs`
+> 引用我=—（本文是入口） ｜ 我引用=`docs\README.md`、`docs\快速上手.md`、`docs\语言参考.md`、`docs\标准库.md`、`docs\FLGUI.md` ｜ 最后复核=2026-11-04 `test\docgate.mjs`
 
 | 名字 | 是什么 |
 |---|---|
@@ -42,7 +40,6 @@ hlc run hello.fl      # 编译并运行，退出码就是 main 的返回值
 
 | 文档 | 讲什么 |
 |---|---|
-| [`docs\现状.md`](docs/现状.md) | **现在是什么 / 下一步**（唯一结论页） |
 | [`docs\README.md`](docs/README.md) | 入口：阅读顺序、数字怎么来的 |
 | [`docs\快速上手.md`](docs/快速上手.md) | 环境、构建、第一个程序、跑门、常见坑 |
 | [`docs\语言参考.md`](docs/语言参考.md) | 类型 / 语句 / 函数 / 结构体 / 指针 / API / 编译期限制 |

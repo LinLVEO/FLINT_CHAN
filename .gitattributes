@@ -73,3 +73,14 @@ PROGRESS-归档-*.md             export-ignore
 # 根目录过程笔记已搬进 notes\。上面按名字的规则在任何目录都生效（gitattributes 与 .gitignore
 # 同一套匹配规则），这里再显式标一次目录：以后新加、名字没被既有规则覆盖的笔记也不会漏出去。
 notes/                         export-ignore
+
+# ---- 2026-11-04 泄露修补：以下内部件此前没被上面任何规则覆盖，已随导出包发到公开仓库 ----
+# 原则同上（2026-10-19 口径）：过程记录 / 台账 / 体检 / 缺口记录 一律不进导出包。
+docs/现状.md                   export-ignore
+docs/诊断ID表.md               export-ignore
+docs/IDE-功能清单.md           export-ignore
+docs/工业级标准.md             export-ignore
+docs/流程优化提案.md           export-ignore
+docs/编译器体检报告.md         export-ignore
+tools/错误台账.md              export-ignore
+apps/tower/gaps.md             export-ignore
