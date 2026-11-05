@@ -4,6 +4,7 @@
 // several moves (copying too few bytes, losing the tail, stale capacity slot).
 // The leak side (200000 new/push/free cycles, flat working set) is a scratch probe:
 // tmp\vectest\vec_leak.fl -- not in the regression because it needs ~4 s of wall clock.
+// slot4（2026-11-05）：本地 int 只占 4 字节 ⇒ 8 字节槽的源/目标都用 int_64。
 include "vec_lib.fl"
 
 int main() {
@@ -11,7 +12,7 @@ int main() {
   if (v == 0) { return 1; }
   int i = 0;
   while (i < 1000) {
-    int x = i * 3;
+    int_64 x = i * 3;
     v = std::vec_push(v, &x);
     i = i + 1;
   }
@@ -19,7 +20,7 @@ int main() {
   int j = 0;
   int bad = 0;
   while (j < 1000) {
-    int got = 0;
+    int_64 got = 0;
     std::memcpy(&got, std::vec_get(v, j), 8);
     if (got != j * 3) { bad = bad + 1; }
     j = j + 1;

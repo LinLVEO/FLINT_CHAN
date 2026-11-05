@@ -545,7 +545,6 @@ int gui_ime_at(int *hwnd, int cx, int cy) {
 // M4b：键盘同理 —— `in->key` 的**清零 + 累加也都在本函数**（WM_CHAR 走字符、WM_KEYDOWN 走退格/回车/Esc）。
 int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
   struct MSG m;
-  int wq = 0;
   int d = 0;
   int k = 0;
   // M4c 键盘档字符翻译用的局部量（`kc` = 表里查出来的 ASCII；`k` 上面那个 = 从扫描码反查到的 VK）
@@ -596,8 +595,8 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
     //   WM_CHAR 只在默认档被消费（见下面 WM_CHAR 分支的 `g->kbd == 0` 门）。
     TranslateMessage(&m);
     if (m.message == 0x020A) {
-      wq = m.wparam;
-      d = wq / 65536;
+      // slot4：本地 int 只有 4 字节，装不下 64 位 wParam ⇒ 按注释里既有口径「只许除法取位」，一行算完再收窄。
+      d = m.wparam / 65536;
       d = d & 0xFFFF;
       if (d > 32767) { d = d - 65536; }
       in->wheel = in->wheel + d / 120;

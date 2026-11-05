@@ -110,6 +110,10 @@ const OUTWARD = [
   'docs/README.md', 'docs/快速上手.md', 'docs/语言参考.md', 'docs/标准库.md', 'docs/FLGUI.md',
   // 2026-11-03 文档收敛：唯一结论页（新增的对外文档必须登记在这里，否则 UNCLASSIFIED）
   'docs/现状.md',
+  // 2026-11-05：文档书写规则（防"旧结论被误引"的元规则）
+  'docs/文档书写规则.md',
+  // 2026-11-05：给 AI agent 的入口（公开仓库里任何 agent 都会自动读它）
+  'AGENTS.md',
 ];
 const SNAP_PATTERNS = [
   /^工单-/, /^待拍板-/, /^开工简报/, /^调研/, /^帧节拍-/, /^任务-/, /^人类试写-/,

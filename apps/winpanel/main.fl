@@ -532,7 +532,7 @@ int wp_topbit = 0;              // the WS_EX_TOPMOST bit read back with GetWindo
 int wp_iconic = 0;              // 1 = IsIconic(hwnd) was true on the last frame
 int wp_win_top = 0;             // local z-order action taken by the last layer switch (1 = TOP)
 int wp_swp_ok = 0;              // BOOL SetWindowPos returned (diagnostic, never assumed)
-int wp_tray_h = 0;              // Shell_TrayWnd handle (the positive TOPMOST anchor), 0 = not found
+int *wp_tray_h;                 // Shell_TrayWnd handle (the positive TOPMOST anchor), 0 = not found（slot4：句柄用指针接；全局指针不许带初值）
 int wp_skip = 0;                // v6 (C): frames skipped because the window was minimized
 int wp_skips = 0;               // v6 (C): how many such skips so far (dump evidence for the gate)
 int wp_ex_now = 0;              // exstyle before the APPWINDOW bit was added (taskbar evidence)
@@ -2090,7 +2090,7 @@ int wp_port_probe(int port) {
   char opt[8];
   char nbmode[8];
   int i = 0;
-  int sk = 0;
+  int *sk = 0;
   int r = 0;
   int n = 0;
   int err = 0;

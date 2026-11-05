@@ -53,7 +53,6 @@ New-Item -ItemType Directory -Force -Path (Join-Path $work 'plain'), (Join-Path 
 #   `a[-1]`, which is byte-identical).  Whether the 5th class SHOULD stay this literal is an
 #   open question recorded in the v1.6.4 handover note -- if it is narrowed, delete these rows.
 $allow = @{
-  'str5'    = 'int function returns a string address (true positive: silent truncation)'
   'arr4'    = 'v1.6.4 #5: raw `p = p + 8` on int* (byte stepping by design -- pins decision 40)'
   'audit7'  = 'v1.6.4 #5: raw `p0 + 1` / `p0 + 8` on int* (the A7 byte-stepping regression)'
   'dblptr1' = 'v1.6.4 #5: raw `q + 16` on double* (16 bytes = two doubles, by design)'

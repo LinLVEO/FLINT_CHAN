@@ -1,8 +1,9 @@
 // str2.fl — 多字符串连续排布：a="XYZW"(5B) b="P"(2B) c="Q"
 // (b-a)*10 + (c-b) = 5*10 + 2 = 52
+// slot4：字符串地址必须用指针接（本地 int 只有 4 字节）
 int main() {
-  int a = "XYZW";
-  int b = "P";
-  int c = "Q";
+  char *a = "XYZW";
+  char *b = "P";
+  char *c = "Q";
   return (b - a) * 10 + (c - b);
 }

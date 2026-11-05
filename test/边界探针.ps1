@@ -83,7 +83,7 @@ $cases = @(
   @{ n='slot_byte_split_mod256'; kind='ok'; code=42; note='`int` 是 8 字节**有符号**槽（语言里没有**无符号**整型）⇒ 拆字节一律 `% 256` **取模** ＋ **负数兜底**（实测裸 `%` 对 −31 给 −31，兜底后 225；断言 193 与 −31 两格）';
      src='int main() { int a = 193; int b = 0 - 31; int x = a % 256; if (x < 0) { x = x + 256; } int y = b % 256; if (y < 0) { y = y + 256; } if (x == 193) { if (y == 225) { return 42; } } return 7; }' }
   @{ n='vec_slot_roundtrip'; kind='ok'; code=193; note='通用容器在**无泛型**语言里的现实形态 = **8 字节槽 ＋ 取地址传值**（`lib\vec_lib.fl`）：`vec_push(v,&a)` 把 193 的 8 字节拷进槽、`vec_get` 取回原值（退出码 = 原值 193）';
-     src='include "vec_lib.fl"' + "`n" + 'int main() { char *v = std::vec_new(4); int a = 193; v = std::vec_push(v, &a); if (std::vec_len(v) == 1) { int *q = std::vec_get(v, 0); return *q; } return 7; }' }
+     src='include "vec_lib.fl"' + "`n" + 'int main() { char *v = std::vec_new(4); int_64 a = 193; v = std::vec_push(v, &a); if (std::vec_len(v) == 1) { int_64 q = 0; std::memcpy(&q, std::vec_get(v, 0), 8); return (int)q; } return 7; }' }
 
   # 2026-10-18（卡：标量槽 8 字节 → 补探针钉住）：D10 ③ 说「本地 `int` 标量栈槽是 8 字节，值仍 4 字节」，
   #   而 2026-10-18 的「标量槽 4 字节」受控实验结案 = **不做、保留 8**（docs\设计决策.md D10 的同日条）。
@@ -94,15 +94,15 @@ $cases = @(
   #   · 退出码 = 4 位掩码 1+2+4+8 = **15**：bit0 = d 是 −8、bit1 = e 是 −8、bit2 = 两对相等、bit3 = 三块槽互不踩踏；
   #   · 定位口径：若哪天槽被压回 **4 字节**（或指针被按元素缩放），实测会退 **12**（bit0/bit1 丢、bit2 仍过），
   #     「竟然退 12」= 8 字节槽这条被改动了，一眼能指到本条；退 0 = 地址差压根拿不到。
-  @{ n='scalar_slot8_stride'; kind='ok'; code=15; note='本地 `int` **标量槽 = 8 字节**（D10 ③；2026-10-18 标量槽 4 字节实验结案 = 保留 8）：实测 `(&b)-(&a)` 与 `(&c)-(&b)` 都 = **−8**（后声明在低地址）⇒ 8 是**槽步长**；退出码 = 4 位掩码 1+2+4+8 = 15（两对距离各一位 ＋ 两对相等一位 ＋ 三槽互不踩踏一位）；若被压回 4 字节槽 ⇒ 实测退 12';
+  @{ n='scalar_slot4_stride'; kind='ok'; code=15; note='本地 `int` **标量槽 = 4 字节**（slot4，2026-11-05）：实测 `(&b)-(&a)` 与 `(&c)-(&b)` 都 = **−4**（后声明在低地址）⇒ 4 是**槽步长**；退出码 = 4 位掩码 1+2+4+8 = 15（两对距离各一位 ＋ 两对相等一位 ＋ 三槽互不踩踏一位）；若被扩回 8 字节槽 ⇒ 实测退 12';
       src=@'
 int main() {
   int a; int b; int c;
   int d = (&b) - (&a);
   int e = (&c) - (&b);
   int ok = 0;
-  if (d == 0 - 8) { ok = ok + 1; }
-  if (e == 0 - 8) { ok = ok + 2; }
+  if (d == 0 - 4) { ok = ok + 1; }
+  if (e == 0 - 4) { ok = ok + 2; }
   if (d == e) { ok = ok + 4; }
   a = 11; b = 22; c = 33;
   if (a == 11) { if (b == 22) { if (c == 33) { ok = ok + 8; } } }
@@ -125,8 +125,8 @@ int main() {
      src='int main() { char s[4] = "abc"; return s[0]; }' }
   @{ n='adjacent_strings'; kind='wall'; err="期望 ';'";           note='相邻字符串字面量不拼接';
      src='int main() { char *s = "ab" "cd"; return 42; }' }
-  @{ n='sizeof';           kind='wall'; err="未声明的变量 'sizeof'"; note='没有 sizeof';
-     src='int main() { int x = 4; return sizeof(x); }' }
+  @{ n='sizeof';           kind='wall'; err='只接受类型或变量名'; note='**`sizeof` 2026-11-04 起支持**（`sizeof(int)` / `sizeof(struct S)` / `sizeof(变量名)`；值宽口径见 `docs\语言参考.md` §3）——本条钉的是它的**边界**：`sizeof(表达式)` 明确拒收';
+     src='int main() { int x = 4; return sizeof(x + 1); }' }
   @{ n='c_cast';           kind='ok';   code=42; note='C 风格转型 (int)d —— **v1.8.0 起支持**（原 wall 用例按边界表订正：double→int 截断向零，3.9 → 3）';
      src='int main() { double d = 3.9; int x = (int)d; if (x == 3) { return 42; } return 7; }' }
   @{ n='long_long';        kind='wall'; err="未声明的变量 'long'";  note='没有 64 位整数类型（long long / int64）';
@@ -138,11 +138,11 @@ int main() {
 
   @{ n='str_escape_unknown'; kind='wall'; err='未知转义'; note='字符串**转义**只认少数几个 ⇒ 路径写 `"E:\FLINT-lab"` 报「未知转义」（Windows 路径必须写 `/`；`\q` 这类也拒）';
      src='int main() { char *s = "E:\FLINT-lab"; return 42; }' }
-  @{ n='api_ret_type_char'; kind='wall'; err='api 返回类型须为 int / void / ptr / double'; note='api 返回类型只有 int / void / ptr / double（`char` / `long` 都拒；`double` 能编）';
+  @{ n='api_ret_type_char'; kind='wall'; err='api 返回类型须为 int / int_64 / uint_64 / void / ptr / double'; note='api 返回类型只有这六种（`char` / `long` 都拒；`int_64`/`uint_64` 2026-11-04 起已开，`double` 能编）';
      src='api kernel32 char GetTickCount();' + "`n" + 'int main() { return 42; }' }
-  @{ n='api_modname_dot'; kind='wall'; err='api 返回类型须为 int / void / ptr / double'; note='**裸模块名不吃 `.`**：写 `api kernel32.dll` 被读成「模块名 kernel32 ＋ 返回类型 dll」⇒ 报的是返回类型那句（**文案指错方向**，报错列落在 `.` 之后）；要带 `.dll` 得用字符串形式';
+  @{ n='api_modname_dot'; kind='wall'; err='api 返回类型须为 int / int_64 / uint_64 / void / ptr / double'; note='**裸模块名不吃 `.`**：写 `api kernel32.dll` 被读成「模块名 kernel32 ＋ 返回类型 dll」⇒ 报的是返回类型那句（**文案指错方向**，报错列落在 `.` 之后）；要带 `.dll` 得用字符串形式';
      src='api kernel32.dll int GetTickCount();' + "`n" + 'int main() { return 42; }' }
-  @{ n='api_double_param'; kind='wall'; err="api 声明期望 ')'"; note='**api 形参只能是 int**：写 `double x` 直接报语法错（同族：`POINT` 这类按值 8 字节结构也传不了）';
+  @{ n='api_double_param'; kind='wall'; err="api 声明期望 ')'"; note='**api 形参只写类型、不写形参名**：`double x` 的 `x` 报语法错（类型本身 int/int_64/uint_64/double/ptr 都支持；`POINT` 这类按值 8 字节结构仍传不了）';
      src='api msvcrt double sqrt(double x);' + "`n" + 'int main() { return 42; }' }
 
   # ---------- （2026-10-12 v1.4.27 起本类**清零**：最后两条 T1 双向缺口已收成 wall）----------

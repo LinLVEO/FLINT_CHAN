@@ -394,12 +394,12 @@ int main() {
   if (!surf_init(&surf)) return 91;
   g_cfg_ca = surf.const_a;
   // 第 6 步（6a）：FontSize 来自 config（C# 初值 16；改档要重建字体 + 重算尺寸）
-  int ui_font = 0;
+  int *ui_font = 0;
   ui_font = ui_font_make(cfg.fontsize);
   // 第 6 步（6d）：小窗中央的 CPU 占用用 12px（规格 §2「小窗绘制」）
-  int mini_font = 0;
+  int *mini_font = 0;
   mini_font = ui_font_make(12);
-  int h = 0;
+  int *h = 0;
   h = wnd.h;
   // 第 6 步（6a）：按 config 的 X/Y 定位（C# 同款：启动即落在上次位置）
   if (cfg.have_xy == 1) MoveWindow(h, cfg.x, cfg.y, wnd.w, wnd.ht, 0);
@@ -490,18 +490,19 @@ int main() {
   int g_dump_t0 = GetTickCount();
   // 自检开关（2026-09-16 挪进 selfcheck\ 子目录：与运行开关 http.on/stitch.on 物理分开，避免交付时误留）
   // 目录不存在 ⇒ CreateFileA 失败 ⇒ 开关不生效（预期行为，不需要预先建目录）
-  int dumpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\dump.on", 0x80000000, 1, 0, 3, 0, 0);
+  // slot4（2026-11-05）：本地 int 只有 4 字节，句柄是指针 ⇒ 用 int* 接（原 `int dumpf` 已按 T1 新口径改）
+  int *dumpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\dump.on", 0x80000000, 1, 0, 3, 0, 0);
   if (dumpf != 0 - 1) { dump_mode = 1; CloseHandle(dumpf); }
-  int demof = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\demo.on", 0x80000000, 1, 0, 3, 0, 0);
+  int *demof = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\selfcheck\\demo.on", 0x80000000, 1, 0, 3, 0, 0);
   if (demof != 0 - 1) { demo_mode = 1; CloseHandle(demof); }
   // 第 5 步开关：http.on 存在 → 主源走 8080 /api/data（第 5 步）；demo_mode 优先级最高
   int http_mode = 0;
-  int httpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\http.on", 0x80000000, 1, 0, 3, 0, 0);
+  int *httpf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\http.on", 0x80000000, 1, 0, 3, 0, 0);
   if (httpf != 0 - 1) { http_mode = 1; CloseHandle(httpf); }
   // 第 8 步开关：stitch.on 存在 → 数据源走「同进程缝合的 C# LHM 桥」（HwBridge.dll，导入表直调）
   // 优先级：demo > stitch > http > 本地直读（三者都不开会保留本地直读值）
   int stitch_mode = 0;
-  int stitchf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\stitch.on", 0x80000000, 1, 0, 3, 0, 0);
+  int *stitchf = CreateFileA("E:\\FLINT-lab\\tmp\\row-probe\\stitch.on", 0x80000000, 1, 0, 3, 0, 0);
   if (stitchf != 0 - 1) { stitch_mode = 1; CloseHandle(stitchf); }
   // 第 5 步取数用的两个结构体（局部——见文件头「不支持 struct 全局变量」）
   char hbuf[4096];

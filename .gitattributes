@@ -78,9 +78,12 @@ notes/                         export-ignore
 # 原则同上（2026-10-19 口径）：过程记录 / 台账 / 体检 / 缺口记录 一律不进导出包。
 docs/现状.md                   export-ignore
 docs/诊断ID表.md               export-ignore
+# 下面四处已于 2026-11-05 移入 notes\（IDE 线 10-28 后停摆，落成快照件）；规则留在原处无害，路径已不存在。
 docs/IDE-功能清单.md           export-ignore
 docs/工业级标准.md             export-ignore
 docs/流程优化提案.md           export-ignore
 docs/编译器体检报告.md         export-ignore
+# 2026-11-05：文档书写规则是内部纪律，不发给外人。
+docs/文档书写规则.md           export-ignore
 tools/错误台账.md              export-ignore
 apps/tower/gaps.md             export-ignore

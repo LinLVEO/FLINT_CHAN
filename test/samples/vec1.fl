@@ -7,6 +7,7 @@
 //   bit8 len == 5                  bit9 int slot byte audit (8 bytes must be clean)
 // Growth is forced: vec_new(1) then three pushes -> capacity 1 -> 2 -> 4, so the
 // handle MOVES twice and the old elements must be carried over byte-exactly.
+// slot4（2026-11-05）：本地 int 只占 4 字节 ⇒ 装进 8 字节槽的源实体必须用 int_64。
 include "vec_lib.fl"
 api kernel32 ptr VirtualAlloc(int, int, int, int);
 
@@ -15,9 +16,9 @@ int main() {
   char *v = std::vec_new(1);
   if (v == 0) { return 1; }
 
-  int a = -12345;
+  int_64 a = -12345;
   v = std::vec_push(v, &a);
-  int back = 0;
+  int_64 back = 0;
   char *p0 = std::vec_get(v, 0);
   std::memcpy(&back, p0, 8);
   if (back == a) { r = r | 1; }
@@ -25,15 +26,15 @@ int main() {
   if (p0[0] == 199) { r = r | 512; }
   if (p0[7] == 255) { r = r | 512; }
 
-  int b = 777;
-  int c = -3;
+  int_64 b = 777;
+  int_64 c = -3;
   v = std::vec_push(v, &b);
   v = std::vec_push(v, &c);
   if (std::vec_len(v) == 3) { r = r | 2; }
-  int b0 = 0;
+  int_64 b0 = 0;
   std::memcpy(&b0, std::vec_get(v, 0), 8);
   if (b0 == a) { r = r | 4; }
-  int b2 = 0;
+  int_64 b2 = 0;
   std::memcpy(&b2, std::vec_get(v, 2), 8);
   if (b2 == c) { r = r | 8; }
 

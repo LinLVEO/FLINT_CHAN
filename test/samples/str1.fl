@@ -1,6 +1,7 @@
 // str1.fl — 相邻字符串排布地址差：a="AB"(3B含\0) b="C" → b-a = 3
+// slot4：字符串地址必须用指针接（本地 int 只有 4 字节，装不下 64 位地址）
 int main() {
-  int a = "AB";
-  int b = "C";
+  char *a = "AB";
+  char *b = "C";
   return b - a;
 }

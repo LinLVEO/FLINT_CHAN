@@ -1,0 +1,277 @@
+// pick.fl — 吸色器（Eyedropper）。FLINT_CHAN 写的单文件小工具。
+//
+// 用法：双击运行 → 跟随鼠标实时显示像素颜色 → 左键复制 HEX 到剪贴板并退出，ESC / 右键退出。
+// 口径：纯 Win32 + GDI，无运行时、无第三方库；产物目标 < 20 KB（对比同类工具几十 MB）。
+//
+// 实现要点（为什么这么写）：
+//   · 取色 = GetDC(0) + GetPixel：屏幕 DC 直接读，不建 DIB、不截图，零分配。
+//   · 窗口 = 无边框置顶 + 整体半透明（SetLayeredWindowAttributes），不抢焦点、不出现在任务栏。
+//   · 重绘走 30ms 定时器：鼠标位置每帧重取，颜色变了才重绘（减少闪烁）。
+//   · 复制 = OpenClipboard + GlobalAlloc + SetClipboardData（GMEM_MOVEABLE）。
+
+api kernel32 ptr GetModuleHandleA(int);
+api kernel32 ptr GlobalAlloc(int, int);
+api kernel32 ptr GlobalLock(int);
+api kernel32 int GlobalUnlock(int);
+api kernel32 int ExitProcess(int);
+api user32 int RegisterClassA(int);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int PeekMessageA(int, int, int, int, int);
+api user32 int GetMessageA(int, int, int, int);
+api user32 int DispatchMessageA(int);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, int);
+api user32 int SetLayeredWindowAttributes(int, int, int, int);
+api user32 int GetCursorPos(int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api user32 ptr LoadCursorA(int, int);
+api user32 int SetTimer(int, int, int, int);
+api user32 int KillTimer(int, int);
+api user32 int InvalidateRect(int, int, int);
+api user32 int GetSystemMetrics(int);
+api user32 ptr SetCursor(int);
+api user32 int SetWindowPos(int, int, int, int, int, int, int);
+api user32 int OpenClipboard(int);
+api user32 int EmptyClipboard();
+api user32 ptr SetClipboardData(int, int);
+api user32 int CloseClipboard();
+api user32 int GetAsyncKeyState(int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int SetDCBrushColor(int, int);
+api gdi32 ptr CreateSolidBrush(int);
+api gdi32 int DeleteObject(int);
+api gdi32 int SetBkMode(int, int);
+api gdi32 int SetTextColor(int, int);
+api gdi32 int TextOutA(int, int, int, int, int);
+api gdi32 ptr CreateCompatibleDC(int);
+api gdi32 ptr CreateCompatibleBitmap(int, int, int);
+api gdi32 int BitBlt(int, int, int, int, int, int, int, int, int);
+api gdi32 int StretchBlt(int, int, int, int, int, int, int, int, int, int, int);
+api gdi32 int DeleteDC(int);
+api gdi32 ptr CreateFontA(int, int, int, int, int, int, int, int, int, int, int, int, int, int);
+api gdi32 ptr SelectObject(int, int);
+api gdi32 int GetPixel(int, int, int);
+api gdi32 int PatBlt(int, int, int, int, int, int);
+api gdi32 int Rectangle(int, int, int, int, int);
+
+struct POINT { int x; int y; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct RECT { int l; int t; int r; int b; }
+
+// ===== 全局状态（FLINT 的全局不能是结构体/指针；颜色分量用 int，窗口句柄用局部）=====
+int g_r = 0;
+int g_g = 0;
+int g_b = 0;
+int g_ready = 0;
+int g_copied = 0;
+
+// 十六进制字符
+int hexc(int v) {
+  if (v < 10) { return '0' + v; }
+  return 'A' + v - 10;
+}
+
+// 把 g_r/g_g/g_b 写成 "#RRGGBB"（7 字节 + 结尾 0）
+int fmt_hex(char *out) {
+  out[0] = '#';
+  out[1] = hexc(g_r / 16); out[2] = hexc(g_r % 16);
+  out[3] = hexc(g_g / 16); out[4] = hexc(g_g % 16);
+  out[5] = hexc(g_b / 16); out[6] = hexc(g_b % 16);
+  out[7] = 0;
+  return out;
+}
+
+// 十进制三位（RGB 用）
+int fmt_dec3(char *out, int v) {
+  out[0] = '0' + v / 100;
+  out[1] = '0' + (v / 10) % 10;
+  out[2] = '0' + v % 10;
+  out[3] = 0;
+  return out;
+}
+
+// 取鼠标下的像素颜色
+int pick_at_cursor() {
+  struct POINT pt;
+  GetCursorPos(&pt);
+  int *dc = GetDC(0);
+  if (dc == 0) { return 0; }
+  int c = GetPixel(dc, pt.x, pt.y);
+  ReleaseDC(0, dc);
+  if (c == 0 - 1) { return 0; }        // CLR_INVALID
+  g_r = c % 256;
+  g_g = (c / 256) % 256;
+  g_b = (c / 65536) % 256;
+  g_ready = 1;
+  return 1;
+}
+
+// 复制当前 HEX 到剪贴板
+int copy_hex() {
+  char s[8];
+  fmt_hex(s);
+  if (OpenClipboard(0) == 0) { return 0; }
+  EmptyClipboard();
+  int *mem = GlobalAlloc(0x42, 8);      // GMEM_MOVEABLE | GMEM_ZEROINIT
+  if (mem != 0) {
+    char *d = GlobalLock(mem);
+    if (d != 0) {
+      int i = 0;
+      while (i < 8) { d[i] = s[i]; i = i + 1; }
+      GlobalUnlock(mem);
+      SetClipboardData(1, mem);          // CF_TEXT
+    }
+  }
+  CloseClipboard();
+  g_copied = 1;
+  return 1;
+}
+
+// 画一帧：左侧放大镜（9×9 像素，每格 10px），右侧色块 + HEX/RGB
+int draw(int *hwnd) {
+  int *dc = GetDC(hwnd);
+  if (dc == 0) { return 0; }
+  int w = 240;
+  int hgt = 160;
+  SelectObject(dc, GetStockObject(18));
+  SetDCBrushColor(dc, 0x1E1E1E);
+  PatBlt(dc, 0, 0, w, hgt, 0xF00021);   // 铺底
+  // ===== 放大镜（BitBlt 版，无循环）：抓鼠标周围 9×9 再放大到 90×90 =====
+  struct POINT pt;
+  GetCursorPos(&pt);
+  int *sdc = GetDC(0);
+  if (sdc != 0) {
+    int *mdc = CreateCompatibleDC(sdc);
+    int *bmp = CreateCompatibleBitmap(sdc, 9, 9);
+    if (mdc != 0 && bmp != 0) {
+      SelectObject(mdc, bmp);
+      BitBlt(mdc, 0, 0, 9, 9, sdc, pt.x - 4, pt.y - 4, 0x00CC0020);
+      StretchBlt(dc, 12, 12, 90, 90, mdc, 0, 0, 9, 9, 0x00CC0020);
+    }
+    if (bmp != 0) { DeleteObject(bmp); }
+    if (mdc != 0) { DeleteDC(mdc); }
+    ReleaseDC(0, sdc);
+  }
+  if (sdc != 0) { ReleaseDC(0, sdc); }
+  // 放大镜边框（1px 深色，让它在同色背景上也有边界）
+  SetDCBrushColor(dc, 0x3C3C3C);
+  PatBlt(dc, 12, 12, 90, 1, 0xF00021);
+  PatBlt(dc, 12, 101, 90, 1, 0xF00021);
+  PatBlt(dc, 12, 12, 1, 90, 0xF00021);
+  PatBlt(dc, 101, 12, 1, 90, 0xF00021);
+  // 中心十字（黑线 + 白线错位：任何底色下都看得见）
+  SetDCBrushColor(dc, 0x000000);
+  PatBlt(dc, 12 + 36, 12 + 45, 18, 1, 0xF00021);
+  PatBlt(dc, 12 + 45, 12 + 36, 1, 18, 0xF00021);
+  SetDCBrushColor(dc, 0xFFFFFF);
+  PatBlt(dc, 12 + 36, 12 + 46, 18, 1, 0xF00021);
+  PatBlt(dc, 12 + 46, 12 + 36, 1, 18, 0xF00021);
+  // ===== 色块 =====
+  int br = 0;
+  int bs = 0;
+  int bb = 0;
+  if (g_ready == 1) { br = g_r; bs = g_g; bb = g_b; }
+  int col = br | (bs * 256) | (bb * 65536);
+  SetDCBrushColor(dc, col);
+  PatBlt(dc, 116, 12, 56, 56, 0xF00021);
+  // ===== 文字 =====
+  int *font = CreateFontA(0 - 18, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 0, 0, "Consolas");
+  if (font != 0) { SelectObject(dc, font); }
+  SetBkMode(dc, 1);
+  char hex[8];
+  fmt_hex(hex);
+  SetTextColor(dc, 0xE8E8E8);
+  TextOutA(dc, 116, 76, hex, 7);
+  char r3[4];
+  char g3[4];
+  char b3[4];
+  fmt_dec3(r3, br);
+  fmt_dec3(g3, bs);
+  fmt_dec3(b3, bb);
+  SetTextColor(dc, 0xB0B0B0);
+  TextOutA(dc, 116, 100, "R", 1);
+  TextOutA(dc, 136, 100, r3, 3);
+  TextOutA(dc, 116, 118, "G", 1);
+  TextOutA(dc, 136, 118, g3, 3);
+  TextOutA(dc, 116, 136, "B", 1);
+  TextOutA(dc, 136, 136, b3, 3);
+  if (g_copied == 1) {
+    SetTextColor(dc, 0x6ACD6A);
+    TextOutA(dc, 176, 136, "copied", 6);
+  }
+  if (font != 0) { DeleteObject(font); }
+  ReleaseDC(hwnd, dc);
+  return 0;
+}
+
+// 窗口过程
+int wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x000F) {                     // WM_PAINT
+    if (g_ready == 0) { pick_at_cursor(); }
+    draw(hwnd);
+    ValidateRect(hwnd, 0);
+    return 0;
+  }
+  if (msg == 0x0113) {                     // WM_TIMER
+    int old = g_r * 65536 + g_g * 256 + g_b;
+    pick_at_cursor();
+    int now = g_r * 65536 + g_g * 256 + g_b;
+    // 跟手但不挡鼠标：优先右下 20px，贴边时翻到另一侧
+    struct POINT pt;
+    GetCursorPos(&pt);
+    int sw = GetSystemMetrics(0);
+    int sh = GetSystemMetrics(1);
+    int wx = pt.x + 20;
+    int wy = pt.y + 20;
+    if (wx + 240 > sw) { wx = pt.x - 260; }
+    if (wy + 160 > sh) { wy = pt.y - 180; }
+    if (wx < 0) { wx = 0; }
+    if (wy < 0) { wy = 0; }
+    SetWindowPos(hwnd, 0 - 1, wx, wy, 0, 0, 0x0001 | 0x0010);
+    if (now != old) {
+      InvalidateRect(hwnd, 0, 0);
+    } else {
+      InvalidateRect(hwnd, 0, 0);    // 放大镜每帧都要跟着鼠标重画
+    }
+    return 0;
+  }
+  if (msg == 0x0201) {                     // WM_LBUTTONDOWN
+    copy_hex();
+    draw(hwnd);
+    return 0;
+  }
+  if (msg == 0x0100) {                     // WM_KEYDOWN
+    if (wp % 65536 == 27) { ExitProcess(0); }
+    return 0;
+  }
+  if (msg == 0x0010) {                     // WM_CLOSE
+    ExitProcess(0);
+    return 0;
+  }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int main() {
+  struct WNDCLASS wc;
+  wc.style = 0;
+  wc.fn = &wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = LoadCursorA(0, 32512); wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTPICK";
+  if (RegisterClassA(&wc) == 0) { return 1; }
+  int *h = CreateWindowExA(0x00080008, wc.cls, "pick", 0x80000000, 400, 300, 240, 160, 0, 0, 0, 0);
+  if (h == 0) { return 2; }
+  SetLayeredWindowAttributes(h, 0, 235, 2);
+  ShowWindow(h, 1);
+  SetTimer(h, 1, 30, 0);
+  struct MSG m;
+  // 阻塞取消息（Peek 版在无消息时会立刻退出循环 ⇒ 进程刚起来就没了）
+  while (GetMessageA(&m, 0, 0, 0) > 0) {
+    DispatchMessageA(&m);
+  }
+  return 0;
+}

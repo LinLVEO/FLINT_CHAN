@@ -1,0 +1,87 @@
+// f137_api_i64.fl -- 2026-11-04：api 的 **64 位整型通道**（int_64 / uint_64 作返回值 + 作形参）探针
+//   （8 位掩码，全亮退 42；每一位一格，失败时打印 mask，红的位一眼可见）
+//
+// 口径（与 docs\语言参考.md §8「调用 Windows API」一致）：
+//   · api 返回类型：int / int_64 / uint_64 / void / ptr / double
+//       - int_64 / uint_64 是**不同的两档**：返回值都走 rax 全 64 位，但打印/比较/右移的符号性不同
+//       - ptr 仍是"地址/句柄"：地址 ≠ 整数，64 位整数不能当 ptr 形参传（反之亦然）
+//   · api 形参类型：int / int_64 / uint_64 / double / ptr
+//       - 64 位形参 ← 64 位实参：放行（同宽，位型直传）
+//       - 64 位形参 ← int/char/uint_32 实参：**宽化**放行（有符号源 movsxd、无符号源零扩展）
+//       - int 形参 ← 64 位实参：**仍然编译期硬错**（静默丢高 32 位）——必须显式 (int) 收窄
+//       - ptr 形参 ← 64 位整数：硬错（地址 ≠ 整数）
+//
+//   bit0 api 返回值作 uint_64：> 0，且能参与 64 位比较（GetTickCount64 是真实 uint_64 返回值）
+//   bit1 print([v]) 打完整数字：stdout 里有 tick=<完整值>；并另用 str() 逐字符核对一个 > 2^32 的
+//        uint_64 值的十进制文本（8589934592 = 2^33，10 位；截成 32 位就是 0）
+//   bit2 带 int_64 形参的真实 API 声明（SetFilePointerEx）——**只声明、不调用**（避免依赖真实句柄），
+//        能编过本文件即判据；运行期置位（这一位代表"声明侧通道打开"）
+//   bit3 int_64 变量 → int_64 形参（同宽直传）：VirtualAlloc(0, sz, MEM_COMMIT|RESERVE=0x3000, RW=0x04)
+//        返回非 0（1 MiB 能真提交）
+//   bit4 int 字面量 → int_64 形参（宽化）：同一次 VirtualAlloc 的 lpAddress=0 / dwSize 参数都走宽化；
+//        另用 64 位字面量 0x200000000（8 GiB，**低 32 位 = 0**）只保留地址空间（0x2000）——
+//        若按 32 位传就变成 size=0，VirtualAlloc 必失败 ⇒ 非 0 才算过
+//   bit5 api 返回值进 int_64 变量后参与 64 位算术/比较：int_64 a = v; a == v；v/2*2 == v-(v%2)
+//   bit6 api 返回值当 int_64 函数实参再传出：echo64(v) == v；bump64(v) == v + 1（普通函数的
+//        int_64 形参通道本来就通——本探针顺带钉住它没被 api 通道改坏）
+//   bit7 64 位字面量的比较/除法（与机器 uptime 大小无关的独立判据）：0x200000000 > 4294967295、
+//        / 2 == 0x100000000
+//
+// ⚠️ **双端缺口（已知，照仓库惯例只在真 flint 端跑）**：boot（自举端 b1_emit.exe）的类型宇宙里
+//    没有 int_64 / uint_64 / double，api 声明侧也没有这两档 —— 本探针不进差分门、不要求 boot 对齐；
+//    登记方式同 f136（sizeof）与 int_64/uint_64 的既有双端缺口。
+api kernel32 uint_64 GetTickCount64();
+api kernel32 int SetFilePointerEx(int, int_64, int, int);
+api kernel32 ptr VirtualAlloc(int_64, int_64, int, int);
+
+// 普通函数（非 api）的 int_64 形参/返回值：bit6 的判据
+int_64 echo64(int_64 x) { return x; }
+int_64 bump64(int_64 x) { return x + 1; }
+
+int main() {
+  int mask = 0;
+  uint_64 v = GetTickCount64();
+
+  // —— bit0：api 返回 uint_64，值 > 0 且 64 位比较 ——
+  if (v > 0 && v < 1000000000000000) { mask = mask | 1; }
+
+  // —— bit1：print 打完整数字（stdout 核对 + str() 逐字符核对 > 2^32 的值）——
+  print(["f137 tick=", v, "\n"]);
+  uint_64 big = 0x200000000;          // 8589934592（2^33）
+  print(["f137 big=", big, "\n"]);
+  char *s = str([big]);
+  char *want = "8589934592";
+  int k = 0;
+  int same = 1;
+  while (want[k] != 0) {
+    if (s[k] != want[k]) { same = 0; }
+    k = k + 1;
+  }
+  if (same && s[k] == 0) { mask = mask | 2; }
+
+  // —— bit2：SetFilePointerEx 声明在文件顶部（含 int_64 形参）——编译通过即覆盖，不真调 ——
+  mask = mask | 4;
+
+  // —— bit3：int_64 变量 → int_64 形参（同宽直传）——
+  int_64 sz = 0x100000;              // 1 MiB
+  char *a1 = VirtualAlloc(0, sz, 0x3000, 0x04);
+  if (a1 != 0) { mask = mask | 8; }
+
+  // —— bit4：int 实参宽化 + 64 位字面量实参（8 GiB 只保留，低 32 位 = 0 ⇒ 按 32 位传必失败）——
+  char *a8 = VirtualAlloc(0, 0x200000000, 0x2000, 0x01);
+  if (a8 != 0) { mask = mask | 16; }
+
+  // —— bit5：api 返回值 → int_64 变量，参与 64 位算术/比较 ——
+  int_64 a = v;
+  if (a == v && v / 2 * 2 == v - (v % 2)) { mask = mask | 32; }
+
+  // —— bit6：api 返回值当 int_64 函数实参再传出（普通函数通道顺带复核）——
+  if (echo64(v) == v && bump64(v) == v + 1) { mask = mask | 64; }
+
+  // —— bit7：64 位字面量的比较/除法（与 uptime 无关）——
+  if (big > 4294967295 && big / 2 == 0x100000000) { mask = mask | 128; }
+
+  print(["f137 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

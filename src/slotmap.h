@@ -28,7 +28,9 @@ enum {
   SF_PARAM     = 1u << 3,  // 形参槽
   SF_SCRATCH   = 1u << 4,  // 帧底暂存槽（编译器自用）
   SF_REF       = 1u << 5,  // 引用槽（槽里存的是对象地址）
-  SF_T1ADDR    = 1u << 6,  // v1.0.13 T1「装地址的 int」槽
+  SF_T1ADDR    = 1u << 6,  // v1.0.13 T1「装地址的 int」槽 —— **slot4 起已停用**：本地 int 槽只有 4 字节，
+                           //   「int ← 地址值」在 codegen 的 ai_pass 里直接报错，生成层不再产生该标记。
+                           //   位与 SF_NOREG 关系保留（历史/审计兼容；永远命中不了）。
   SF_CROSSCALL = 1u << 7,  // 跨调用存活（函数内有调用，且该槽在调用前后都被访问）
   SF_WIDE      = 1u << 8,  // 有过 8 字节（64 位）访问（记录用，不参与判定）
   SF_MULTIBB   = 1u << 9,  // M3：访问跨越**多个基本块** ⇒ M4 条件 ④ 不满足（这类槽不许分配寄存器）
@@ -107,7 +109,7 @@ int  slotmap_regs_allocated(int *out, int cap);
 // 元素宽度 = 4 字节（与 `p[i]` / `a[i]` 的既有读写宽度一致）。
 typedef struct {
   int base_off;   // 数组槽偏移（帧内；[rbp - base_off]）
-  int scale;      // 元素步长（int 元素 = 8）
+  int scale;      // 元素步长（= ty_arr_stride：char 1 / int 4 / int_64·double·指针 8）
   int has_idx;    // 1 = 索引在 eax/rax；0 = 下标是编译期常量 cidx
   int cidx;       // 常量下标（仅 has_idx == 0）
 } ElemAddr;

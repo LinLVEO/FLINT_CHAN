@@ -453,16 +453,18 @@ foreach ($s in $Samples) {
     }
 
     # [8.6] every slot inside the frame and unique within its function
+    #   slot4（2026-11-05）：本地 int 标量槽只有 4 字节 ⇒ slot 可以是 -4/-12/-20…（≡4 mod 8），
+    #   不再保证落在 -8 的倍数上。判据改成「帧内且为负」（slot = -offset）。
     $slotBad = 0
     foreach ($f in $funcs) {
       $seen = @{}
       foreach ($v in @($f.vars)) {
         $sl = [int]$v.slot
-        if ($sl -lt (-[int]$f.frame.size) -or $sl -gt -8) { $slotBad++ }
+        if ($sl -lt (-[int]$f.frame.size) -or $sl -ge 0) { $slotBad++ }
         if ($seen.ContainsKey($sl)) { $slotBad++ } else { $seen[$sl] = 1 }
       }
     }
-    if ($slotBad -eq 0) { Ok "$s : every slot is inside the frame (-size..-8) and unique per function" }
+    if ($slotBad -eq 0) { Ok "$s : every slot is inside the frame (-size..-1) and unique per function" }
     else { Bad "$s : [8.6] $slotBad slot problem(s) (out of frame or duplicated)" }
 
     # [8.7] type spelling whitelist (no garbage accepted; arrays/pointers/struct names allowed)

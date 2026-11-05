@@ -281,6 +281,15 @@
       "count": 1
     },
     {
+      "id": "[E-GEN-2B10]",
+      "cls": "GEN",
+      "msg": "内存不足（全局变量初值）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-GEN-2BBC]",
       "cls": "GEN",
       "msg": "引用形参需要变量实参（如 swap(a, b)）",
@@ -376,6 +385,24 @@
       "msg": "内部 rsp 状态异常（多参调用入口 rsp≡%d，应 0 或 8）——压栈未配对，改 codegen",
       "files": [
         "src/codegen.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-GEN-3C06]",
+      "cls": "GEN",
+      "msg": "内部错误：sizeof 拿到的结构体下标越界（%d）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-GEN-3C22]",
+      "cls": "GEN",
+      "msg": "sizeof 需要括号：sizeof(int) / sizeof(struct S) / sizeof(变量名)",
+      "files": [
+        "src/parse.c"
       ],
       "count": 1
     },
@@ -563,6 +590,15 @@
       "id": "[E-GEN-5603]",
       "cls": "GEN",
       "msg": "引用只能绑定变量（int &r = x; / double &r = d;）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-GEN-562C]",
+      "cls": "GEN",
+      "msg": "sizeof(...) 的实参是 enum 常量 '%.*s'（值不是对象）—— 枚举常量按 int 存，请写 sizeof(int)",
       "files": [
         "src/parse.c"
       ],
@@ -1109,6 +1145,15 @@
       "count": 1
     },
     {
+      "id": "[E-GEN-B411]",
+      "cls": "GEN",
+      "msg": "sizeof 的数组长度须为正数（得到 %lld）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-GEN-B41F]",
       "cls": "GEN",
       "msg": "内部错误：str 需要内置缓冲函数 _flint_str_begin（编译器注入缺失）",
@@ -1253,6 +1298,15 @@
       "count": 1
     },
     {
+      "id": "[E-GEN-CAB0]",
+      "cls": "GEN",
+      "msg": "这个 API 形参声明的是 ptr——double 实参会走 XMM 通道，声明与实参必须一致",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-GEN-CF34]",
       "cls": "GEN",
       "msg": "全局数组长度必须是正整数常量（字面量 / enum 常量 / 常量表达式）——全局数组在 .data 里，长度编译期就得定；变量、函数调用都不行",
@@ -1346,6 +1400,15 @@
       "id": "[E-GEN-D743]",
       "cls": "GEN",
       "msg": "引用必须初始化（int &r = x;）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-GEN-D99B]",
+      "cls": "GEN",
+      "msg": "sizeof 的数组长度必须是编译期常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（sizeof 在 parse 期就得算死）",
       "files": [
         "src/parse.c"
       ],
@@ -1595,6 +1658,15 @@
       "count": 1
     },
     {
+      "id": "[E-GEN-FF9A]",
+      "cls": "GEN",
+      "msg": "这个 API 形参声明的是 %s——64 位整数（%s）实参会被静默截断高 32 位：请先显式收窄（(int) 转型），或把 api 声明改成 %s",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-LIM-00C1]",
       "cls": "LIM",
       "msg": "这个形参是 %s——double 实参不支持（两者互转只走显式转型），请先 (int)值 再 (…)",
@@ -1769,6 +1841,15 @@
       "id": "[E-LIM-555A]",
       "cls": "LIM",
       "msg": "结构体数组总长过大（帧槽累计超 2GB 上限）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-LIM-56D9]",
+      "cls": "LIM",
+      "msg": "这个 API 形参声明的是 %s——double 实参不支持（两者互转只走显式转型），请先写出显式转型再传",
       "files": [
         "src/parse.c"
       ],
@@ -2288,6 +2369,15 @@
       "count": 1
     },
     {
+      "id": "[E-LIM-FA06]",
+      "cls": "LIM",
+      "msg": "sizeof 的数组长度过大（%lld；上限 2147483647）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-LIM-FA63]",
       "cls": "LIM",
       "msg": "多维函数指针数组暂不支持（v2.6.0 边界：只开一维 `(*ops[N])(...)`）",
@@ -2423,18 +2513,18 @@
       "count": 1
     },
     {
-      "id": "[E-SEM-1CD7]",
+      "id": "[E-SEM-1EC5]",
       "cls": "SEM",
-      "msg": "api 返回类型须为 int / void / ptr / double（int_64 / uint_64 暂不支持：v1.7.0 P0 边界，64 位返回值请用 ptr 承接）",
+      "msg": "无符号整数不能隐式转 double（要先写显式转型，如 (double)u）——或者改用整数值",
       "files": [
         "src/parse.c"
       ],
       "count": 1
     },
     {
-      "id": "[E-SEM-1EC5]",
+      "id": "[E-SEM-2022]",
       "cls": "SEM",
-      "msg": "无符号整数不能隐式转 double（要先写显式转型，如 (double)u）——或者改用整数值",
+      "msg": "sizeof(...) 的实参是函数名 '%.*s' —— 函数没有对象大小（sizeof 只接受类型或变量）",
       "files": [
         "src/parse.c"
       ],
@@ -2486,9 +2576,27 @@
       "count": 2
     },
     {
+      "id": "[E-SEM-2C64]",
+      "cls": "SEM",
+      "msg": "sizeof 里的 '%.*s' 未声明 —— sizeof(<标识符>) 只接受已声明的变量；类型请写 sizeof(int) / sizeof(struct S)",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-SEM-30B8]",
       "cls": "SEM",
       "msg": "结构体字段 '%s' 过大（%d 个元素 × %d 字节）——结构体总长不能超过 2GB",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-3100]",
+      "cls": "SEM",
+      "msg": "sizeof 的类型写法不对：期望 ')'（类型 = int / int_32 / int_64 / char / double / uint_8 / uint_32 / uint_64 / struct 名，可加 * 或 [常量]）",
       "files": [
         "src/parse.c"
       ],
@@ -2525,6 +2633,15 @@
       "id": "[E-SEM-3488]",
       "cls": "SEM",
       "msg": "数组长度常量表达式里不能除以 0",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-38EB]",
+      "cls": "SEM",
+      "msg": "sizeof 括号里不是可识别的类型（可写 int / int_32 / int_64 / char / double / uint_8 / uint_32 / uint_64 / struct 名，可加 * 或 [常量]）",
       "files": [
         "src/parse.c"
       ],
@@ -2648,6 +2765,15 @@
       "count": 1
     },
     {
+      "id": "[E-SEM-5DB4]",
+      "cls": "SEM",
+      "msg": "sizeof(ptr) 没有意义：ptr 只是 api 返回类型的关键字 —— 指针请写 sizeof(int*)（指针恒 8 字节）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-SEM-5FD1]",
       "cls": "SEM",
       "msg": "使用了未声明的变量 '%.*s'",
@@ -2711,15 +2837,6 @@
       "count": 1
     },
     {
-      "id": "[E-SEM-7E90]",
-      "cls": "SEM",
-      "msg": "64 位整数（int_64/uint_64）实参不能直接传给 api 函数（v1.7.0 P0 边界：api 声明没有 64 位参数档，会按 32 位传）——请先显式收窄",
-      "files": [
-        "src/parse.c"
-      ],
-      "count": 1
-    },
-    {
       "id": "[E-SEM-7F78]",
       "cls": "SEM",
       "msg": "try 的目标变量 '%.*s' 未声明（先在本函数里声明，如 int err = 0;）",
@@ -2732,6 +2849,15 @@
       "id": "[E-SEM-86F7]",
       "cls": "SEM",
       "msg": "不能把 %s 赋给 %s（会静默截断高 32 位：值超出范围的部分丢掉）——请显式写 (%s)值，或把左值声明成 %s",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-8918]",
+      "cls": "SEM",
+      "msg": "sizeof 的结果 %lld 字节超出 int 范围（2147483647）—— sizeof 的结果类型是 int",
       "files": [
         "src/parse.c"
       ],
@@ -2828,6 +2954,15 @@
       "count": 1
     },
     {
+      "id": "[E-SEM-9C72]",
+      "cls": "SEM",
+      "msg": "sizeof 的结果超出 int 范围（2147483647）—— 数组类型太大了，而 sizeof 的结果类型是 int",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-SEM-9E9F]",
       "cls": "SEM",
       "msg": "不能把 double 值 return 给 %s 返回函数（两者互转只走显式转型）",
@@ -2891,9 +3026,9 @@
       "count": 1
     },
     {
-      "id": "[E-SEM-B292]",
+      "id": "[E-SEM-B2A3]",
       "cls": "SEM",
-      "msg": "api 参数类型只能是 int / double / ptr（ptr = 64 位句柄/指针；double = XMM 通道；int_64 实参暂不支持：v1.7.0 P0 边界，请先 to_int32(...)）",
+      "msg": "api 参数类型只能是 int / int_64 / uint_64 / double / ptr（ptr = 64 位句柄/指针，double = XMM 通道；int_64/uint_64 = 64 位整数，值走 GP 全 64 位）",
       "files": [
         "src/parse.c"
       ],
@@ -2921,6 +3056,24 @@
       "id": "[E-SEM-BD93]",
       "cls": "SEM",
       "msg": "指针转型的源必须是地址值（指针 / 数组名 / &x / 字符串 / new）——整数不能转指针（T1 边界：地址值与 int 不能互相装；空指针请写 int *p = 0;）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-BF4A]",
+      "cls": "SEM",
+      "msg": "sizeof(void) 没有意义：void 不是有值的类型 —— 要字节视图请用 sizeof(char*)（指针恒 8 字节）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-C20D]",
+      "cls": "SEM",
+      "msg": "sizeof 只接受类型或变量名（sizeof(int) / sizeof(struct P) / sizeof(buf)）——不接受表达式：sizeof(表达式) 在编译期拿不到对象大小",
       "files": [
         "src/parse.c"
       ],
@@ -2957,6 +3110,15 @@
       "id": "[E-SEM-C8CA]",
       "cls": "SEM",
       "msg": "api 的模块名字符串不能为空",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-C98A]",
+      "cls": "SEM",
+      "msg": "sizeof 里的结构体 '%.*s' 未定义 —— 请先写 struct %.*s { ... } 再用 sizeof（要完整字段布局才能算大小）",
       "files": [
         "src/parse.c"
       ],
@@ -3071,6 +3233,15 @@
       "count": 6
     },
     {
+      "id": "[E-SEM-DF4A]",
+      "cls": "SEM",
+      "msg": "这个 API 形参声明的是 ptr（64 位地址/句柄）——64 位整数（%s）不能当地址传（地址 ≠ 整数）：要传地址请用指针/&变量，要传数值请把形参改成 int_64",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
       "id": "[E-SEM-DF9E]",
       "cls": "SEM",
       "msg": "指针目标只能接「地址表达式」（&x / 字符串 / 指针变量 / 数组名 / new / 指针返回函数 / API 返回值 / 地址链）、显式常量、或一个装过地址的 int 变量——这里的值只有 32 位，当指针用会指向错地方（int 形参、int 返回值、4 字节的 int 字段/元素里都装不下地址，请把类型声明成 int * 或 ptr）",
@@ -3137,6 +3308,15 @@
       "id": "[E-SEM-F16C]",
       "cls": "SEM",
       "msg": "try 的形态是 `try <变量> = <表达式>;`（左值只能是单个变量，不能是 a[i] / s.x —— 那样会被求值两次）",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SEM-F648]",
+      "cls": "SEM",
+      "msg": "api 返回类型须为 int / int_64 / uint_64 / void / ptr / double（ptr = 64 位句柄/指针；int_64/uint_64 = 64 位整数，值走 rax 全 64 位）",
       "files": [
         "src/parse.c"
       ],
@@ -3470,6 +3650,15 @@
       "id": "[E-SYN-E101]",
       "cls": "SYN",
       "msg": "期望数字/变量/'('，得到 '%.*s'",
+      "files": [
+        "src/parse.c"
+      ],
+      "count": 1
+    },
+    {
+      "id": "[E-SYN-E1AF]",
+      "cls": "SYN",
+      "msg": "sizeof 里 struct 后需跟结构体名（写法：sizeof(struct Point)）",
       "files": [
         "src/parse.c"
       ],

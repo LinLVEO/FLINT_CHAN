@@ -1,6 +1,6 @@
 ﻿align_probe	OK	exit=0
 align2_probe	OK	exit=0
-api1	HANG	flint产物 超过 5s
+api1	HANG	boot产物+flint产物 超过 5s
 api2	OK	exit=1
 api3	OK	exit=0
 apiarg16	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\apiarg16.exe' parse err=-176 token=37 pos=658 text='as' line 7: api msvcrt int pf16(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int) as "printf"; compile FAIL err=2
@@ -122,11 +122,11 @@ fordecl1	OK	exit=670
 freq_probe	OK	exit=2
 global1	OK	exit=255
 global2	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\global2.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\global2.exe' parse err=-183 token=11 pos=716 text='double' line 14: double gd = 1.5; compile FAIL err=2
-inc_cycle_a	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl 第 2 行第 1 列）: include "inc_cycle_a.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl
-inc_cycle_b	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl 第 3 行第 1 列）: include "inc_cycle_b.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl
-inc_err_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 1 列）: int bad(int x { return x; } ^ 缺少 main 函数（程序入口）
-inc_err_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 15 列）: int bad(int x { return x; } ^ 期望 ')'
-inc_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口）
+inc_cycle_a	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl 第 2 行第 1 列）: include "inc_cycle_a.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl [E-GEN-5329]
+inc_cycle_b	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_a.fl 第 3 行第 1 列）: include "inc_cycle_b.fl" ^ include 循环引用: E:\FLINT-lab\test\tmp\diffgate\samples\inc_cycle_b.fl [E-GEN-5329]
+inc_err_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 1 列）: int bad(int x { return x; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+inc_err_main	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_err_lib.fl 第 2 行第 15 列）: int bad(int x { return x; } ^ 期望 ')' [E-SYN-3A30]
+inc_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\inc_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
 inc_main	OK	exit=21
 inc1	OK	exit=5
 inc2	OK	exit=6
@@ -134,12 +134,12 @@ inc3	OK	exit=8
 inc4	OK	exit=3
 inc5	OK	exit=55
 inc6	OK	exit=12
-incdup_a	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口）
-incdup_b	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口）
-incdup_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_lib.fl 第 2 行第 1 列）: int incdup_val() { return 42; } ^ 缺少 main 函数（程序入口）
+incdup_a	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+incdup_b	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_b.fl 第 2 行第 1 列）: int incdup_b_val() { return 40; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+incdup_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\incdup_lib.fl 第 2 行第 1 列）: int incdup_val() { return 42; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
 incdup_main	OK	exit=42
 incdup_main2	OK	exit=42
-io_api_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\io_api_lib.fl 第 3 行第 1 列）: api kernel32 int GetTickCount(); ^ 缺少 main 函数（程序入口）
+io_api_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\io_api_lib.fl 第 3 行第 1 列）: api kernel32 int GetTickCount(); ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
 io_api_main	OK	exit=42
 iolib1	OK	exit=42
 iolib2	OK	exit=42
@@ -149,12 +149,12 @@ m1_float	SKIP	排除清单
 m2_float	SKIP	排除清单
 mathlib1	OK	exit=42
 memlib1	OK	exit=42
-mf_api_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口）
-mf_api_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_main.fl 第 3 行第 11 列）: int s = lib_secs(1000); // 开机秒数（函数在 mf_api_lib.fl） ^ 使用了未声明的变量 'lib_secs'
-mf_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_lib.fl 第 2 行第 1 列）: int lib_add(int a, int b) { return a + b; } ^ 缺少 main 函数（程序入口）
-mf_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_main.fl 第 3 行第 11 列）: int x = lib_mul3(2, 3, 4); // 24（函数在 mf_lib.fl） ^ 使用了未声明的变量 'lib_mul3'
-mf_struct_lib	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_lib.fl 第 2 行第 1 列）: struct PP { int x; int y; } ^ 缺少 main 函数（程序入口）
-mf_struct_main	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_main.fl 第 3 行第 10 列）: struct PP p; ^ 未定义的结构体类型 'PP'（struct 须先定义后使用）
+mf_api_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_lib.fl 第 2 行第 1 列）: api kernel32 int GetTickCount(int); ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+mf_api_main	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_api_main.fl 第 3 行第 11 列）: int s = lib_secs(1000); // 开机秒数（函数在 mf_api_lib.fl） ^ 使用了未声明的变量 'lib_secs' [E-SEM-5FD1]
+mf_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_lib.fl 第 2 行第 1 列）: int lib_add(int a, int b) { return a + b; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+mf_main	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_main.fl 第 3 行第 11 列）: int x = lib_mul3(2, 3, 4); // 24（函数在 mf_lib.fl） ^ 使用了未声明的变量 'lib_mul3' [E-SEM-5FD1]
+mf_struct_lib	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_lib.fl 第 2 行第 1 列）: struct PP { int x; int y; } ^ 缺少 main 函数（程序入口） [E-SYN-53ED]
+mf_struct_main	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\mf_struct_main.fl 第 3 行第 10 列）: struct PP p; ^ 未定义的结构体类型 'PP'（struct 须先定义后使用） [E-SEM-D606]
 msr_probe	OK	exit=2
 multi_init	OK	exit=6
 new1	OK	exit=0
@@ -167,7 +167,7 @@ pow1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\pow1.fl' 
 print1	SKIP	排除清单
 ptr1	OK	exit=42
 ptr2	OK	exit=99
-ptr64_1	FLINT_FAIL	exit=1 FLINT 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\ptr64_1.fl 第 15 行第 22 列）: struct Holder { int *ptr; int n; } ^ 期望字段名
+ptr64_1	FLINT_FAIL	exit=1 hlc 编译错误（E:\FLINT-lab\test\tmp\diffgate\samples\ptr64_1.fl 第 15 行第 22 列）: struct Holder { int *ptr; int n; } ^ 期望字段名 [E-SYN-EB78]
 ptr64a	OK	exit=0
 ptr64b	OK	exit=0
 rapl_probe	OK	exit=2
@@ -238,7 +238,7 @@ var2	OK	exit=20
 var3	OK	exit=13
 var4	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\var4.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\var4.exe' parse err=-55 token=15 pos=140 text='=' line 5: a = (b = 5) + 2; compile FAIL err=2
 var5	OK	exit=50
-vec_big	OK	exit=42
-vec1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.exe' parse err=-53 token=905 pos=6077 text='double' line 172: double d = -1.5; compile FAIL err=2
+vec_big	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\vec_big.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\vec_big.exe' parse err=-53 token=741 pos=6842 text='int_64' line 168: int_64 x = i * 3; compile FAIL err=2
+vec1	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\vec1.exe' parse err=-53 token=748 pos=6996 text='int_64' line 172: int_64 a = -12345; compile FAIL err=2
 voidfn	BOOT_FAIL	boot: compiling 'E:\FLINT-lab\test\tmp\diffgate\samples\voidfn.fl' -> 'E:\FLINT-lab\test\tmp\diffgate\samples\voidfn.exe' parse err=-92 token=10 pos=31 text='&' line 3: void twice(int &x) { compile FAIL err=2
 wndproc_probe	OK	exit=42

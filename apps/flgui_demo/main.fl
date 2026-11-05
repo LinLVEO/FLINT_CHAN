@@ -384,7 +384,7 @@ int main() {
   int *hf;
   int total = 0;
   int sld = 40;
-  int dumpf = 0;
+  int *dumpf = 0;
   int dump_mode = 0;
   int bx = 0;
   int by = 0;

@@ -164,7 +164,7 @@ typedef enum {
 
 // 变量类型（v0.7 起；v0.7.x 加结构体）
 typedef enum {
-  TY_INT,    // int 值（8 字节槽存值）
+  TY_INT,    // int 值（C 语义：值宽 4；本地标量帧槽**也只占 4 字节**，见 parse.c new_lvar —— slot4 改造）
   TY_PTR,    // 指针（槽存地址；显式 * 解引用；struct_idx = 指向的结构体，int 指针为 -1）
   TY_ARR,    // int a[N]（N 个槽；名字作表达式 = 首槽地址）
   TY_STRUCT, // 结构体变量（nfields 个 8 字节槽；名字作表达式 = 首地址；无整体值语义）
@@ -206,7 +206,7 @@ static inline bool ty_uns(int ty) {         // 是不是无符号整数类型
 static inline bool ty_is8(int ty) {         // 字节族（值宽 1）
   return ty == TY_CHAR || ty == TY_UINT8;
 }
-static inline bool ty_is32(int ty) {        // 32 位值族（值宽 4；帧槽仍是 8）
+static inline bool ty_is32(int ty) {        // 32 位值族（值宽 4；本地 int 槽 4、uint_32 槽仍 8）
   return ty == TY_INT || ty == TY_UINT32;
 }
 static inline bool ty_is64(int ty) {        // 64 位值族（值宽 = 槽宽 = 步长 = 8）
@@ -275,7 +275,8 @@ struct Node {
   int nargs;     // ND_CALL：参数个数（0..4）
   int ty;        // ND_VAR：变量类型（Type；TY_ARR 时 offset = 首槽）
                  // v0.9.2：ND_DEREF = 读取目标的类型（TY_PTR 字段 → 64 位读；int → 32 位读）
-                 //          ND_APICALL = API 返回类型（ApiDef.ret_ty：ptr → 地址类 64 位语义）
+                 //          ND_APICALL = API 返回类型（ApiDef.ret_ty：ptr → 地址类 64 位语义；
+                 //            v1.11.0：int_64/uint_64 → 64 位整型值，expr_is_i64 认这档，rax 全 64 位）
                  // v1.0.6：ND_CALL = 被调函数返回类型（指针返回 TY_PTR → 调用表达式按地址类 64 位）
   int elem_ty;   // v1.0.5 B 档：TY_ARR 的元素类型 / TY_PTR 的指向类型（char* 的字节语义）；
                  //   TY_INT 默认（0）——int 数组/指针旧语义；TY_CHAR → 元素/解引用按字节（movzx/88）
@@ -476,7 +477,13 @@ typedef struct {
                        //   ⚠️ 预扫描（collect_funcs）也必须落这个字段 —— 「预扫描只补一个字段」
                        //   家族已经栽过 4 次，凡是**调用点/被调方要读的字段**都得在预扫描里齐。
   Node *body;          // 函数体语句链表头
-  int var_count;       // 本函数帧变量槽数（参数 + 局部）
+  int var_count;       // 本函数帧变量**槽数**（参数 + 局部；数组/结构体按 8 字节槽计）——
+                       //   ⚠️ slot4 起它**不再是帧大小**：本地标量 int 只占 4 字节，实际字节数见 frame_bytes。
+  // ===== slot4：帧**字节数**（parse 收尾时 = Parser.next_offset）=====
+  //   本地标量 int = 4 字节后，`var_count * 8` 估出来的帧会多算；反过来按槽数推更没依据。
+  //   所以帧大小由**分槽现场**直接记下来（next_offset 是"已用到的最高偏移"），codegen 序言
+  //   `sub rsp, frame` 只读这个字段，再向上取整到 16。
+  int frame_bytes;
   // ===== v5（`-debug`）：D-1 变量位置表 + D-3 帧表 —— **生成期真值**，只记不发 =====
   // 这些字段全部由 codegen_func 在发射序言/收尾时顺手记下（`parse.c` 只填 dbg_vars）。
   // 纪律：**只记不发** —— 多写这些字段不会让产物多一个字节（普通产物等价门守着）。
@@ -501,7 +508,7 @@ typedef struct {
 // v1.4.0：API 实参上限 12 → 16（4 寄存器 + 12 栈参）。动机 = 真 Windows API 里有超过 12 参的
 //   常用函数：CreateFontA 是 **14 参**（字形层/浮窗还原第一步直接撞上限，"API 参数最多 12 个"）。
 //   上限单点定义在 API_MAX_ARGS：声明侧（parse.c）、调用侧（codegen.c 暂存数组）、
-//   ApiDef.param_dbl 三处共用，避免"改一处漏一处"（历史上"预扫描只补一个字段"家族已 5 次）。
+//   ApiDef.param_ty 三处共用，避免"改一处漏一处"（历史上"预扫描只补一个字段"家族已 5 次）。
 #define API_MAX_ARGS 16
 
 // v1.4.28（B1-3）：导入模块名（写出名）上限 —— pe.c 的 ImpGroup.dll 是 char[64]，
@@ -519,8 +526,14 @@ typedef struct {
   char *import_name;   // v1.1.0：真实导出名（`api msvcrt int p(int) as "printf";`）——NULL = 与 name 相同
   int nargs;           // 参数个数 0..API_MAX_ARGS
   bool ret_void;       // 返回 void
-  int ret_ty;          // v0.9.2：非 void 返回类型 TY_INT（默认）｜ TY_PTR（64 位句柄/指针）
-  bool param_dbl[API_MAX_ARGS];  // v1.1.0 浮点（阶段1）：参数 i 是 double → 走 XMM（int 侧仍按顺序占 rcx/rdx/r8/r9）
+  int ret_ty;          // 非 void 返回类型：TY_INT（默认）｜ TY_PTR（64 位句柄/指针）｜ TY_DOUBLE（XMM0）
+                       // v1.11.0（2026-11-04）：+ TY_INT64 / TY_UINT64（64 位整数返回值，rax 全 64 位；
+                       //   两者**不合并**——打印/比较/右移的符号性不同，见 docs\语言参考.md §2.1）
+  // v1.11.0（2026-11-04）：参数 i 的**声明类型**——取代原来的 bool param_dbl[]（只有"是不是 double"一档）。
+  //   取值：TY_INT / TY_PTR / TY_DOUBLE / TY_INT64 / TY_UINT64（char/uint_8/uint_32 一律按 TY_INT 档传）。
+  //   ⚠️ 这是「声明侧」的**唯一**真相：parse.c 的调用点校验（收窄/宽化/ptr 混用）只读它；
+  //   生成侧 codegen.c 按**实参表达式类型**落位（emit_arg_rax_to_gp），不另存一份声明类型。
+  int param_ty[API_MAX_ARGS];
 } ApiDef;
 
 // ========== v1.3.2 函数指针：签名表 ==========

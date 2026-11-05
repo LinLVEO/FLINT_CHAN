@@ -3,69 +3,75 @@
   "points": [
     {
       "file": "src/codegen.c",
-      "line": 1260,
+      "line": 1256,
       "code": "",
       "msg": "(动态)"
     },
     {
       "file": "src/codegen.c",
-      "line": 3315,
+      "line": 3303,
       "code": "E-STRICT-WIDTH",
       "msg": "[E-STRICT-WIDTH] 地址值（64 位）从 int 返回函数里返回 ⇒ 高 32 位会被丢掉（SPEC 记的 T1 遗留边界）。请把返回类型声明成 int *（-strict 诊断）"
     },
     {
       "file": "src/codegen.c",
-      "line": 1966,
+      "line": 1960,
       "code": "E-STRICT-WIDTH",
       "msg": "[E-STRICT-WIDTH] 实参是**地址值**（64 位），而第 %d 个形参声明成 int/uint_32（4 字节语义）⇒ 高 32 位会被丢掉（SPEC 记的 T1 遗留边界）。请把形参声明成 int *（-strict 诊断）"
     },
     {
       "file": "src/codegen.c",
-      "line": 1957,
+      "line": 1951,
       "code": "E-T1-INTTOPTR",
       "msg": "[E-T1-INTTOPTR] 实参只有 32 位（int 值），而第 %d 个形参是指针——传进去的只有低 32 位，被调方当指针用会指向错地方。请传地址（&x / 指针变量 / 数组名 / new / API 返回值），或把形参改成 int（-strict 诊断）"
     },
     {
       "file": "src/codegen.c",
-      "line": 1248,
+      "line": 1244,
       "code": "",
       "msg": "%s"
     },
     {
       "file": "src/codegen.c",
-      "line": 1961,
+      "line": 1955,
       "code": "",
       "msg": "地址形参需要指针——函数 '%s' 的第 %d 个形参收地址，实参却是整数/值（要传地址请写 &x，或把形参改成值类型）"
     },
     {
       "file": "src/codegen.c",
-      "line": 2519,
+      "line": 877,
+      "code": "",
+      "msg": "地址值（64 位）不能装进 4 字节的 int 变量——本地标量 int 按 C 语义只占 4 字节，装不下地址；编译器不再把该槽自动扩成 8 字节（静默截断/写穿邻变量都不允许）。请把变量声明成 int *（保存指针）或用 int_64（保存地址/句柄的整数形式）"
+    },
+    {
+      "file": "src/codegen.c",
+      "line": 2511,
       "code": "",
       "msg": "地址值（64 位）不能装进全局 int / char / uint_8 / uint_32 变量——全局变量会被按 4/1 字节写回，高 32 位必然丢失（不静默截断）。请把地址存在**局部** int * 变量里，或用局部变量接收后再逐值算出所需整数"
     },
     {
       "file": "src/codegen.c",
-      "line": 1970,
+      "line": 1964,
       "code": "",
       "msg": "地址值不能装进 int 形参——函数 '%s' 的第 %d 个形参是值类型（int/char/int_64/uint_*/double），实参却是指针/地址（请先解引用 *p，或把形参改成指针类型）"
     },
     {
       "file": "src/codegen.c",
-      "line": 2584,
+      "line": 2572,
       "code": "",
       "msg": "地址值是 64 位，装不进 4 字节的 int/uint_32 / 1 字节的 char/uint_8 目标（数组元素、结构体字段、解引用都只有这么宽）——请把目标声明成 int *（或先存进一个 int * 变量再整体赋值）"
     },
     {
       "file": "src/codegen.c",
-      "line": 1276,
+      "line": 1270,
       "code": "",
       "msg": "这个地址是 int 变量参与算术/中转算出来的（按 32 位算，高半已截断）——请把地址先放进 int * 变量再做指针算术（例：int *t = s; t + 8）"
     },
     {
       "file": "src/codegen.c",
-      "line": 1278,
+      "line": 1272,
       "code": "",
-      "msg": "指针目标只能接「地址表达式」（&x / 字符串 / 指针变量 / 数组名 / new / 指针返回函数 / API 返回值 / 地址链）、显式常量、或一个装过地址的 int 变量——这里的值只有 32 位，当指针用会指向错地方（int 形参、int 返回值、4 字节的 int 字段/元素里都装不下地址，请把类型声明成 int * 或 ptr）"
+      "msg": "指针目标只能接「地址表达式」（&x / 字符串 / 指针变量 / 数组名 / new / 指针返回函数 / API 返回值 / 地址链）、显式常量——这里的值只有 32 位，当指针用会指向错地方（int 变量/形参/返回值、4 字节的 int 字段/元素里都装不下地址，请把类型声明成 int * 或 ptr）"
     },
     {
       "file": "src/main.c",
@@ -81,289 +87,283 @@
     },
     {
       "file": "src/parse.c",
-      "line": 2933,
+      "line": 2953,
       "code": "",
       "msg": "-- 需要可修改的变量或 *p（左值）"
     },
     {
       "file": "src/parse.c",
-      "line": 3624,
+      "line": 3644,
       "code": "",
       "msg": "-- 需要可修改的变量或 *p（左值）"
     },
     {
       "file": "src/parse.c",
-      "line": 2839,
+      "line": 2859,
       "code": "",
       "msg": "! 不支持 double（先比较：d != 0.0）"
     },
     {
       "file": "src/parse.c",
-      "line": 3568,
+      "line": 3588,
       "code": "",
       "msg": "'->' 左侧须为指向结构体的指针"
     },
     {
       "file": "src/parse.c",
-      "line": 3472,
+      "line": 3492,
       "code": "",
       "msg": "'.' 左侧是指向结构体的指针：**字段**访问请写 '->'（p->x）；只有方法调用点 p.%.*s(...) 才允许用 '.'"
     },
     {
       "file": "src/parse.c",
-      "line": 3508,
+      "line": 3528,
       "code": "",
       "msg": "'.' 左侧须为结构体变量"
     },
     {
       "file": "src/parse.c",
-      "line": 1351,
+      "line": 1371,
       "code": "",
       "msg": "'%.*s' 不能作变量名"
     },
     {
       "file": "src/parse.c",
-      "line": 1683,
+      "line": 1703,
       "code": "",
       "msg": "'%.*s' 不能作变量名"
     },
     {
       "file": "src/parse.c",
-      "line": 3164,
+      "line": 3184,
       "code": "",
       "msg": "'%.*s' 不是结构体 %s 的字段，但存在自由函数 '%s'——方法调用点糖**必须带括号**：写 recv.%.*s(实参)（糖摊平后要找的是 '%s_%.*s'；不带括号当值用不支持）"
     },
     {
       "file": "src/parse.c",
-      "line": 3148,
+      "line": 3168,
       "code": "",
       "msg": "'%.*s' 是结构体 %s 的**字段**，不是方法——FLINT 用括号区分：不带括号 recv.%.*s 读字段，带括号 recv.%.*s(...) 才是方法糖（糖摊平后要找的自由函数是 '%s_%.*s'）；字段不可调用"
     },
     {
       "file": "src/parse.c",
-      "line": 3747,
+      "line": 3931,
       "code": "",
       "msg": "'new %s' 暂不支持（v1.7.0 P0 边界）——堆上要 64 位可以 new int（负载 8 字节）再用 %s * 承接"
     },
     {
       "file": "src/parse.c",
-      "line": 3751,
+      "line": 3935,
       "code": "",
       "msg": "'new' 暂支持 'new int'（结构体/数组 new 后续版本）"
     },
     {
       "file": "src/parse.c",
-      "line": 1420,
+      "line": 1440,
       "code": "",
       "msg": "'own'/'share' 只能修饰 int*（%s 无堆所有权语义）"
     },
     {
       "file": "src/parse.c",
-      "line": 1348,
+      "line": 1368,
       "code": "",
       "msg": "'own'/'share' 只能修饰指针（int *own/share p = new int;）"
     },
     {
       "file": "src/parse.c",
-      "line": 1578,
+      "line": 1598,
       "code": "",
       "msg": "'return;' 只能用在 void 函数"
     },
     {
       "file": "src/parse.c",
-      "line": 3417,
+      "line": 3437,
       "code": "E-STRICT-BOUNDS",
       "msg": "[E-STRICT-BOUNDS] 常量列下标 %d 越界：这个二维数组只有 %d 列（合法列下标 0..%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 3316,
+      "line": 3336,
       "code": "E-STRICT-BOUNDS",
       "msg": "[E-STRICT-BOUNDS] 常量下标 %d 越界：这个 struct 数组只有 %d 个元素（合法下标 0..%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 3347,
+      "line": 3367,
       "code": "E-STRICT-BOUNDS",
       "msg": "[E-STRICT-BOUNDS] 常量下标 %d 越界：这个 struct 数组只有 %d 个元素（合法下标 0..%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 3395,
+      "line": 3415,
       "code": "E-STRICT-BOUNDS",
       "msg": "[E-STRICT-BOUNDS] 常量下标 %d 越界：这个数组只有 %d 个元素（合法下标 0..%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 2651,
+      "line": 2671,
       "code": "E-STRICT-PTRSTEP",
       "msg": "[E-STRICT-PTRSTEP] 裸指针 '%s' 按**字节**步进（FLINT 决策 40）：这个指针的元素宽度是 %d 字节，所以 `p %s i` 拿到的是 i 个**字节**之后的地址，不是第 i 个元素。要取元素请改用 p[i] / &p[i]（-strict 诊断）"
     },
     {
       "file": "src/parse.c",
-      "line": 2645,
+      "line": 2665,
       "code": "E-STRICT-PTRSTEP",
       "msg": "[E-STRICT-PTRSTEP] 裸指针 '%s' 按**字节**步进（FLINT 决策 40）：这个指针的元素宽度是 %d 字节，所以这里走的是 %lld 个**字节**，第 %d 个元素的偏移是 %lld 字节。要取元素请改用 p[i] / &p[i]（-strict 诊断）"
     },
     {
       "file": "src/parse.c",
-      "line": 5394,
+      "line": 5651,
       "code": "E-STRICT-UNINIT",
       "msg": "[E-STRICT-UNINIT] 局部量 '%s' 在这里被读取，但从声明到现在从没赋过值（读到的是栈上残留）——请声明时给初值（int %s = 0;）或先赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 2878,
+      "line": 2898,
       "code": "",
       "msg": "& 需要变量/数组名/字段/函数名（&x &a &p.x &a[i] &f）"
     },
     {
       "file": "src/parse.c",
-      "line": 4751,
+      "line": 4960,
       "code": "",
       "msg": "%s 全局变量初值 %lld 超出 0..255（字节类型）"
     },
     {
       "file": "src/parse.c",
-      "line": 5776,
+      "line": 6033,
       "code": "",
       "msg": "%s 引用形参暂不支持（引用读是 32 位解引用，会静默截断）——请用 %s *p 显式指针"
     },
     {
       "file": "src/parse.c",
-      "line": 5773,
+      "line": 6030,
       "code": "",
       "msg": "%s 引用形参暂不支持（v1.0.5：用 %s* 指针）"
     },
     {
       "file": "src/parse.c",
-      "line": 1413,
+      "line": 1433,
       "code": "",
       "msg": "%s 引用暂不支持（可用 %s* 指针或 &c 取址）"
     },
     {
       "file": "src/parse.c",
-      "line": 1417,
+      "line": 1437,
       "code": "",
       "msg": "%s 引用暂不支持（引用读是 32 位解引用，会静默截断）——请用 %s *p = &x; 显式指针"
     },
     {
       "file": "src/parse.c",
-      "line": 2959,
+      "line": 2979,
       "code": "",
       "msg": "^^ 暂不支持 64 位整数（int_64/uint_64；快速幂是 32 位累加器，会静默截断高 32 位）——请改成连乘/循环，或先显式收窄"
     },
     {
       "file": "src/parse.c",
-      "line": 2955,
+      "line": 2975,
       "code": "",
       "msg": "^^ 暂不支持 double（阶段1：幂只有整数版）——请写 d = d * d * d 或等阶段2 的浮点幂"
     },
     {
       "file": "src/parse.c",
-      "line": 2921,
+      "line": 2941,
       "code": "",
       "msg": "++ 需要可修改的变量或 *p（左值）"
     },
     {
       "file": "src/parse.c",
-      "line": 3612,
+      "line": 3632,
       "code": "",
       "msg": "++ 需要可修改的变量或 *p（左值）"
     },
     {
       "file": "src/parse.c",
-      "line": 2847,
+      "line": 2867,
       "code": "",
       "msg": "~ 不支持 double（位运算只对整数）"
     },
     {
       "file": "src/parse.c",
-      "line": 3838,
-      "code": "",
-      "msg": "64 位整数（int_64/uint_64）实参不能直接传给 api 函数（v1.7.0 P0 边界：api 声明没有 64 位参数档，会按 32 位传）——请先显式收窄"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 2186,
+      "line": 2206,
       "code": "",
       "msg": "安全模式（-safe）：三元分支里的 new 必须由 own/share 接管（此处丢弃会泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 2063,
+      "line": 2083,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（此处丢弃会泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 1524,
+      "line": 1544,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（裸指针持有会泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 2316,
+      "line": 2336,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（裸指针持有会泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 1864,
+      "line": 1884,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（条件里泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 1886,
+      "line": 1906,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（条件里泄漏）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1913,
-      "code": "",
-      "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（for 初始化泄漏）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1923,
-      "code": "",
-      "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（for 条件泄漏）"
     },
     {
       "file": "src/parse.c",
       "line": 1933,
       "code": "",
+      "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（for 初始化泄漏）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1943,
+      "code": "",
+      "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（for 条件泄漏）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1953,
+      "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（for 增量泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 1629,
+      "line": 1649,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（return 直接泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 1965,
+      "line": 1985,
       "code": "",
       "msg": "安全模式（-safe）：new 结果必须由 own/share 接管（switch 条件里泄漏）"
     },
     {
       "file": "src/parse.c",
-      "line": 4276,
+      "line": 4485,
       "code": "",
       "msg": "安全模式（-safe）：print 段内 new 会泄漏（先由 own/share 接管再打印）"
     },
     {
       "file": "src/parse.c",
-      "line": 4111,
+      "line": 4320,
       "code": "",
       "msg": "安全模式（-safe）：str 段内 new 会泄漏（先由 own/share 接管再拼）"
     },
     {
       "file": "src/parse.c",
-      "line": 3771,
+      "line": 3955,
       "code": "",
       "msg": "变量 '%.*s' 不可调用（它不是函数指针；函数指针用 int (*fp)(int) 声明）"
     },
@@ -375,169 +375,169 @@
     },
     {
       "file": "src/parse.c",
-      "line": 426,
+      "line": 437,
       "code": "",
       "msg": "变量/数组/结构体总长过大（帧槽累计超 2GB 上限）"
     },
     {
       "file": "src/parse.c",
-      "line": 1273,
+      "line": 1293,
       "code": "",
       "msg": "变量/数组/结构体总长过大（帧槽累计超 2GB 上限）"
     },
     {
       "file": "src/parse.c",
-      "line": 2510,
+      "line": 2530,
       "code": "",
       "msg": "变量/数组/结构体总长过大（帧槽累计超 2GB 上限）"
     },
     {
       "file": "src/parse.c",
-      "line": 725,
+      "line": 745,
       "code": "",
       "msg": "不能把 %s 赋给 %s（会静默截断高 32 位：值超出范围的部分丢掉）——请显式写 (%s)值，或把左值声明成 %s"
     },
     {
       "file": "src/parse.c",
-      "line": 720,
+      "line": 740,
       "code": "",
       "msg": "不能把 %s 赋给 double（两者互转只走显式转型）——请先显式 (int)值 再赋，或把左值声明成 %s"
     },
     {
       "file": "src/parse.c",
-      "line": 1653,
+      "line": 1673,
       "code": "",
       "msg": "不能把 %s 值 return 给 %s 返回函数（会静默截断高 32 位：值超出范围的部分丢掉）——请显式转型，或把返回类型改成 %s"
     },
     {
       "file": "src/parse.c",
-      "line": 713,
+      "line": 733,
       "code": "",
       "msg": "不能把 double 赋给 %s（只有显式转型能跨浮点/整数）——请写 (%s)值，或改用整数值"
     },
     {
       "file": "src/parse.c",
-      "line": 729,
+      "line": 749,
       "code": "",
       "msg": "不能把 double 赋给 int / 整数类型（此处是 %s，会静默截断小数）——请显式写 (int)值，或把左值声明成 double"
     },
     {
       "file": "src/parse.c",
-      "line": 1649,
+      "line": 1669,
       "code": "",
       "msg": "不能把 double 值 return 给 %s 返回函数（两者互转只走显式转型）"
     },
     {
       "file": "src/parse.c",
-      "line": 1644,
+      "line": 1664,
       "code": "",
       "msg": "不能把 double 值 return 给 int 返回函数（会静默截断小数）——请显式写 to_int(值)，或把函数返回类型改成 double"
     },
     {
       "file": "src/parse.c",
-      "line": 2804,
+      "line": 2824,
       "code": "",
       "msg": "不支持 (%s)double：v1 的 double 截断只有 (int) / (int_64) / (uint_32) / (uint_64)（越界 = 0x80000000，同 C）。请写 (%s)(int)值，把两步写清"
     },
     {
       "file": "src/parse.c",
-      "line": 2760,
+      "line": 2780,
       "code": "",
       "msg": "不支持 (ptr) 转型：ptr 只是 api 返回类型的关键字，指针类型请写 int* / char* / double* / int_64* / uint_32*"
     },
     {
       "file": "src/parse.c",
-      "line": 2755,
+      "line": 2775,
       "code": "",
       "msg": "不支持 (void) 转型：FLINT 没有 void 值（要丢弃结果就写成表达式语句）"
     },
     {
       "file": "src/parse.c",
-      "line": 2757,
+      "line": 2777,
       "code": "",
       "msg": "不支持 struct 转型：struct 没有整体值语义 —— 要换类型请声明一个 struct 指针变量（v1.8.0 边界，见 SPEC）"
     },
     {
       "file": "src/parse.c",
-      "line": 2769,
+      "line": 2789,
       "code": "",
       "msg": "不支持数组转型：数组没有整体值语义 —— 要字节视图请用 char*"
     },
     {
       "file": "src/parse.c",
-      "line": 5786,
+      "line": 6043,
       "code": "",
       "msg": "参数需为变量名"
     },
     {
       "file": "src/parse.c",
-      "line": 5762,
+      "line": 6019,
       "code": "",
       "msg": "参数需以 'int'/'int_64'/'char'/'double'/'struct' 开头"
     },
     {
       "file": "src/parse.c",
-      "line": 5244,
+      "line": 5488,
       "code": "",
       "msg": "导入模块名过长：写出名最长 63 字节，现在 %d 字节（%s）——名字会被截断成半个路径、进程启动期才报错，请缩短模块名"
     },
     {
       "file": "src/parse.c",
-      "line": 3940,
+      "line": 4149,
       "code": "",
       "msg": "地址值（&x）暂不支持直接打印（64 位，起步边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 2797,
+      "line": 2817,
       "code": "",
       "msg": "地址值（64 位）不能转成 %s —— 转型不提供「地址 ↔ 整数」通道（T1 边界：地址值不能装进 int，反向同理）。要地址请用指针变量承接，要数值请从字段/字节取出"
     },
     {
       "file": "src/parse.c",
-      "line": 6180,
+      "line": 6441,
       "code": "",
       "msg": "顶层只允许 struct 定义、函数定义或全局变量声明（int/int_64/char/double/uint_8/uint_32/uint_64/void 名称(...) 或同组类型 名称[= 常量];）"
     },
     {
       "file": "src/parse.c",
-      "line": 6198,
+      "line": 6459,
       "code": "",
       "msg": "顶层只允许 struct 定义、函数定义或全局变量声明（int/int_64/char/double/uint_8/uint_32/uint_64/void 名称(...) 或同组类型 名称[= 常量];）"
     },
     {
       "file": "src/parse.c",
-      "line": 867,
+      "line": 887,
       "code": "",
       "msg": "多维函数指针数组暂不支持（v2.6.0 边界：只开一维 `(*ops[N])(...)`）"
     },
     {
       "file": "src/parse.c",
-      "line": 3410,
+      "line": 3430,
       "code": "",
       "msg": "二维数组 '%s' 需要两个下标（m[行][列]）——只写一维会静默读到别的行"
     },
     {
       "file": "src/parse.c",
-      "line": 1403,
+      "line": 1423,
       "code": "",
       "msg": "二维数组的列数过大（%lld；上限 2147483647）"
     },
     {
       "file": "src/parse.c",
-      "line": 1399,
+      "line": 1419,
       "code": "",
       "msg": "二维数组的列数须为数字常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（帧槽在 parse 期就得算死）"
     },
     {
       "file": "src/parse.c",
-      "line": 1401,
+      "line": 1421,
       "code": "",
       "msg": "二维数组的列数须为正数（得到 %lld）"
     },
     {
       "file": "src/parse.c",
-      "line": 1392,
+      "line": 1412,
       "code": "",
       "msg": "二维数组暂只支持 int（%s 不做——char/double 的整块布局还没定）"
     },
@@ -549,403 +549,403 @@
     },
     {
       "file": "src/parse.c",
-      "line": 3182,
+      "line": 3202,
       "code": "",
       "msg": "方法名过长（%d 字节）"
     },
     {
       "file": "src/parse.c",
-      "line": 3213,
+      "line": 3233,
       "code": "",
       "msg": "方法糖 'recv.%.*s(...)' 找到的 '%s' 首参不是接收者指针/引用（收的是值形参）——糖摊平后要传的是接收者地址，首参请写 struct %s *self"
     },
     {
       "file": "src/parse.c",
-      "line": 3206,
+      "line": 3226,
       "code": "",
       "msg": "方法糖 'recv.%.*s(...)' 找到的 '%s' 首参是引用形参（struct %s &self）——引用形参只适用于结构体**值**接收者（m.f(...)）；指针接收者请把首参写成 struct %s *self"
     },
     {
       "file": "src/parse.c",
-      "line": 3200,
+      "line": 3220,
       "code": "",
       "msg": "方法糖 'recv.%.*s(...)' 找到的 '%s' 一个形参都没有——方法的首参必须是接收者（struct %s *self）"
     },
     {
       "file": "src/parse.c",
-      "line": 3194,
+      "line": 3214,
       "code": "",
       "msg": "方法糖 'recv.%.*s(...)'（%s）摊平后要找的自由函数 '%s' 不存在——方法就是普通自由函数：定义 int %s(struct %s *self, ...)，首参由调用方自动补 &recv（命名约定 = 类型名_函数名）"
     },
     {
       "file": "src/parse.c",
-      "line": 3189,
+      "line": 3209,
       "code": "",
       "msg": "方法糖 'recv.%.*s(...)'（%s）摊平后要找的自由函数名有歧义：'%s' 与「忽略大小写的类型名段」都能匹配到多个函数——请把类型名段的大小写写准（命名约定 = 结构体名_方法名，精确名 '%s'）"
     },
     {
       "file": "src/parse.c",
-      "line": 2248,
+      "line": 2268,
       "code": "",
       "msg": "赋值左边必须是变量或 *p/a[i]"
     },
     {
       "file": "src/parse.c",
-      "line": 2290,
+      "line": 2310,
       "code": "",
       "msg": "赋值左边必须是变量或 *p/a[i]"
     },
     {
       "file": "src/parse.c",
-      "line": 3925,
+      "line": 4134,
       "code": "",
       "msg": "该指针返回暂不支持直接打印（仅 char* 串可用）"
     },
     {
       "file": "src/parse.c",
-      "line": 3915,
+      "line": 4124,
       "code": "",
       "msg": "该指针暂不支持直接打印（仅 char* 串可用；int*/struct* = 已知边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 3805,
+      "line": 3989,
       "code": "",
       "msg": "函数 '%.*s' 需带括号调用"
     },
     {
       "file": "src/parse.c",
-      "line": 5582,
+      "line": 5839,
       "code": "",
       "msg": "函数 '%.*s' 与同名全局变量冲突（读变量和调函数会分不清）"
     },
     {
       "file": "src/parse.c",
-      "line": 5091,
+      "line": 5322,
       "code": "",
       "msg": "函数 '%.*s' 重复定义"
     },
     {
       "file": "src/parse.c",
-      "line": 3088,
+      "line": 3108,
       "code": "",
       "msg": "函数 '%s' 的第 %d 个形参收的是函数指针——请传「&函数名」或函数指针变量"
     },
     {
       "file": "src/parse.c",
-      "line": 3125,
+      "line": 3145,
       "code": "",
       "msg": "函数 '%s' 需要 %d 个实参，这里只给了 %d 个（FLINT 没有默认实参）"
     },
     {
       "file": "src/parse.c",
-      "line": 5716,
+      "line": 5973,
       "code": "",
       "msg": "函数参数最多 %d 个（前 4 个走 rcx/rdx/r8/r9、第 5 个起走栈参，v1.4.26）"
     },
     {
       "file": "src/parse.c",
-      "line": 5788,
+      "line": 6045,
       "code": "",
       "msg": "函数参数最多 %d 个（前 4 个走 rcx/rdx/r8/r9、第 5 个起走栈参，v1.4.26）"
     },
     {
       "file": "src/parse.c",
-      "line": 5616,
+      "line": 5873,
       "code": "",
       "msg": "函数返回类型须为 int / int_64 / char / double / uint_8 / uint_32 / uint_64 / void / struct 名（指针返回加 *）"
     },
     {
       "file": "src/parse.c",
-      "line": 5820,
+      "line": 6077,
       "code": "",
       "msg": "函数缺少右花括号 '}'"
     },
     {
       "file": "src/parse.c",
-      "line": 705,
+      "line": 725,
       "code": "",
       "msg": "函数指针不能赋给非函数指针变量（要存就声明成 int (*fp)(...)）"
     },
     {
       "file": "src/parse.c",
-      "line": 2890,
+      "line": 2910,
       "code": "",
       "msg": "函数指针不能解引用：要调用就写 fp(实参)（间接调用），要存地址就写 &函数名"
     },
     {
       "file": "src/parse.c",
-      "line": 3920,
+      "line": 4129,
       "code": "",
       "msg": "函数指针不能直接打印（它存的是代码地址，不是可显示的数值）"
     },
     {
       "file": "src/parse.c",
-      "line": 2779,
+      "line": 2799,
       "code": "",
       "msg": "函数指针不能转型（代码地址带签名，转成数据指针会丢签名）——要调用就写 int (*fp)(...)，要地址就写 &函数名"
     },
     {
       "file": "src/parse.c",
-      "line": 2085,
+      "line": 2105,
       "code": "",
       "msg": "函数指针不支持 ++/--/复合赋值（代码地址不能参与整数运算）"
     },
     {
       "file": "src/parse.c",
-      "line": 919,
+      "line": 939,
       "code": "",
       "msg": "函数指针的参数表缺少 ')'"
     },
     {
       "file": "src/parse.c",
-      "line": 908,
+      "line": 928,
       "code": "",
       "msg": "函数指针的参数不支持数组，请用指针"
     },
     {
       "file": "src/parse.c",
-      "line": 906,
+      "line": 926,
       "code": "",
       "msg": "函数指针的参数不支持引用（int&）——请写成指针"
     },
     {
       "file": "src/parse.c",
-      "line": 900,
+      "line": 920,
       "code": "",
       "msg": "函数指针的参数类型需是 int / char / double / struct S *（要收函数指针请先用变量承接：这类嵌套签名暂不支持）"
     },
     {
       "file": "src/parse.c",
-      "line": 882,
+      "line": 902,
       "code": "",
       "msg": "函数指针的参数上限 %d 个（前 4 个走 rcx/rdx/r8/r9，第 5 个起走栈参，v1.4.26）"
     },
     {
       "file": "src/parse.c",
-      "line": 890,
+      "line": 910,
       "code": "",
       "msg": "函数指针的签名里暂不支持 %s（v1.7.0 P0 边界：FuncSig.param_ty 还没有这一档）——请改成 int 形参，或先用普通函数接住"
     },
     {
       "file": "src/parse.c",
-      "line": 1191,
+      "line": 1211,
       "code": "",
       "msg": "函数指针签名不一致：'%s' 的类型是 %s，而 '%.*s' 是另一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 1069,
+      "line": 1089,
       "code": "",
       "msg": "函数指针签名不一致：'%s' 与左侧声明的 %s 不是同一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 1197,
+      "line": 1217,
       "code": "",
       "msg": "函数指针签名不一致：右边的函数指针与左边 '%.*s' 声明的 %s 不是同一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 1074,
+      "line": 1094,
       "code": "",
       "msg": "函数指针签名不一致：右侧的函数指针与左侧声明的 %s 不是同一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 870,
+      "line": 890,
       "code": "",
       "msg": "函数指针声明缺少 ')'（要写成 (*名字) 或 (*名字[N])）"
     },
     {
       "file": "src/parse.c",
-      "line": 873,
+      "line": 893,
       "code": "",
       "msg": "函数指针声明缺少参数表：int (*fp)(int)"
     },
     {
       "file": "src/parse.c",
-      "line": 847,
+      "line": 867,
       "code": "",
       "msg": "函数指针声明需要变量名：int (*fp)(int)"
     },
     {
       "file": "src/parse.c",
-      "line": 843,
+      "line": 863,
       "code": "",
       "msg": "函数指针声明要写成「(*名字)(参数表)」：int (*fp)(int)"
     },
     {
       "file": "src/parse.c",
-      "line": 3279,
+      "line": 3299,
       "code": "",
       "msg": "函数指针数组 '%s' 的常量下标 %d 越界（合法下标 0..%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 1154,
+      "line": 1174,
       "code": "",
       "msg": "函数指针数组初值不能是空 {}（每个元素都要给一个函数）"
     },
     {
       "file": "src/parse.c",
-      "line": 1175,
+      "line": 1195,
       "code": "",
       "msg": "函数指针数组初值需要正好 %d 个元素（这里给了 %d 个）——不补零、不省略长度"
     },
     {
       "file": "src/parse.c",
-      "line": 1160,
+      "line": 1180,
       "code": "",
       "msg": "函数指针数组初值元素比声明长度多（声明 %d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 1150,
+      "line": 1170,
       "code": "",
       "msg": "函数指针数组的初始化必须写成 {&函数名, ...}（长度由声明给出，不支持单个标量初值，也不支持省略长度）"
     },
     {
       "file": "src/parse.c",
-      "line": 1126,
+      "line": 1146,
       "code": "",
       "msg": "函数指针数组的初值只能是「&函数名」/ 裸函数名 / 函数指针变量（不能接整数、普通指针、函数调用结果）"
     },
     {
       "file": "src/parse.c",
-      "line": 3267,
+      "line": 3287,
       "code": "",
       "msg": "函数指针数组的下标只支持局部数组变量形态 ops[i]（v2.6.0 边界：全局/表达式结果下标暂不支持）"
     },
     {
       "file": "src/parse.c",
-      "line": 1117,
+      "line": 1137,
       "code": "",
       "msg": "函数指针数组的元素签名不一致：'%s' 与数组元素声明的 %s 不是同一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 1122,
+      "line": 1142,
       "code": "",
       "msg": "函数指针数组的元素签名不一致：右边这个函数指针与数组元素声明的 %s 不是同一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 858,
+      "line": 878,
       "code": "",
       "msg": "函数指针数组的长度须为数字常量（不支持省略长度 `(*ops[])`，也不是变量/表达式）"
     },
     {
       "file": "src/parse.c",
-      "line": 1139,
+      "line": 1159,
       "code": "",
       "msg": "函数指针数组暂只支持函数顶层作用域声明（块/循环内 = v2.6.0 边界）函数指针暂只支持函数顶层作用域声明（块/循环内 = v1.3.2 边界） ⚠拼接"
     },
     {
       "file": "src/parse.c",
-      "line": 864,
+      "line": 884,
       "code": "",
       "msg": "函数指针数组长度缺少 ']'（写法：int (*ops[2])(int, int)）"
     },
     {
       "file": "src/parse.c",
-      "line": 861,
+      "line": 881,
       "code": "",
       "msg": "函数指针数组长度须为正数（这里写了 %d）"
     },
     {
       "file": "src/parse.c",
-      "line": 5142,
+      "line": 5373,
       "code": "",
       "msg": "函数指针数组作函数形参暂不支持（v2.6.0 边界）——请传单个函数指针，或在函数内声明数组后逐个赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 5713,
+      "line": 5970,
       "code": "",
       "msg": "函数指针数组作函数形参暂不支持（v2.6.0 边界）——请传单个函数指针，或在函数内声明数组后逐个赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 700,
+      "line": 720,
       "code": "",
       "msg": "函数指针只能接「&函数名」或另一个函数指针（整数/普通指针/函数调用结果都接不了——C 里裸函数名会退化，FLINT 要求显式写 &）"
     },
     {
       "file": "src/parse.c",
-      "line": 1200,
+      "line": 1220,
       "code": "",
       "msg": "函数指针只能由「&函数名」或另一个函数指针初始化（不能接整数 / 普通指针 / 结构体字段 / 函数调用结果）"
     },
     {
       "file": "src/parse.c",
-      "line": 3503,
+      "line": 3523,
       "code": "",
       "msg": "接收者的类型不是结构体（这是方法调用点糖 'recv.%.*s(...)' 的形态，糖摊平后 = 类型名_%.*s(&recv, ...)）——接收者须是 struct 变量 / 指向 struct 的变量 / 解引用链 (*p)"
     },
     {
       "file": "src/parse.c",
-      "line": 3499,
+      "line": 3519,
       "code": "",
       "msg": "接收者是**表达式结果**而不是变量：'.' 形式的方法调用点糖要取接收者的地址（糖摊平后首参 = &recv），对 f()/(a+b) 这类临时量取地址是错的——指针接收者请写 recv->%.*s(...)（f()->g(...) 合法；f().g(...) 是编译期错误）"
     },
     {
       "file": "src/parse.c",
-      "line": 3170,
+      "line": 3190,
       "code": "",
       "msg": "结构体 %s 无字段 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 5771,
+      "line": 6028,
       "code": "",
       "msg": "结构体按值传参暂不支持，用指针/引用（struct S *p 或 struct S &r）"
     },
     {
       "file": "src/parse.c",
-      "line": 3338,
+      "line": 3358,
       "code": "",
       "msg": "结构体变量 '%s' 不是数组，不能下标（要写 a[i] 得先声明成 struct 类型名 %s[N];）"
     },
     {
       "file": "src/parse.c",
-      "line": 4429,
+      "line": 4638,
       "code": "",
       "msg": "结构体不能把自身作为值字段（`struct %s { struct %s ... }` 尺寸无穷）——数组形态 `struct %s a[N]` 同样不行；自引用请写指针形态 `struct %s *next;`"
     },
     {
       "file": "src/parse.c",
-      "line": 4542,
+      "line": 4751,
       "code": "",
       "msg": "结构体不能为空"
     },
     {
       "file": "src/parse.c",
-      "line": 910,
+      "line": 930,
       "code": "",
       "msg": "结构体参数要写成指针（struct S *p）"
     },
     {
       "file": "src/parse.c",
-      "line": 1819,
+      "line": 1839,
       "code": "",
       "msg": "结构体初始化右边必须是**同一个 struct 类型**的值（这里给的是 %s）——全零请写 {0}；要搬字段请声明后逐字段赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 4331,
+      "line": 4540,
       "code": "",
       "msg": "结构体类型 '%.*s' 重复定义"
     },
     {
       "file": "src/parse.c",
-      "line": 4351,
+      "line": 4560,
       "code": "",
       "msg": "结构体缺少右花括号 '}'"
     },
     {
       "file": "src/parse.c",
-      "line": 6159,
+      "line": 6420,
       "code": "",
       "msg": "结构体缺少右花括号 '}'"
     },
@@ -957,163 +957,163 @@
     },
     {
       "file": "src/parse.c",
-      "line": 4469,
+      "line": 4678,
       "code": "",
       "msg": "结构体暂不支持函数指针字段（v1.3.2 边界）——回调请存成局部函数指针变量，或把一个整数/地址字段 + 间接调用拆开写"
     },
     {
       "file": "src/parse.c",
-      "line": 1804,
+      "line": 1824,
       "code": "",
       "msg": "结构体整体初始化只支持 {0}（全字段清零）——{v0, v1, ...} 这种通用初始化列表暂不支持，请声明后逐字段赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 1808,
+      "line": 1828,
       "code": "",
       "msg": "结构体整体初始化只支持**恰好一个 0** 的 {0}——通用初始化列表暂不支持，请声明后逐字段赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 1823,
+      "line": 1843,
       "code": "",
       "msg": "结构体整体拷贝要求两边是**同一个 struct 类型**（不同 struct 的布局/字段不同，不能逐字节搬）——请逐字段赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 4441,
+      "line": 4650,
       "code": "",
       "msg": "结构体字段 '%s' 过大（%d 个元素 × %d 字节）——结构体总长不能超过 2GB"
     },
     {
       "file": "src/parse.c",
-      "line": 4464,
+      "line": 4673,
       "code": "",
       "msg": "结构体字段类型支持 char / int / int_64 / double / uint_8 / uint_32 / uint_64 / int* / char* / double* / 已定义 struct 的值或指针（v2.12）"
     },
     {
       "file": "src/parse.c",
-      "line": 4378,
+      "line": 4587,
       "code": "",
       "msg": "结构体字段上限 128"
     },
     {
       "file": "src/parse.c",
-      "line": 4484,
+      "line": 4693,
       "code": "",
       "msg": "结构体字段上限 128"
     },
     {
       "file": "src/parse.c",
-      "line": 1802,
+      "line": 1822,
       "code": "",
       "msg": "空初始化列表 {} 不接受——C 的 {0} 才表示「全字段清零」，请写 {0}"
     },
     {
       "file": "src/parse.c",
-      "line": 1848,
+      "line": 1868,
       "code": "",
       "msg": "块缺少右花括号 '}'"
     },
     {
       "file": "src/parse.c",
-      "line": 6081,
+      "line": 6342,
       "code": "",
       "msg": "枚举常量 '%.*s' 与函数同名"
     },
     {
       "file": "src/parse.c",
-      "line": 6079,
+      "line": 6340,
       "code": "",
       "msg": "枚举常量 '%.*s' 与全局变量同名"
     },
     {
       "file": "src/parse.c",
-      "line": 6058,
+      "line": 6319,
       "code": "",
       "msg": "枚举常量 '%.*s' 重复声明"
     },
     {
       "file": "src/parse.c",
-      "line": 3756,
+      "line": 3940,
       "code": "",
       "msg": "内部错误：'new' 需要内置 VirtualAlloc 登记"
     },
     {
       "file": "src/parse.c",
-      "line": 1114,
+      "line": 1134,
       "code": "",
       "msg": "内部错误：函数地址下标越界（%d）"
     },
     {
       "file": "src/parse.c",
-      "line": 6207,
+      "line": 6468,
       "code": "",
       "msg": "内部错误：函数解析数与预扫描不一致"
     },
     {
       "file": "src/parse.c",
-      "line": 3638,
+      "line": 3658,
       "code": "",
       "msg": "内部错误：函数指针表达式缺少签名（取元素时应已从声明带上来）"
     },
     {
       "file": "src/parse.c",
-      "line": 840,
+      "line": 860,
       "code": "",
       "msg": "内部错误：函数指针声明符应以 '(' 开头"
     },
     {
       "file": "src/parse.c",
-      "line": 1271,
+      "line": 1291,
       "code": "",
       "msg": "内部错误：函数指针数组的间接调用出现在函数体外"
     },
     {
       "file": "src/parse.c",
-      "line": 3271,
+      "line": 3291,
       "code": "",
       "msg": "内部错误：找不到函数指针数组 '%s' 的声明信息"
     },
     {
       "file": "src/parse.c",
-      "line": 2776,
+      "line": 2796,
       "code": "",
       "msg": "内部错误：转型缺少操作数"
     },
     {
       "file": "src/parse.c",
-      "line": 4300,
+      "line": 4509,
       "code": "",
       "msg": "内部错误：print 换行需要内置输出函数 _flint_out_str"
     },
     {
       "file": "src/parse.c",
-      "line": 3966,
+      "line": 4175,
       "code": "",
       "msg": "内部错误：print 需要内置输出函数 %s（编译器注入缺失）"
     },
     {
       "file": "src/parse.c",
-      "line": 4095,
+      "line": 4304,
       "code": "",
       "msg": "内部错误：str 需要内置缓冲函数 _flint_str_begin（编译器注入缺失）"
     },
     {
       "file": "src/parse.c",
-      "line": 4030,
+      "line": 4239,
       "code": "",
       "msg": "内部错误：str 需要内置缓冲函数 %s（编译器注入缺失）"
     },
     {
       "file": "src/parse.c",
-      "line": 4134,
+      "line": 4343,
       "code": "",
       "msg": "内部错误：str 需要内置缓冲函数 %s（编译器注入缺失）"
     },
     {
       "file": "src/parse.c",
-      "line": 3300,
+      "line": 3320,
       "code": "",
       "msg": "内部错误：struct 数组缺少结构体下标（parse 应已带上）"
     },
@@ -1131,283 +1131,283 @@
     },
     {
       "file": "src/parse.c",
-      "line": 1759,
+      "line": 1779,
       "code": "",
       "msg": "期望变量名"
     },
     {
       "file": "src/parse.c",
-      "line": 1741,
+      "line": 1761,
       "code": "",
       "msg": "期望变量名（struct 指针请写 struct S *p;）"
     },
     {
       "file": "src/parse.c",
-      "line": 5652,
+      "line": 5909,
       "code": "",
       "msg": "期望函数名"
     },
     {
       "file": "src/parse.c",
-      "line": 3860,
+      "line": 4069,
       "code": "",
       "msg": "期望数字/变量/'('，得到 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 4376,
+      "line": 4585,
       "code": "",
       "msg": "期望字段名"
     },
     {
       "file": "src/parse.c",
-      "line": 4482,
+      "line": 4691,
       "code": "",
       "msg": "期望字段名"
     },
     {
       "file": "src/parse.c",
-      "line": 1560,
+      "line": 1580,
       "code": "",
       "msg": "嵌套过深（上限 %d 层）：括号或语句块套得太深，请拆成变量/函数"
     },
     {
       "file": "src/parse.c",
-      "line": 3654,
+      "line": 3828,
       "code": "",
       "msg": "嵌套过深（上限 %d 层）：括号或语句块套得太深，请拆成变量/函数"
     },
     {
       "file": "src/parse.c",
-      "line": 6170,
+      "line": 6431,
       "code": "",
       "msg": "全局 struct 声明缺少 ';'"
     },
     {
       "file": "src/parse.c",
-      "line": 3787,
+      "line": 3971,
       "code": "",
       "msg": "全局变量 '%.*s' 不可调用"
     },
     {
       "file": "src/parse.c",
-      "line": 4919,
+      "line": 5128,
       "code": "",
       "msg": "全局变量 '%.*s' 与同名函数冲突（读变量和调函数会分不清）"
     },
     {
       "file": "src/parse.c",
-      "line": 4915,
+      "line": 5124,
       "code": "",
       "msg": "全局变量 '%.*s' 重复声明"
     },
     {
       "file": "src/parse.c",
-      "line": 4729,
+      "line": 4938,
       "code": "",
       "msg": "全局变量初值必须是编译期常量（只支持一个字面量，可带正负号）——全局变量在程序启动前就写进 .data，不能依赖运行时才有的值"
     },
     {
       "file": "src/parse.c",
-      "line": 5023,
+      "line": 5237,
       "code": "",
       "msg": "全局变量初值过长（%d 字节，上限 %d）"
     },
     {
       "file": "src/parse.c",
-      "line": 4776,
+      "line": 4985,
       "code": "",
       "msg": "全局变量初值只支持一个字面量（可带正负号）——这里多出来的 token 会被丢弃、初值就是错的（表达式不会被求值）；要算表达式请挪进 main 里赋值（全局只写 int g; 再在 main 里 g = 0 - 1;）"
     },
     {
       "file": "src/parse.c",
-      "line": 4973,
+      "line": 5182,
       "code": "",
       "msg": "全局变量过大（%lld 字节）——.data 单节上限 %d 字节"
     },
     {
       "file": "src/parse.c",
-      "line": 4998,
+      "line": 5207,
       "code": "",
       "msg": "全局变量总量超出 .data 单节上限（%d 字节）——第一版不开放多节 .data"
     },
     {
       "file": "src/parse.c",
-      "line": 4902,
+      "line": 5111,
       "code": "",
       "msg": "全局二维数组暂不支持（只开局部 int m[行][列]；全局要二维请用一维 g[行*列] 自己算下标）"
     },
     {
       "file": "src/parse.c",
-      "line": 4718,
+      "line": 4927,
       "code": "",
       "msg": "全局数组初值里期望 ','（在元素 %d 之后）"
     },
     {
       "file": "src/parse.c",
-      "line": 4765,
+      "line": 4974,
       "code": "",
       "msg": "全局数组初值元素比声明长度多（声明 %d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 4898,
+      "line": 5107,
       "code": "",
       "msg": "全局数组声明期望 ']'"
     },
     {
       "file": "src/parse.c",
-      "line": 4889,
+      "line": 5098,
       "code": "",
       "msg": "全局数组声明缺少长度"
     },
     {
       "file": "src/parse.c",
-      "line": 4891,
+      "line": 5100,
       "code": "",
       "msg": "全局数组长度必须是正整数常量（字面量 / enum 常量 / 常量表达式）——全局数组在 .data 里，长度编译期就得定；变量、函数调用都不行"
     },
     {
       "file": "src/parse.c",
-      "line": 4893,
+      "line": 5102,
       "code": "",
       "msg": "全局数组长度必须为正（得到 %lld）"
     },
     {
       "file": "src/parse.c",
-      "line": 4895,
+      "line": 5104,
       "code": "",
       "msg": "全局数组长度过大（%lld；上限 2147483647）"
     },
     {
       "file": "src/parse.c",
-      "line": 6114,
+      "line": 6375,
       "code": "",
       "msg": "缺少 main 函数（程序入口）"
     },
     {
       "file": "src/parse.c",
-      "line": 1407,
+      "line": 1427,
       "code": "",
       "msg": "三维数组暂不支持（只开二维 int m[行][列]）"
     },
     {
       "file": "src/parse.c",
-      "line": 2182,
+      "line": 2202,
       "code": "",
       "msg": "三元 ?: 缺少 ':'（写法：条件 ? 真值 : 假值）"
     },
     {
       "file": "src/parse.c",
-      "line": 2195,
+      "line": 2215,
       "code": "",
       "msg": "三元的函数指针分支暂不支持（v1.3.2 边界：签名会被丢掉）——请用 if/else 给函数指针变量赋值"
     },
     {
       "file": "src/parse.c",
-      "line": 2205,
+      "line": 2225,
       "code": "",
       "msg": "三元两分支的指针指向类型不一致（如 int* 与 char*）——解引用宽度不同，编译器不替你猜"
     },
     {
       "file": "src/parse.c",
-      "line": 2198,
+      "line": 2218,
       "code": "",
       "msg": "三元两分支类型不一致：一边是地址（指针/数组/&x/字符串），一边是整数——请显式统一（如 to_int(值)，或先用指针变量承接地址）"
     },
     {
       "file": "src/parse.c",
-      "line": 1350,
+      "line": 1370,
       "code": "",
       "msg": "声明后需跟变量名"
     },
     {
       "file": "src/parse.c",
-      "line": 3085,
+      "line": 3105,
       "code": "",
       "msg": "实参 '&%s' 的签名与形参不一致（需要 %s）"
     },
     {
       "file": "src/parse.c",
-      "line": 1236,
+      "line": 1256,
       "code": "",
       "msg": "实参的函数指针签名与该形参不一致（形参需要 %s）——右边这个函数指针是另一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 3831,
+      "line": 4015,
       "code": "",
       "msg": "实参个数超过 API 声明（%d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 3114,
+      "line": 3134,
       "code": "",
       "msg": "实参个数超过函数 '%s' 的形参个数（%d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 1220,
+      "line": 1240,
       "code": "",
       "msg": "实参个数超过这个函数指针的形参个数（%d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 1241,
+      "line": 1261,
       "code": "",
       "msg": "实参函数 '&%s' 的签名与该形参不一致（需要 %s）"
     },
     {
       "file": "src/parse.c",
-      "line": 3080,
+      "line": 3100,
       "code": "",
       "msg": "实参函数指针的签名与形参不一致（形参需要 %s）——右边这个函数指针是另一套签名"
     },
     {
       "file": "src/parse.c",
-      "line": 3109,
+      "line": 3129,
       "code": "",
       "msg": "实参最多 %d 个（前 4 个走 rcx/rdx/r8/r9、第 5 个起走栈参；v1.4.26 由 4 抬到 %d）"
     },
     {
       "file": "src/parse.c",
-      "line": 3858,
+      "line": 4067,
       "code": "",
       "msg": "使用了未声明的变量 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 3754,
+      "line": 3938,
       "code": "",
       "msg": "数组 new 暂不支持（v0.9 单对象 new int）"
     },
     {
       "file": "src/parse.c",
-      "line": 1466,
+      "line": 1486,
       "code": "",
       "msg": "数组初值不能是空 {}（至少写一个元素；全零请写 {0}）"
     },
     {
       "file": "src/parse.c",
-      "line": 1470,
+      "line": 1490,
       "code": "",
       "msg": "数组初值元素比声明长度多（声明 %d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 5782,
+      "line": 6039,
       "code": "",
       "msg": "数组形参暂不支持，请用指针（int *p / char *p / double *p）"
     },
     {
       "file": "src/parse.c",
-      "line": 1366,
+      "line": 1386,
       "code": "",
       "msg": "数组暂不能与 &/* 组合（v0.7 单修饰符）"
     },
     {
       "file": "src/parse.c",
-      "line": 1457,
+      "line": 1477,
       "code": "",
       "msg": "数组暂不支持整体初始化（只开了局部 int 数组；%s 数组的整块布局未定）"
     },
@@ -1425,955 +1425,1075 @@
     },
     {
       "file": "src/parse.c",
-      "line": 1376,
+      "line": 1396,
       "code": "",
       "msg": "数组长度过大（%lld；上限 2147483647）"
     },
     {
       "file": "src/parse.c",
-      "line": 1372,
+      "line": 1392,
       "code": "",
       "msg": "数组长度须为数字常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（帧槽在 parse 期就得算死）"
     },
     {
       "file": "src/parse.c",
-      "line": 1374,
+      "line": 1394,
       "code": "",
       "msg": "数组长度须为正数（得到 %lld）"
     },
     {
       "file": "src/parse.c",
-      "line": 4502,
+      "line": 4711,
       "code": "",
       "msg": "数组字段长度过大（%lld；上限 2147483647）"
     },
     {
       "file": "src/parse.c",
-      "line": 4500,
+      "line": 4709,
       "code": "",
       "msg": "数组字段长度须为正整数常量（得到 %lld）"
     },
     {
       "file": "src/parse.c",
-      "line": 4498,
+      "line": 4707,
       "code": "",
       "msg": "数组字段长度须为正整数常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（布局在 parse 期就得算死）"
     },
     {
       "file": "src/parse.c",
-      "line": 5600,
+      "line": 5857,
       "code": "",
       "msg": "未定义的结构体类型 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 5738,
+      "line": 5995,
       "code": "",
       "msg": "未定义的结构体类型 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 4369,
+      "line": 4578,
       "code": "",
       "msg": "未定义的结构体类型 '%.*s'（struct 须先定义后使用；嵌套值字段不做前向引用——请把内层定义挪到外层之前）"
     },
     {
       "file": "src/parse.c",
-      "line": 1732,
+      "line": 1752,
       "code": "",
       "msg": "未定义的结构体类型 '%.*s'（struct 须先定义后使用）"
     },
     {
       "file": "src/parse.c",
-      "line": 4850,
+      "line": 5059,
       "code": "",
       "msg": "未定义的结构体类型 '%.*s'（struct 须先定义后使用）"
     },
     {
       "file": "src/parse.c",
-      "line": 3382,
+      "line": 3402,
       "code": "",
       "msg": "下标对象须为数组或指针"
     },
     {
       "file": "src/parse.c",
-      "line": 3380,
+      "line": 3400,
       "code": "",
       "msg": "下标需要数组名或指针变量"
     },
     {
       "file": "src/parse.c",
-      "line": 3763,
+      "line": 3947,
       "code": "",
       "msg": "意外的关键字 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 1434,
+      "line": 1454,
       "code": "",
       "msg": "引用必须初始化（int &r = x;）"
     },
     {
       "file": "src/parse.c",
-      "line": 3095,
+      "line": 3115,
       "code": "",
       "msg": "引用形参需要变量实参（如 swap(a, b)）"
     },
     {
       "file": "src/parse.c",
-      "line": 1343,
+      "line": 1363,
       "code": "",
       "msg": "引用与指针不能组合（v0.7 单修饰符）"
     },
     {
       "file": "src/parse.c",
-      "line": 5769,
+      "line": 6026,
       "code": "",
       "msg": "引用与指针不能组合（v0.7 单修饰符）"
     },
     {
       "file": "src/parse.c",
-      "line": 1437,
+      "line": 1457,
       "code": "",
       "msg": "引用只能绑定变量（int &r = x; / double &r = d;）"
     },
     {
       "file": "src/parse.c",
-      "line": 4862,
+      "line": 5071,
       "code": "",
       "msg": "暂不支持全局函数指针（v1.3.2 边界：只开局部函数指针变量）——请在函数里声明 int (*fp)(int)，或用函数名直接调用"
     },
     {
       "file": "src/parse.c",
-      "line": 3842,
+      "line": 4050,
       "code": "",
       "msg": "这个 API 参数声明的是 int——double 实参会走 XMM 通道，声明与实参必须一致"
     },
     {
       "file": "src/parse.c",
-      "line": 1255,
+      "line": 4046,
+      "code": "",
+      "msg": "这个 API 形参声明的是 %s——64 位整数（%s）实参会被静默截断高 32 位：请先显式收窄（(int) 转型），或把 api 声明改成 %s"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4039,
+      "code": "",
+      "msg": "这个 API 形参声明的是 %s——double 实参不支持（两者互转只走显式转型），请先写出显式转型再传"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4036,
+      "code": "",
+      "msg": "这个 API 形参声明的是 ptr——double 实参会走 XMM 通道，声明与实参必须一致"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4032,
+      "code": "",
+      "msg": "这个 API 形参声明的是 ptr（64 位地址/句柄）——64 位整数（%s）不能当地址传（地址 ≠ 整数）：要传地址请用指针/&变量，要传数值请把形参改成 int_64"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1275,
       "code": "",
       "msg": "这个函数指针需要 %d 个实参，这里只给了 %d 个"
     },
     {
       "file": "src/parse.c",
-      "line": 4740,
+      "line": 4949,
       "code": "",
       "msg": "这个全局变量是 %s，初值却是 64 位字面量（会静默截断高 32 位：值超出范围的部分丢掉）——请把全局变量声明成 int_64 / uint_64"
     },
     {
       "file": "src/parse.c",
-      "line": 3061,
+      "line": 3081,
       "code": "",
       "msg": "这个形参是 %s——%s 实参会被静默截断高 32 位（超出范围的部分丢掉），请显式转型（或把形参声明成 %s）"
     },
     {
       "file": "src/parse.c",
-      "line": 3065,
+      "line": 3085,
       "code": "",
       "msg": "这个形参是 %s——double 实参不支持（两者互转只走显式转型）"
     },
     {
       "file": "src/parse.c",
-      "line": 3056,
+      "line": 3076,
       "code": "",
       "msg": "这个形参是 %s——double 实参不支持（两者互转只走显式转型），请先 (int)值 再 (…)"
     },
     {
       "file": "src/parse.c",
-      "line": 1227,
+      "line": 1247,
       "code": "",
       "msg": "这个形参是 int——double 实参请写 to_int(值) 显式转换（不静默截断小数）"
     },
     {
       "file": "src/parse.c",
-      "line": 3070,
+      "line": 3090,
       "code": "",
       "msg": "这个形参是 int——double 实参请写 to_int(值) 显式转换（不静默截断小数），或把形参也改成 double"
     },
     {
       "file": "src/parse.c",
-      "line": 1244,
+      "line": 1264,
       "code": "",
       "msg": "这个形参收的是函数指针——请传「&函数名」或函数指针变量"
     },
     {
       "file": "src/parse.c",
-      "line": 2480,
+      "line": 2500,
       "code": "",
       "msg": "这个运算符不支持 double（位运算/移位/取模只对整数）"
     },
     {
       "file": "src/parse.c",
-      "line": 3333,
+      "line": 3353,
       "code": "",
       "msg": "这里不能下标（struct 数组下标只支持局部变量形态 a[i]，二维 a[i][j] 与表达式结果下标都不支持）"
     },
     {
       "file": "src/parse.c",
-      "line": 4929,
+      "line": 5138,
       "code": "",
       "msg": "指针全局不支持数组形式（`int *g[4]` 是「4 个指针」——数组元素是指针的全局还没开）"
     },
     {
       "file": "src/parse.c",
-      "line": 5016,
+      "line": 5225,
       "code": "",
       "msg": "指针全局暂不支持初值——请在函数里赋值（例如 g = 0; 或 g = new ...），避免把 4 字节常量写进 8 字节指针槽"
     },
     {
       "file": "src/parse.c",
-      "line": 3435,
+      "line": 3455,
       "code": "",
       "msg": "指针数组的下标只支持局部数组变量形态 names[i]（v2.12 边界：全局/结构体字段/表达式结果下标暂不支持）"
     },
     {
       "file": "src/parse.c",
-      "line": 2914,
+      "line": 2934,
       "code": "",
       "msg": "指针数组请用下标访问（`char *a[N]` 的 a[i]）——`*a` / `*(a+i)` 暂不支持（本版拿不到元素的指向类型，按 32 位读半个指针会静默错值）"
     },
     {
       "file": "src/parse.c",
-      "line": 1384,
+      "line": 1404,
       "code": "",
       "msg": "指针数组暂不支持二维（v2.12 边界：只开一维 char *a[N] / int *a[N]）"
     },
     {
       "file": "src/parse.c",
-      "line": 1460,
+      "line": 1480,
       "code": "",
       "msg": "指针数组整体初始化必须写成 {\"串\", &x, ...}（数组没有标量初值语义）int 数组整体初始化必须写成 {v0, v1, ...}（数组没有标量初值语义） ⚠拼接"
     },
     {
       "file": "src/parse.c",
-      "line": 2786,
+      "line": 2806,
       "code": "",
       "msg": "指针转型的源必须是地址值（指针 / 数组名 / &x / 字符串 / new）——整数不能转指针（T1 边界：地址值与 int 不能互相装；空指针请写 int *p = 0;）"
     },
     {
       "file": "src/parse.c",
-      "line": 3945,
+      "line": 4154,
       "code": "",
       "msg": "指针转型结果暂不支持直接打印（仅 char* 串可用）"
     },
     {
       "file": "src/parse.c",
-      "line": 3935,
+      "line": 4144,
       "code": "",
       "msg": "指针字段/指针解引用结果暂不支持直接打印"
     },
     {
       "file": "src/parse.c",
-      "line": 2087,
+      "line": 2107,
       "code": "",
       "msg": "指针字段暂不支持 ++/--/复合赋值（v0.9.2 边界；用 s.f = s.f ± n 整体赋值）"
     },
     {
       "file": "src/parse.c",
-      "line": 2771,
+      "line": 2791,
       "code": "",
       "msg": "转型写法是 (类型)表达式 —— 期望 ')'（类型可写 int / int_32 / int_64 / char / double / uint_8 / uint_32 / uint_64，或它们加 * 的指针类型）"
     },
     {
       "file": "src/parse.c",
-      "line": 4382,
+      "line": 4591,
       "code": "",
       "msg": "字段 '%.*s' 重复"
     },
     {
       "file": "src/parse.c",
-      "line": 4487,
+      "line": 4696,
       "code": "",
       "msg": "字段 '%.*s' 重复"
     },
     {
       "file": "src/parse.c",
-      "line": 3821,
+      "line": 4005,
       "code": "",
       "msg": "API '%.*s' 需带括号调用"
     },
     {
       "file": "src/parse.c",
-      "line": 5276,
+      "line": 5524,
       "code": "",
       "msg": "API '%.*s' 与本地函数重名"
     },
     {
       "file": "src/parse.c",
-      "line": 5323,
+      "line": 5580,
       "code": "",
       "msg": "API '%.*s' 重复声明但签名不一致（已声明 %d 参 %s）"
     },
     {
       "file": "src/parse.c",
-      "line": 5289,
+      "line": 5541,
       "code": "",
-      "msg": "api 参数类型只能是 int / double / ptr（ptr = 64 位句柄/指针；double = XMM 通道；int_64 实参暂不支持：v1.7.0 P0 边界，请先 to_int32(...)）"
+      "msg": "api 参数类型只能是 int / int_64 / uint_64 / double / ptr（ptr = 64 位句柄/指针，double = XMM 通道；int_64/uint_64 = 64 位整数，值走 GP 全 64 位）"
     },
     {
       "file": "src/parse.c",
-      "line": 5285,
+      "line": 5533,
       "code": "",
       "msg": "API 参数最多 %d 个（4 寄存器 + %d 栈参，v1.4.0 由 12 提到 16：CreateFontA 14 参）"
     },
     {
       "file": "src/parse.c",
-      "line": 5232,
+      "line": 5476,
       "code": "",
       "msg": "api 的模块名字符串不能为空"
     },
     {
       "file": "src/parse.c",
-      "line": 5262,
+      "line": 5510,
       "code": "",
-      "msg": "api 返回类型须为 int / void / ptr / double（int_64 / uint_64 暂不支持：v1.7.0 P0 边界，64 位返回值请用 ptr 承接）"
+      "msg": "api 返回类型须为 int / int_64 / uint_64 / void / ptr / double（ptr = 64 位句柄/指针；int_64/uint_64 = 64 位整数，值走 rax 全 64 位）"
     },
     {
       "file": "src/parse.c",
-      "line": 5234,
+      "line": 5478,
       "code": "",
       "msg": "api 后需跟模块名（裸短名如 user32，或字符串字面量如 \"cabridge.dll\"）"
     },
     {
       "file": "src/parse.c",
-      "line": 6128,
+      "line": 6389,
       "code": "",
       "msg": "api 声明必须放在文件最顶部（任何 struct/函数之前）"
     },
     {
       "file": "src/parse.c",
-      "line": 5310,
+      "line": 5562,
       "code": "",
       "msg": "api 声明期望 ';'"
     },
     {
       "file": "src/parse.c",
-      "line": 5279,
+      "line": 5527,
       "code": "",
       "msg": "api 声明期望 '('"
     },
     {
       "file": "src/parse.c",
-      "line": 5297,
+      "line": 5549,
       "code": "",
       "msg": "api 声明期望 ')'"
     },
     {
       "file": "src/parse.c",
-      "line": 5267,
+      "line": 5515,
       "code": "",
       "msg": "api 声明期望函数名"
     },
     {
       "file": "src/parse.c",
-      "line": 5304,
+      "line": 5556,
       "code": "",
       "msg": "as 后需跟 DLL 里的真实函数名字符串（as \"_printf\"）"
     },
     {
       "file": "src/parse.c",
-      "line": 1686,
+      "line": 1706,
       "code": "",
       "msg": "break 只能用在循环（while / for）或 switch 里（编译器不会替你猜跳哪里）"
     },
     {
       "file": "src/parse.c",
-      "line": 2017,
+      "line": 2037,
       "code": "",
       "msg": "case 标签必须是整型常量（case 3: / case -1: / case 'a': / case 枚举常量:）——变量、函数调用、case 1 + 1 这类表达式都不行（switch 要在编译期排跳转表）"
     },
     {
       "file": "src/parse.c",
-      "line": 2022,
+      "line": 2042,
       "code": "",
       "msg": "case 常量 %d 重复（同一个值写两次，先写的那段永远不会被选中）"
     },
     {
       "file": "src/parse.c",
-      "line": 2028,
+      "line": 2048,
       "code": "",
       "msg": "case/default 标签后应为 ':'——case 只能跟一个**整型常量**（case 1 + 1: / case n: 这类都不行，编译期要按常量发比较指令）"
     },
     {
       "file": "src/parse.c",
-      "line": 1689,
+      "line": 1709,
       "code": "",
       "msg": "continue 在 switch 里没有意义（switch 不是循环——它跳的是外层循环，这里没有外层循环；要跳出 switch 用 break）continue 只能用在循环里（while / for 内；编译器不会替你猜跳哪里） ⚠拼接"
     },
     {
       "file": "src/parse.c",
-      "line": 2093,
+      "line": 2113,
       "code": "",
       "msg": "double 的 ++/-- 暂不支持（请写 d += 1.0 或 d = d + 1.0）"
     },
     {
       "file": "src/parse.c",
-      "line": 4735,
+      "line": 4944,
       "code": "",
       "msg": "double 全局变量的初值必须是浮点字面量（如 1.5，而不是 1）——写成整数会被当成整数位型读成 5e-324"
     },
     {
       "file": "src/parse.c",
-      "line": 1440,
+      "line": 1460,
       "code": "",
       "msg": "double 引用只能绑定 double 变量（int 槽只有 4 字节 → 按 double 读 8 字节会读到别的位型）"
     },
     {
       "file": "src/parse.c",
-      "line": 2273,
+      "line": 2293,
       "code": "",
       "msg": "double 只支持 += -= *= /=（%%= 与位运算/移位是整数运算，请写 d = d * 2.0 这类形式）"
     },
     {
       "file": "src/parse.c",
-      "line": 4732,
+      "line": 4941,
       "code": "",
       "msg": "double 字面量不能作为整数全局变量的初值（会静默截断小数）——请把全局变量声明成 double"
     },
     {
       "file": "src/parse.c",
-      "line": 6068,
+      "line": 6329,
       "code": "",
       "msg": "enum '%.*s' 里至少要有一个常量"
     },
     {
       "file": "src/parse.c",
-      "line": 6050,
+      "line": 6311,
       "code": "",
       "msg": "enum 常量赋值只认整数字面量或已登记的枚举常量"
     },
     {
       "file": "src/parse.c",
-      "line": 6029,
+      "line": 6290,
       "code": "",
       "msg": "enum 后需要名字（写法：enum Name { A, B }）"
     },
     {
       "file": "src/parse.c",
-      "line": 6037,
+      "line": 6298,
       "code": "",
       "msg": "enum 里期望常量名，得到 '%.*s'"
     },
     {
       "file": "src/parse.c",
-      "line": 6141,
+      "line": 6402,
       "code": "",
       "msg": "enum 缺少右花括号 '}'"
     },
     {
       "file": "src/parse.c",
-      "line": 3911,
+      "line": 4120,
       "code": "",
       "msg": "int 数组不能整体打印（逐元素 print([a[i]])）"
     },
     {
       "file": "src/parse.c",
-      "line": 1442,
+      "line": 1462,
       "code": "",
       "msg": "int 引用不能绑定 double 变量（会静默按 32 位读错值）——请写 double &r = 那个变量;"
     },
     {
       "file": "src/parse.c",
-      "line": 2507,
+      "line": 2527,
       "code": "",
       "msg": "int_64 的复合赋值只能出现在函数体内（v1.7.0 P2 边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 5623,
+      "line": 5880,
       "code": "",
       "msg": "main 必须返回 int（退出码 = main 返回值）"
     },
     {
       "file": "src/parse.c",
-      "line": 5633,
+      "line": 5890,
       "code": "",
       "msg": "main 必须返回 int（退出码 = main 返回值）"
     },
     {
       "file": "src/parse.c",
-      "line": 5640,
+      "line": 5897,
       "code": "",
       "msg": "main 必须返回 int（退出码 = main 返回值）"
     },
     {
       "file": "src/parse.c",
-      "line": 5647,
+      "line": 5904,
       "code": "",
       "msg": "main 必须返回 int（退出码 = main 返回值）"
     },
     {
       "file": "src/parse.c",
-      "line": 5680,
+      "line": 5937,
       "code": "",
       "msg": "main 函数不需要参数"
     },
     {
       "file": "src/parse.c",
-      "line": 5202,
+      "line": 5433,
       "code": "",
       "msg": "main 函数重复定义"
     },
     {
       "file": "src/parse.c",
-      "line": 3938,
+      "line": 4147,
       "code": "",
       "msg": "new 地址不能直接打印（先由 own/share 接管或存变量）"
     },
     {
       "file": "src/parse.c",
-      "line": 1489,
+      "line": 1509,
       "code": "",
       "msg": "own 指针必须由 new 初始化（int *own p = new int;）"
     },
     {
       "file": "src/parse.c",
-      "line": 1633,
+      "line": 1653,
       "code": "",
       "msg": "own 指针不能作 return 值（出口自动释放 → 悬垂；所有权转移特性 = 已知边界）share 指针不能作 return 值（引用计数随函数出口管理，caller 无 +1 → 悬垂；return 转移特性 = 已知边界） ⚠拼接"
     },
     {
       "file": "src/parse.c",
-      "line": 1492,
+      "line": 1512,
       "code": "",
       "msg": "own 指针只能由 new 初始化（独占所有权，禁止拷贝）"
     },
     {
       "file": "src/parse.c",
-      "line": 2250,
+      "line": 2270,
       "code": "",
       "msg": "own/share 指针不能复合赋值（所有权由声明初始化 + 出口自动释放管理）"
     },
     {
       "file": "src/parse.c",
-      "line": 1522,
+      "line": 1542,
       "code": "",
       "msg": "own/share 指针不能拷贝给裸指针（请用 int *own/share q = p; 声明接管）"
     },
     {
       "file": "src/parse.c",
-      "line": 2314,
+      "line": 2334,
       "code": "",
       "msg": "own/share 指针不能拷贝给其他变量（share 拷贝请用 int *share q = p; 初始化）"
     },
     {
       "file": "src/parse.c",
-      "line": 2292,
+      "line": 2312,
       "code": "",
       "msg": "own/share 指针不能重新赋值（所有权由声明初始化 + 出口自动释放管理）"
     },
     {
       "file": "src/parse.c",
-      "line": 4172,
+      "line": 4381,
       "code": "",
       "msg": "own/share 指针不能重新赋值（所有权由声明初始化 + 出口自动释放管理）"
     },
     {
       "file": "src/parse.c",
-      "line": 3047,
+      "line": 3067,
       "code": "",
       "msg": "own/share 指针不能作实参（所有权语义，拷贝初始化专属 v0.9）"
     },
     {
       "file": "src/parse.c",
-      "line": 3834,
+      "line": 4018,
       "code": "",
       "msg": "own/share 指针不能作实参（所有权语义，拷贝初始化专属 v0.9）"
     },
     {
       "file": "src/parse.c",
-      "line": 1426,
+      "line": 1446,
       "code": "",
       "msg": "own/share 指针暂只支持函数顶层作用域声明（块/循环内 = 已知边界 v0.9）"
     },
     {
       "file": "src/parse.c",
-      "line": 4272,
+      "line": 4481,
       "code": "",
       "msg": "print 段列表缺少 ']'"
     },
     {
       "file": "src/parse.c",
-      "line": 4281,
+      "line": 4490,
       "code": "",
       "msg": "print 段之间用 ',' 分隔，段列表以 ']' 结束"
     },
     {
       "file": "src/parse.c",
-      "line": 4291,
+      "line": 4500,
       "code": "",
       "msg": "print 换行参数须为 0/1 常量（1 = 换行）；省略 = 不换行"
     },
     {
       "file": "src/parse.c",
-      "line": 1601,
+      "line": 1621,
       "code": "",
       "msg": "return 的调用结果不是**按值返回 struct** 的函数（只有 struct S f() 形态能把返回值直接转交给调用者的缓冲）"
     },
     {
       "file": "src/parse.c",
-      "line": 1500,
+      "line": 1520,
       "code": "",
       "msg": "share 指针必须初始化（int *share p = new int; 或 = share 变量）"
     },
     {
       "file": "src/parse.c",
-      "line": 1512,
+      "line": 1532,
       "code": "",
       "msg": "share 指针只能由 new 或 share 变量初始化（拷贝需共享所有权）"
     },
     {
       "file": "src/parse.c",
-      "line": 4106,
+      "line": 3813,
+      "code": "",
+      "msg": "sizeof 的结果 %lld 字节超出 int 范围（2147483647）—— sizeof 的结果类型是 int"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3782,
+      "code": "",
+      "msg": "sizeof 的结果超出 int 范围（2147483647）—— 数组类型太大了，而 sizeof 的结果类型是 int"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3787,
+      "code": "",
+      "msg": "sizeof 的类型写法不对：期望 ')'（类型 = int / int_32 / int_64 / char / double / uint_8 / uint_32 / uint_64 / struct 名，可加 * 或 [常量]）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3775,
+      "code": "",
+      "msg": "sizeof 的数组长度必须是编译期常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（sizeof 在 parse 期就得算死）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3779,
+      "code": "",
+      "msg": "sizeof 的数组长度过大（%lld；上限 2147483647）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3777,
+      "code": "",
+      "msg": "sizeof 的数组长度须为正数（得到 %lld）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3758,
+      "code": "",
+      "msg": "sizeof 括号里不是可识别的类型（可写 int / int_32 / int_64 / char / double / uint_8 / uint_32 / uint_64 / struct 名，可加 * 或 [常量]）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3748,
+      "code": "",
+      "msg": "sizeof 里 struct 后需跟结构体名（写法：sizeof(struct Point)）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3728,
+      "code": "",
+      "msg": "sizeof 里的 '%.*s' 未声明 —— sizeof(<标识符>) 只接受已声明的变量；类型请写 sizeof(int) / sizeof(struct S)"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3751,
+      "code": "",
+      "msg": "sizeof 里的结构体 '%.*s' 未定义 —— 请先写 struct %.*s { ... } 再用 sizeof（要完整字段布局才能算大小）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3917,
+      "code": "",
+      "msg": "sizeof 需要括号：sizeof(int) / sizeof(struct S) / sizeof(变量名)"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3808,
+      "code": "",
+      "msg": "sizeof 只接受类型或变量名（sizeof(int) / sizeof(struct P) / sizeof(buf)）——不接受表达式：sizeof(表达式) 在编译期拿不到对象大小"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3726,
+      "code": "",
+      "msg": "sizeof(...) 的实参是 enum 常量 '%.*s'（值不是对象）—— 枚举常量按 int 存，请写 sizeof(int)"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3722,
+      "code": "",
+      "msg": "sizeof(...) 的实参是函数名 '%.*s' —— 函数没有对象大小（sizeof 只接受类型或变量）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3742,
+      "code": "",
+      "msg": "sizeof(ptr) 没有意义：ptr 只是 api 返回类型的关键字 —— 指针请写 sizeof(int*)（指针恒 8 字节）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3739,
+      "code": "",
+      "msg": "sizeof(void) 没有意义：void 不是有值的类型 —— 要字节视图请用 sizeof(char*)（指针恒 8 字节）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4315,
       "code": "",
       "msg": "str 段列表缺少 ']'"
     },
     {
       "file": "src/parse.c",
-      "line": 4119,
+      "line": 4328,
       "code": "",
       "msg": "str 段之间用 ',' 分隔，段列表以 ']' 结束"
     },
     {
       "file": "src/parse.c",
-      "line": 4082,
+      "line": 4291,
       "code": "",
       "msg": "str_into(dst, [...]) 的 dst 必须是本函数里声明的数组（char buf[N];）—— dst 是指针或表达式时请用三参数形态 str_into(dst, cap, [...])"
     },
     {
       "file": "src/parse.c",
-      "line": 4125,
+      "line": 4334,
       "code": "",
       "msg": "str([...]) 不接受 print 的第二参（换行标志 0|1）——要换行请用 print([...], 1)；str 的产物是 char*，本身没有'换行'这回事"
     },
     {
       "file": "src/parse.c",
-      "line": 4129,
+      "line": 4338,
       "code": "",
       "msg": "str([...]) 的段全是字面量、总长 %d 字节 > 缓冲上限 %d 字节 —— 编译期直接拦下（运行期超限同样是响亮失败：str() 返回 0，绝不静默截断）"
     },
     {
       "file": "src/parse.c",
-      "line": 4165,
+      "line": 4374,
       "code": "",
       "msg": "str([...]) 的赋值左值 '%.*s' 未声明——要先声明指针（char *s;）再 s = str([...]);"
     },
     {
       "file": "src/parse.c",
-      "line": 4168,
+      "line": 4377,
       "code": "",
       "msg": "str([...]) 只能赋给 char*/int* 指针变量（'%.*s' 不是指针）——它只在 ① 指针变量声明初始化 ② 赋值语句右值 ③ 指针返回函数的 return 值 可用"
     },
     {
       "file": "src/parse.c",
-      "line": 4002,
+      "line": 4211,
       "code": "",
       "msg": "str([...]) 只在 ① 指针变量声明初始化（char *s = str([...]);）② 赋值语句右值（s = str([...]);，左值是 char*/int* 变量）③ 指针返回函数的 return 值 —— 这 3 个位置、且作整个右值可用；本处不支持（不能作 print 段/实参/条件/算术的一部分，不能嵌套，也不能当语句丢弃）"
     },
     {
       "file": "src/parse.c",
-      "line": 1621,
+      "line": 1641,
       "code": "",
       "msg": "str([...]) 只在 ① 指针变量声明初始化（char *s = str([...]);）② 赋值语句右值（s = str([...]);）③ **指针返回函数**的 return 值 —— 这 3 个位置可用；本函数的返回类型不是 char*/int*（return str([...]) 不成立：那是地址，不是数值）"
     },
     {
       "file": "src/parse.c",
-      "line": 1611,
+      "line": 1631,
       "code": "",
       "msg": "struct 按值返回的 return 只支持「return <struct 变量/字段/数组元素>;」或「return <同类型按值返回函数调用>;」——`return (a = b);` / `return *sp;` / `return f().x;` 这类形态暂不支持，请先赋给变量再 return"
     },
     {
       "file": "src/parse.c",
-      "line": 4674,
+      "line": 4883,
       "code": "",
       "msg": "struct 按值返回的函数 '%s' 的调用只能出现在两个位置：① `struct %s v = %s(...);` / `v = %s(...);` 的右值；② 按值返回 struct 的函数里的 `return %s(...);`。不能把结果塞进任意表达式（`%s(...).x` / f(%s(...)) / 参与运算 / 丢弃结果）——本语言没有 struct 整体值语义；请先赋给同类型 struct 变量再逐字段用"
     },
     {
       "file": "src/parse.c",
-      "line": 1575,
+      "line": 1595,
       "code": "",
       "msg": "struct 按值返回的函数必须 `return <同类型 struct 值>;`（`return;` 只能用在 void 函数）"
     },
     {
       "file": "src/parse.c",
-      "line": 5809,
+      "line": 6066,
       "code": "",
       "msg": "struct 按值返回的函数最多 %d 个用户参数（第 1 个整型参数 rcx 被隐藏的返回缓冲指针占用；其余函数仍是 %d 个）"
     },
     {
       "file": "src/parse.c",
-      "line": 1595,
+      "line": 1615,
       "code": "",
       "msg": "struct 按值返回要求 return **同一个** struct 类型（本函数返回 struct %s，这里给的是 struct %s）——不同类型布局不同，不能逐字节搬"
     },
     {
       "file": "src/parse.c",
-      "line": 1592,
+      "line": 1612,
       "code": "",
       "msg": "struct 按值返回要求 return 的值是 struct %s 类型（这里给的是 %s）"
     },
     {
       "file": "src/parse.c",
-      "line": 3921,
+      "line": 4130,
       "code": "",
       "msg": "struct 变量不能整体打印（逐字段 print([s.x])）"
     },
     {
       "file": "src/parse.c",
-      "line": 2246,
+      "line": 2266,
       "code": "",
       "msg": "struct 不支持复合赋值（结构体只支持整体拷贝 b = a; 与 {0} 零初始化）"
     },
     {
       "file": "src/parse.c",
-      "line": 896,
+      "line": 916,
       "code": "",
       "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1729,
-      "code": "",
-      "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4329,
-      "code": "",
-      "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4366,
-      "code": "",
-      "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 5597,
-      "code": "",
-      "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 5735,
-      "code": "",
-      "msg": "struct 后需跟类型名"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 5012,
-      "code": "",
-      "msg": "struct 全局变量暂不支持整体初始化（`struct E g = {...}`）——全局 struct 只有 .bss 语义（全零）；要初值请在 main 里逐字段赋值，或用局部 struct 造好后整体拷贝 g = 局部值"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 3477,
-      "code": "",
-      "msg": "struct 数组元素上的方法调用点糖暂不支持（a[i].%.*s(...)）——请手写自由函数形式：类型名_%.*s(&a[i], ...)"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1783,
-      "code": "",
-      "msg": "struct 数组暂不支持整体初始化（逐元素 a[i].字段 = 值）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1776,
-      "code": "",
-      "msg": "struct 数组长度过大（%lld；上限 2147483647）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1772,
-      "code": "",
-      "msg": "struct 数组长度须为数字常量（与 int a[N] 同口径；字面量 / enum 常量 / 常量表达式）——变量、函数调用都不行"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 1774,
-      "code": "",
-      "msg": "struct 数组长度须为正数（得到 %lld）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 3312,
-      "code": "",
-      "msg": "struct 数组只支持一维下标（二维 `es[i][j]` 暂不支持）——要二维请写一维 `es[i*cols + j]` 自己算"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4404,
-      "code": "",
-      "msg": "struct 数组字段长度过大（%lld；上限 2147483647）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4402,
-      "code": "",
-      "msg": "struct 数组字段长度须为正整数常量（得到 %lld）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4399,
-      "code": "",
-      "msg": "struct 数组字段长度须为正整数常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（布局在 parse 期就得算死）"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 4408,
-      "code": "",
-      "msg": "struct 数组字段只支持一维（`struct E es[N]`）——二维 `struct E es[2][3]` 暂不支持；要二维请声明成一维 `es[2*3]` 自己算下标"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 2303,
-      "code": "",
-      "msg": "struct 整体赋值要求两边是**同一个 struct 类型**（不同 struct 的布局/字段不同，不能逐字节搬）——请逐字段赋值"
-    },
-    {
-      "file": "src/parse.c",
-      "line": 2299,
-      "code": "",
-      "msg": "struct 整体赋值右边必须是**同一个 struct 类型**的值（这里给的是 %s）——结构体没有整体值语义，只有同类型逐字节拷贝"
     },
     {
       "file": "src/parse.c",
       "line": 1749,
       "code": "",
+      "msg": "struct 后需跟类型名"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4538,
+      "code": "",
+      "msg": "struct 后需跟类型名"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4575,
+      "code": "",
+      "msg": "struct 后需跟类型名"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 5854,
+      "code": "",
+      "msg": "struct 后需跟类型名"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 5992,
+      "code": "",
+      "msg": "struct 后需跟类型名"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 5221,
+      "code": "",
+      "msg": "struct 全局变量暂不支持整体初始化（`struct E g = {...}`）——全局 struct 只有 .bss 语义（全零）；要初值请在 main 里逐字段赋值，或用局部 struct 造好后整体拷贝 g = 局部值"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3497,
+      "code": "",
+      "msg": "struct 数组元素上的方法调用点糖暂不支持（a[i].%.*s(...)）——请手写自由函数形式：类型名_%.*s(&a[i], ...)"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1803,
+      "code": "",
+      "msg": "struct 数组暂不支持整体初始化（逐元素 a[i].字段 = 值）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1796,
+      "code": "",
+      "msg": "struct 数组长度过大（%lld；上限 2147483647）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1792,
+      "code": "",
+      "msg": "struct 数组长度须为数字常量（与 int a[N] 同口径；字面量 / enum 常量 / 常量表达式）——变量、函数调用都不行"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1794,
+      "code": "",
+      "msg": "struct 数组长度须为正数（得到 %lld）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 3332,
+      "code": "",
+      "msg": "struct 数组只支持一维下标（二维 `es[i][j]` 暂不支持）——要二维请写一维 `es[i*cols + j]` 自己算"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4613,
+      "code": "",
+      "msg": "struct 数组字段长度过大（%lld；上限 2147483647）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4611,
+      "code": "",
+      "msg": "struct 数组字段长度须为正整数常量（得到 %lld）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4608,
+      "code": "",
+      "msg": "struct 数组字段长度须为正整数常量（字面量 / enum 常量 / 常量表达式）——变量、函数调用、运行期量都不行（布局在 parse 期就得算死）"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 4617,
+      "code": "",
+      "msg": "struct 数组字段只支持一维（`struct E es[N]`）——二维 `struct E es[2][3]` 暂不支持；要二维请声明成一维 `es[2*3]` 自己算下标"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 2323,
+      "code": "",
+      "msg": "struct 整体赋值要求两边是**同一个 struct 类型**（不同 struct 的布局/字段不同，不能逐字节搬）——请逐字段赋值"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 2319,
+      "code": "",
+      "msg": "struct 整体赋值右边必须是**同一个 struct 类型**的值（这里给的是 %s）——结构体没有整体值语义，只有同类型逐字节拷贝"
+    },
+    {
+      "file": "src/parse.c",
+      "line": 1769,
+      "code": "",
       "msg": "struct 指针的初值必须是地址值（&变量 / &a[i] / 指针变量 / new / 字符串）——T1 口径：地址值与 int 不能互相装"
     },
     {
       "file": "src/parse.c",
-      "line": 5010,
+      "line": 5219,
       "code": "",
       "msg": "struct 指针全局暂不支持初值——请在函数里赋值（例如 gp = &g; 或 gp = 0;）"
     },
     {
       "file": "src/parse.c",
-      "line": 4393,
+      "line": 4602,
       "code": "",
       "msg": "struct 指针字段暂不支持数组形态（v2.3 边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 4510,
+      "line": 4719,
       "code": "",
       "msg": "struct 指针字段暂不支持数组形态（v2.3 边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 2024,
+      "line": 2044,
       "code": "",
       "msg": "switch 的 case 分支上限 64（v1.3.1 边界）"
     },
     {
       "file": "src/parse.c",
-      "line": 1967,
+      "line": 1987,
       "code": "",
       "msg": "switch 的条件不支持 double（相等比较要按位型，浮点不行）——请用整数，或先 to_int(值)（注意那是截断取整）"
     },
     {
       "file": "src/parse.c",
-      "line": 1972,
+      "line": 1992,
       "code": "",
       "msg": "switch 的条件暂不支持 64 位整数（int_64/uint_64；v1.7.0 P0 边界：跳转表是 32 位比较）——请先显式收窄，或改写成 if/else 链"
     },
     {
       "file": "src/parse.c",
-      "line": 2039,
+      "line": 2059,
       "code": "",
       "msg": "switch 里 case/default 之前的语句永远执行不到——编译器不替你猜它属于哪一段（请把它移到某个 case 之后）"
     },
     {
       "file": "src/parse.c",
-      "line": 1994,
+      "line": 2014,
       "code": "",
       "msg": "switch 里只能有一个 default"
     },
     {
       "file": "src/parse.c",
-      "line": 1986,
+      "line": 2006,
       "code": "",
       "msg": "switch 缺少右花括号 '}'"
     },
     {
       "file": "src/parse.c",
-      "line": 3719,
+      "line": 3893,
       "code": "",
       "msg": "to_int32(...) 只用于 64 位整数（int_64/uint_64）→ int 的显式收窄（实参已经是 32 位：不必转）"
     },
     {
       "file": "src/parse.c",
-      "line": 3732,
+      "line": 3906,
       "code": "",
       "msg": "to_int64(...) 不支持 double（两者互转只走显式转型）"
     },
     {
       "file": "src/parse.c",
-      "line": 4217,
+      "line": 4426,
       "code": "",
       "msg": "try 的目标变量 '%.*s' 未声明（先在本函数里声明，如 int err = 0;）"
     },
     {
       "file": "src/parse.c",
-      "line": 4224,
+      "line": 4433,
       "code": "",
       "msg": "try 的目标变量必须是 32 位整数（int / int_32 / char / uint_8 / uint_32；错误码是 int，不接受 %s —— 64 位值 return 给 int 函数会静默截断）"
     },
     {
       "file": "src/parse.c",
-      "line": 4220,
+      "line": 4429,
       "code": "",
       "msg": "try 的形态是 `try <变量> = <表达式>;`（左值只能是单个变量，不能是 a[i] / s.x —— 那样会被求值两次）"
     },
     {
       "file": "src/parse.c",
-      "line": 4213,
+      "line": 4422,
       "code": "",
       "msg": "try 的形态是 `try <变量> = <表达式>;`（try 后必须是变量名）"
     },
     {
       "file": "src/parse.c",
-      "line": 4230,
+      "line": 4439,
       "code": "",
       "msg": "try 只能用在返回 int 的函数里（本函数返回 %s；错误码约定是 int）"
     },
     {
       "file": "src/parse.c",
-      "line": 5621,
+      "line": 5878,
       "code": "",
       "msg": "void 不能返回指针"
     },
     {
       "file": "src/parse.c",
-      "line": 5743,
+      "line": 6000,
       "code": "",
       "msg": "void 不能作参数类型（无参函数直接写 f()）"
     },
     {
       "file": "src/parse.c",
-      "line": 1582,
+      "line": 1602,
       "code": "",
       "msg": "void 函数不能 return 表达式"
     },
     {
       "file": "src/parse.c",
-      "line": 4609,
+      "line": 4818,
       "code": "",
       "msg": "void 函数调用不能用于表达式或参数"
     },
     {
       "file": "src/parse.c",
-      "line": 4228,
+      "line": 4437,
       "code": "",
       "msg": "void 函数里不能用 try（没有返回值可带错误码）"
     },
     {
       "file": "src/parse.c",
-      "line": 887,
+      "line": 907,
       "code": "",
       "msg": "void 只能单独写成「无参」：(void)"
     },

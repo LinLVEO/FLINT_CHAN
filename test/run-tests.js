@@ -1359,7 +1359,16 @@ for (const [sample, expect, expectOut] of compileCases) {
       /\^\^ 暂不支持 64 位/, "uint_64 的 ^^ → 编译期硬错（快速幂是 32 位累加器）"],
     ["nu_apiarg.fl",
       "api user32 int MessageBoxA(int, int, int, int);\nint main() { uint_64 u = 1; return MessageBoxA(0, 0, 0, u); }\n",
-      /64 位整数（int_64\/uint_64）实参不能直接传给 api/, "uint_64 实参传给 api → 编译期硬错"],
+      /声明的是 int.*显式收窄/, "uint_64 实参传给 int 形参的 api → 编译期硬错（v1.11.0 起按声明类型判，文案指向显式收窄）"],
+    ["nu_apiarg64.fl",
+      "api user32 int MessageBoxA(int, int, int, int);\nint main() { int_64 x = 1; return MessageBoxA(0, 0, 0, x); }\n",
+      /声明的是 int.*显式收窄/, "int_64 实参传给 int 形参的 api → 编译期硬错（不再笼统说'暂不支持'）"],
+    ["nu_apiptr.fl",
+      "api kernel32 int GetModuleHandleA(ptr);\nint main() { int_64 x = 1; return GetModuleHandleA(x); }\n",
+      /地址 ≠ 整数/, "64 位整数实参传给 ptr 形参的 api → 编译期硬错（地址 ≠ 整数）"],
+    ["nu_apidbl.fl",
+      "api msvcrt int printf(int, double);\nint main() { int_64 x = 1; return printf(0, x); }\n",
+      /不能隐式转 double/, "int_64 实参传给 double 形参的 api → 编译期硬错（跨浮点只走显式转型）"],
   ];
   for (const [name, src, re, label] of cases) {
     fs.writeFileSync(path.join(TMP, name), src);
@@ -2155,7 +2164,8 @@ for (const [sample, expect, expectOut] of compileCases) {
     ["结构体 int 字段装地址被拒", 'struct S { int f; }\nint main() { struct S s; s.f = "AB"; return 0; }\n', /装不进 4 字节/],
     ["未标记 int 当指针用被拒（会读到残渣）", "int main() { int n = 5; int *p = n; return *p; }\n", /指针目标只能接/],
     ["int 返回函数当指针用被拒（跨函数只有低 32 位）", "int f() { return 5; }\nint main() { int *q = f(); return *q; }\n", /指针目标只能接/],
-    ["int 参与算术的地址链当指针用被拒（按 32 位算）", 'int main() { int s = "AB"; int *q = s + 8; return *q; }\n', /参与算术/],
+    // slot4：本地 int 只有 4 字节，地址值根本装不进去（前两条已覆盖）；这一条测「int 值参与算术后当指针用」仍被拦。
+    ["int 参与算术的地址链当指针用被拒（按 32 位算）", 'int main() { int s = 0; int *q = s + 8; return *q; }\n', /指针目标只能接/],
   ];
   negs.forEach(([name, src, re], i) => {
     const p = path.join(TMP, `t1neg${i}.fl`);
@@ -3123,6 +3133,37 @@ compileCases.push(
   if (fs.existsSync(exe)) {
     const res = runExeOut(exe);
     check("image PNG 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— sizeof 运算符（2026-11-04）：编译期常量，值宽口径 ——
+//   判据 = test\facts\f136_sizeof.fl（8 位掩码全亮 → 退 42）。
+//   ⚠️ **只在真 flint 端跑**（不进差分门）：boot 的类型宇宙没有 double / int_64 / uint_*，
+//   而且 sizeof 本身也没在 boot 侧实现（仍报「未声明的变量 'sizeof'」）——
+//   这是已知的双端缺口，登记方式同 double / int_64 / uint_* 的既有缺口。
+{
+  const src = path.join(__dirname, "facts", "f136_sizeof.fl");
+  const exe = path.join(TMP, "f136_sizeof.exe");
+  const r = run(["-o", exe, src]);
+  check("sizeof 探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("sizeof 探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
+  }
+}
+
+// —— api 的 64 位整型通道（2026-11-04）：int_64 / uint_64 作返回值 + 作形参 ——
+//   判据 = test\facts\f137_api_i64.fl（8 位掩码全亮 → 退 42）。
+//   ⚠️ **只在真 flint 端跑**（不进差分门）：boot 的类型宇宙没有 int_64 / uint_64 / double，
+//   api 声明侧也没有这两档 —— 这是已知的双端缺口，登记方式同 f136（sizeof）与 int_64 族既有缺口。
+{
+  const src = path.join(__dirname, "facts", "f137_api_i64.fl");
+  const exe = path.join(TMP, "f137_api_i64.exe");
+  const r = run(["-o", exe, src]);
+  check("api 64 位通道探针：编译", r.ok, r.ok ? "" : (r.stderr || "").trim().slice(0, 120));
+  if (fs.existsSync(exe)) {
+    const res = runExeOut(exe);
+    check("api 64 位通道探针：8 位掩码全亮", res.code === 42, `实际 ${res.code}`);
   }
 }
 

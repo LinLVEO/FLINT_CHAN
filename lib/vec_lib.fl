@@ -6,7 +6,17 @@
 // probe tmp\vectest\probe_ptr.fl shows the exact diagnostic. So a slot is filled
 // by ADDRESS instead: the caller passes &value and the library copies 8 bytes.
 //
-// A slot holds ANY 8-byte quantity losslessly: int / double / pointer / fn pointer.
+// ⚠️ slot4（2026-11-05，本地标量 int = 4 字节）之后，**源实体必须是 8 字节**：
+//    `int x` 只有 4 字节 ⇒ `vec_push(v, &x)` 会读到邻居。装 int 请先转存：
+//        int_64 t = x;  v = std::vec_push(v, &t);     // 真 flint 端（boot 端没有 int_64）
+//    或者直接把变量声明成 int_64 / double / 指针（它们本来就是 8 字节实体）。
+//
+// ⚠️ 双端纪律：boot（自举端）**没有 int_64**，所以**本库内部一个 int_64 都不许出现**
+//    （boot 也要编 `boot\samples\b5a1.fl`）。库内头字段（len/cap）用「char[8] 缓冲 + memcpy 4 字节」
+//    中转：真 flint 的 int 4 字节正好；boot 的 int 8 字节只写低 4、高 4 保持 0。
+//
+// A slot holds ANY 8-byte quantity losslessly: int_64 / double / pointer / fn pointer.
+// (4-byte int must be widened to an 8-byte entity by the caller first -- see above.)
 // Verified before writing this file (tmp\vectest\, real flint, run_exit=42 both):
 //   probe_slotA.fl  int value round trip through an 8-byte slot copy
 //   probe_slotC.fl  POINTER round trip (MEM_TOP_DOWN address > 4GB) -> high 32 bits kept
@@ -19,7 +29,7 @@
 //
 // Public API (names approved by user 2026-09-17):
 //   char *std::vec_new(int cap)                  cap < 1 -> 4; 0 on allocation failure
-//   char *std::vec_push(char *v, int *valptr)    MAY MOVE -> always write back: v = vec_push(v,&x)
+//   char *std::vec_push(char *v, char *valptr)   MAY MOVE -> always write back: v = vec_push(v,&x)
 //   char *std::vec_get(char *v, int i)           element slot address; 0 = out of range
 //   int   std::vec_len(char *v)
 //   int   std::vec_free(char *v)                 releases the block, returns 0
@@ -40,24 +50,35 @@ api kernel32 int VirtualFree(int, int, int);
 include "mem_lib.fl"
 
 // --- internal: write/read one 8-byte slot at index slot ---
-int vec_iset(char *v, int slot, int *valptr) {
+// slot4：valptr 用 char* 收（元素类型不限）；调用方必须保证它指向 **8 字节**实体。
+int vec_iset(char *v, int slot, char *valptr) {
   std::memcpy(v + slot * 8, valptr, 8);
   return 0;
 }
 
+// 头字段读：只拷 4 字节进 int（真 flint 的 int 正好 4；boot 的 int 8 字节高半保持初值 0）
 int vec_iget(char *v, int slot) {
   int x = 0;
-  std::memcpy(&x, v + slot * 8, 8);
+  std::memcpy(&x, v + slot * 8, 4);
   return x;
+}
+
+// 头字段写：char[8] 缓冲先清零、再把 4 字节 int 拷进去，最后整槽写 8 字节
+int vec_hset(char *v, int slot, int val) {
+  char b[8];
+  int i = 0;
+  while (i < 8) { b[i] = 0; i = i + 1; }
+  std::memcpy(b, &val, 4);
+  vec_iset(v, slot, b);
+  return 0;
 }
 
 char *std::vec_new(int cap) {
   if (cap < 1) { cap = 4; }
   char *v = VirtualAlloc(0, 16 + cap * 8, 0x3000, 4);
   if (v == 0) { return 0; }
-  int zero = 0;
-  vec_iset(v, 0, &zero);
-  vec_iset(v, 1, &cap);
+  vec_hset(v, 0, 0);
+  vec_hset(v, 1, cap);
   return v;
 }
 
@@ -75,7 +96,8 @@ char *std::vec_get(char *v, int i) {
 }
 
 // append the 8 bytes pointed to by valptr; returns the (possibly moved) handle
-char *std::vec_push(char *v, int *valptr) {
+// slot4：valptr 必须是 8 字节实体（int_64 / double / 指针）；4 字节 int 先转存成 int_64。
+char *std::vec_push(char *v, char *valptr) {
   if (v == 0) { return 0; }
   if (valptr == 0) { return v; }
   int len = vec_iget(v, 0);
@@ -88,11 +110,10 @@ char *std::vec_push(char *v, int *valptr) {
     std::memcpy(nv, v, 16 + len * 8);
     VirtualFree(v, 0, 0x8000);
     v = nv;
-    vec_iset(v, 1, &ncap);
+    vec_hset(v, 1, ncap);
   }
   std::memcpy(v + 16 + len * 8, valptr, 8);
-  int nlen = len + 1;
-  vec_iset(v, 0, &nlen);
+  vec_hset(v, 0, len + 1);
   return v;
 }
 

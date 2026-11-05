@@ -1,0 +1,77 @@
+// f136_sizeof.fl -- 2026-11-04：sizeof 运算符探针（8 位掩码，全亮退 42）
+//   每一位一格，绝不写成一个总和（失败时打印 mask，红的位一眼可见）。
+// 口径（与 docs\语言参考.md §3.1「sizeof」+ §2 / §6 一致）：
+//   值宽 = int/int_32/uint_32 4 ｜ char/uint_8 1 ｜ int_64/uint_64/double/指针 8 ｜ struct = C 布局 size ｜ T[N] = N × sizeof(T)
+//   ⚠️ 局部标量**槽**是 8 字节、struct 数组元素步长是 8*ceil(size/8) —— 那些是帧布局，
+//      **不是** sizeof 的口径（sizeof(int) 必须是 4，不是 8）。
+//
+//   bit0 内置标量 + 指针：int/int_32/uint_32=4、char/uint_8=1、double/int_64/uint_64=8、三种指针=8
+//   bit1 struct：sizeof(struct P)=8（两个 int 的 C 布局）＋ sizeof(struct P*)=8
+//   bit2 数组：sizeof(int[10])=40 ｜ char[10]=10 ｜ int_64[3]=24 ｜ 二维 int[2][3]=24
+//   bit3 参与算术/比较：sizeof(int)*3=12 ｜ sizeof(struct P)+sizeof(char)=9 ｜ sizeof(char) < sizeof(double)
+//   bit4 混合字段 struct 的 C 布局：struct M { char; int; int_64; char*; } ⇒ 24（含内部 padding 与尾部补齐）
+//   bit5 变量形态（局部）：int=4 ｜ int[10]=40 ｜ char[64]=64 ｜ struct M=24 ｜ struct P*=8 ｜ struct P[3]=24
+//   bit6 变量形态（全局）：int=4 ｜ int[10]=40 ｜ char[256]=256 ｜ struct M=24
+//   bit7 当值用：实参 / 赋给 int_64 / double / 三元
+//
+// ⚠️ **双端缺口（已知，照仓库惯例只在真 flint 端跑）**：boot（自举端 b1_emit.exe）的类型宇宙里
+//    没有 `double` / `int_64` / `uint_*`，而且 **sizeof 这个运算符本身也没实现**
+//    （boot 侧仍会报「未声明的变量 'sizeof'」）。所以本探针不进差分门、不要求 boot 对齐；
+//    boot 侧补 sizeof 是另一条独立工单（同 double/int_64 的既有缺口登记方式）。
+struct P { int x; int y; }
+struct M { char c; int n; int_64 big; char *p; }
+
+int gv;
+int garr[10];
+char gbuf[256];
+struct M gm;
+
+int idf(int v) { return v; }
+
+int main() {
+  int mask = 0;
+  int x = 1;
+  int a[10];
+  char buf[64];
+  struct P *pp;
+  struct P parr[3];
+  struct M m;
+
+  // —— bit0：内置标量 + 指针 ——
+  if (sizeof(int) == 4 && sizeof(int_32) == 4 && sizeof(uint_32) == 4
+      && sizeof(char) == 1 && sizeof(uint_8) == 1
+      && sizeof(double) == 8 && sizeof(int_64) == 8 && sizeof(uint_64) == 8
+      && sizeof(int*) == 8 && sizeof(char*) == 8 && sizeof(double*) == 8) { mask = mask | 1; }
+
+  // —— bit1：struct（C 布局 size，不是槽数）——
+  if (sizeof(struct P) == 8 && sizeof(struct P*) == 8) { mask = mask | 2; }
+
+  // —— bit2：数组 / 二维数组 ——
+  if (sizeof(int[10]) == 40 && sizeof(char[10]) == 10
+      && sizeof(int_64[3]) == 24 && sizeof(int[2][3]) == 24) { mask = mask | 4; }
+
+  // —— bit3：参与算术 / 比较 ——
+  if (sizeof(int) * 3 == 12 && sizeof(struct P) + sizeof(char) == 9
+      && sizeof(char) < sizeof(double)) { mask = mask | 8; }
+
+  // —— bit4：混合字段的 C 布局（char@0、int@4、int_64@8、char*@16、尾补齐到 24）——
+  if (sizeof(struct M) == 24) { mask = mask | 16; }
+
+  // —— bit5：变量形态（局部）——
+  if (sizeof(x) == 4 && sizeof(a) == 40 && sizeof(buf) == 64
+      && sizeof(m) == 24 && sizeof(pp) == 8 && sizeof(parr) == 24) { mask = mask | 32; }
+
+  // —— bit6：变量形态（全局）——
+  if (sizeof(gv) == 4 && sizeof(garr) == 40 && sizeof(gbuf) == 256 && sizeof(gm) == 24) { mask = mask | 64; }
+
+  // —— bit7：sizeof 的结果能当普通 int 值用（实参 / 赋值 / 三元）——
+  int_64 big = sizeof(int[10]);
+  double d = sizeof(double);
+  int via = idf(sizeof(struct P));
+  int tr = (sizeof(char) == 1) ? sizeof(int) : 0;
+  if (big == 40 && d == 8.0 && via == 8 && tr == 4) { mask = mask | 128; }
+
+  print(["f136 mask=", mask, "\n"]);
+  if (mask == 255) { return 42; }
+  return mask;
+}

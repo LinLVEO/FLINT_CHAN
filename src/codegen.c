@@ -779,37 +779,21 @@ static bool is_addr_expr(Node *n) {
 //   每个 int64 操作数的高 32 位被 movsxd 抹掉，**编译完全通过、值错**。
 static bool is64_value(Node *n) { return is_addr_expr(n) || expr_is_i64(n); }
 
-// ===== v1.0.13 T1：int 装地址的自动适配（评审清单【3】收口，用户拍板「编译器自己判断」）=====
+// ===== v1.0.13 T1：int 装地址（**slot4 起：从「自动 8 字节适配」收紧成编译期硬错**）=====
 // 病根：int 是 4 字节语义，往 int 槽里存 64 位地址会**静默截断**高 32 位，再当指针用即 0xC0000005。
-// T1 规则（判断不了就报错，绝不静默猜一个宽度）：
-//   ① 直接 int 变量 ← 地址值 → 槽按 8 字节存，并**标记**它为「装地址的 int」；被标记变量的所有
-//      直接存都写满 8 字节（普通 int 值先符号扩展）→ 高半永远确定，不留栈残渣。
-//   ② 被标记变量的读一律 8 字节（高半完整）→ 赋给指针目标、与地址比较都拿到完整地址。
-//      注：算术仍按 32 位（语义一行未改），所以「地址经算术中转」不在 T1 内——那种值再当指针用
-//      会在 ④ 被拦下（不静默）。
-//   ③ 间接 int/char 目标（数组元素 / 结构体 int、char 字段 / 解引用）只有 4/1 字节，装不下地址 → 编译期报错。
-//   ④ 指针目标只接「64 位算出来的地址表达式 / 显式常量 / API 返回值（句柄兼容，SPEC:152）/ 被标记的 int 变量」；
-//      其余（未标记 int、间接 4 字节对象、int 返回函数调用、int 算术链）会截断或读到残渣 → 编译期报错。
+// 旧 T1（v1.0.13 ~ slot4 之前）：本地 int 槽是 8 字节，① x ← 地址值 ⇒ 把槽标记成「装地址的 int」并按
+//   8 字节存、② 被标记槽按 8 字节读；③ 间接 4/1 字节目标装地址 → 报错；④ 指针目标只收 64 位地址值。
+// slot4（本地标量 int = 4 字节，C 语义）之后：槽里**物理上装不下** 64 位地址 ⇒ ① 不再扩槽/不再标记，
+//   命中即 `ai_pass` 里报错（文案含「地址值」「4 字节」「int_64」，绝不静默截断）。② 的 8 字节读同时删除。
+//   ③④ 的判据保留（is_addr_value 本身不变）：间接目标、指针目标的门槛仍然照旧拦「32 位值当指针」。
 // 遗留边界（T2 的事，已写入 SPEC）：int 形参接地址、int 函数返回地址仍按声明类型取低 32 位；
 // 需要完整地址请把类型声明成 int * / ptr。boot 侧未接（自举轨道再补，与 v1.0.11 ^^ 同处理）。
-static int *g_ai = NULL;   // 被标记的 int 槽偏移（每函数重算）
-static int g_nai = 0, g_aicap = 0;
-
+// slot4：T1「int 装地址」的自动适配已取消 —— 标记表不再产生任何条目
+//   （`int x = 地址值` 在 ai_pass 里直接报错）。`slot_marked` 的形状保留：
+//   is_addr_value / slotmap_declare_ast 仍按它判，恒返回 false。
 static bool slot_marked(int off) {
-  for (int i = 0; i < g_nai; i++) if (g_ai[i] == off) return true;
+  (void)off;
   return false;
-}
-
-static bool mark_slot(int off) {
-  if (slot_marked(off)) return false;
-  if (g_nai == g_aicap) {
-    int cap = g_aicap ? g_aicap * 2 : 8;
-    int *p = realloc(g_ai, (size_t)cap * sizeof(int));
-    if (!p) { fprintf(stderr, "hlc: 内存不足\n"); exit(1); }
-    g_ai = p; g_aicap = cap;
-  }
-  g_ai[g_nai++] = off;
-  return true;
 }
 
 // 「值本身是地址」的表达式（区别于「地址差」这类标量）——T1 的存宽判定与指针目标门槛都用它。
@@ -824,7 +808,7 @@ static bool is_addr_value(Node *n) {
       //   共用同一段正整数空间 ⇒ 全局下标 == 某个被标记的局部偏移时会误报
       //   「地址值不能装进全局 int」（M4n 撞到，卡 T-20260928-195316）。全局 int 永远不可能
       //   合法持有地址（写入侧 :2511 硬拒），故这里必须先排除 is_global 再查标记表。
-      if (n->ty == TY_INT && !n->is_global) return slot_marked(n->offset);   // T1：装过地址的 int
+      if (n->ty == TY_INT && !n->is_global) return slot_marked(n->offset);   // T1：装过地址的 int（slot4 起恒 false；判据形状保留）
       // v1.3.2：函数指针变量本身值就是地址（T1 门槛/存宽判定按 64 位）
       return n->ty == TY_PTR || n->ty == TY_ARR || n->ty == TY_STRUCT || n->ty == TY_FUNCPTR;
     case ND_DEREF: return n->ty == TY_PTR || n->ty == TY_FUNCPTR;   // v2.6.0：函数指针数组元素 = 地址
@@ -876,13 +860,24 @@ static void emit_arg_rax_to_gp(Buf *b, int gi, Node *arg) {
   else              { if (addr) emit_mov_r9_rax(b);  else emit_movsxd_r9_eax(b); }
 }
 
-// 标记传递（定点）：x = 地址值 → x 是「装地址的 int」；x = 已标记的 int → 也是（函数内转手不丢）。
+// ===== slot4：本地标量 int 只有 4 字节 ⇒ 「int 装地址」从「自动扩成 8 字节槽」改成**编译期硬错** =====
+// 旧 T1 ①（v1.0.13）把「x = 地址值」的 int 槽按 8 字节存/读，代价是槽宽与类型不符。
+// 现在本地 int 槽就是 4 字节（C 语义，见 parse.c new_lvar）：
+//   · 再"自动适配"= 要么静默截断高 32 位、要么 8 字节写穿相邻变量 —— 两个都不可接受；
+//   · 所以判据（is_addr_value）原样保留，命中即在**函数体发射前**报错，绝不静默猜宽度。
+// 标记表（g_ai / slot_marked / mark_slot / SF_T1ADDR）结构保留，但本版本**不会再产生标记**：
+//   能被标记的赋值已经在这里报错了。is_addr_value 的 TY_INT 分支因此恒为 false（保留判据形状）。
+static void error_at_node(Node *n, const char *msg);   // 前向声明（定义在下方 gen 辅助区）
 static bool ai_pass(Node *n) {
   bool changed = false;
   for (; n; n = n->next) {
-    if (n->kind == ND_ASSIGN && n->lhs && n->lhs->kind == ND_VAR && !n->lhs->is_ref &&
-        n->lhs->ty == TY_INT && is_addr_value(n->rhs))
-      changed |= mark_slot(n->lhs->offset);
+    // 全局 int 不走这条：它的地址写入由 gen_assign 的「全局宽度约定」单独拒绝（文案不同，别抢它的报错）。
+    if (n->kind == ND_ASSIGN && n->lhs && n->lhs->kind == ND_VAR && !n->lhs->is_global &&
+        !n->lhs->is_ref && n->lhs->ty == TY_INT && is_addr_value(n->rhs))
+      error_at_node(n,
+        "地址值（64 位）不能装进 4 字节的 int 变量——本地标量 int 按 C 语义只占 4 字节，装不下地址；"
+        "编译器不再把该槽自动扩成 8 字节（静默截断/写穿邻变量都不允许）。"
+        "请把变量声明成 int *（保存指针）或用 int_64（保存地址/句柄的整数形式）");
     if (n->lhs) changed |= ai_pass(n->lhs);
     if (n->rhs) changed |= ai_pass(n->rhs);
     if (n->els) changed |= ai_pass(n->els);
@@ -903,7 +898,8 @@ static void slotmap_declare_ast(Node *n) {
       if (n->ty == TY_ARR || n->ty == TY_STRUCT) f |= SF_AGGREGATE;   // 数组/结构体：按首槽寻址
       if (n->is_ref) f |= SF_REF;                                     // 引用槽：槽里存对象地址
       if (n->is_own || n->is_share) f |= SF_MANAGED;                  // own/share 托管指针
-      if (n->ty == TY_INT && slot_marked(n->offset)) f |= SF_T1ADDR;  // T1「装地址的 int」槽
+      // slot4：SF_T1ADDR 保留（映射层/审计仍认这一位），但 ai_pass 不再产生标记 ⇒ 本行恒不命中。
+      if (n->ty == TY_INT && slot_marked(n->offset)) f |= SF_T1ADDR;  // T1「装地址的 int」槽（已停用）
       slotmap_declare(n->offset, n->ty, f);
     }
     // M5 ②（2026-09-19）：**取址的槽静态钉死**（走内存，不给寄存器）。
@@ -1260,13 +1256,11 @@ static void error_at_nodef(Node *n, const char *fmt, ...) {
   error_at_node(n, buf);
 }
 
-// T1 ④：指针目标的值门槛
+// T1 ④：指针目标的值门槛（slot4：删掉「装过地址的 int 变量」那条放行 —— 那种赋值现在直接报错）
 static void check_ptr_target(Node *st, Node *rhs) {
   if (is_addr_expr(rhs)) return;                                     // 64 位算出来的地址（含地址链）
   if (rhs->kind == ND_NUM) return;                                   // 显式常量（0/null 等）
   if (rhs->kind == ND_APICALL) return;                               // API 返回值全宽（句柄兼容路径）
-  // T1 槽号分域（2026-10-29）：同上，全局 offset 是 globals 下标，不是帧槽 → 不查标记表
-  if (rhs->kind == ND_VAR && !rhs->is_global && rhs->ty == TY_INT && slot_marked(rhs->offset)) return;  // T1 ②：装地址的 int
   if (rhs->kind == ND_ASSIGN) { check_ptr_target(st, rhs->rhs); return; }            // 赋值表达式：看被赋的值
   if ((rhs->kind == ND_PRE_INC || rhs->kind == ND_PRE_DEC || rhs->kind == ND_POST_INC || rhs->kind == ND_POST_DEC) &&
       rhs->lhs && (rhs->lhs->ty == TY_PTR || is_addr_expr(rhs->lhs)))
@@ -1276,8 +1270,8 @@ static void check_ptr_target(Node *st, Node *rhs) {
     error_at_node(st, "这个地址是 int 变量参与算术/中转算出来的（按 32 位算，高半已截断）"
                       "——请把地址先放进 int * 变量再做指针算术（例：int *t = s; t + 8）");
   error_at_node(st, "指针目标只能接「地址表达式」（&x / 字符串 / 指针变量 / 数组名 / new / 指针返回函数 / API 返回值 / 地址链）、"
-                    "显式常量、或一个装过地址的 int 变量——这里的值只有 32 位，当指针用会指向错地方"
-                    "（int 形参、int 返回值、4 字节的 int 字段/元素里都装不下地址，请把类型声明成 int * 或 ptr）");
+                    "显式常量——这里的值只有 32 位，当指针用会指向错地方"
+                    "（int 变量/形参/返回值、4 字节的 int 字段/元素里都装不下地址，请把类型声明成 int * 或 ptr）");
 }
 
 // 二元算术（结果 eax；地址类走 64 位 add/sub——v0.9）
@@ -1287,7 +1281,7 @@ static void check_ptr_target(Node *st, Node *rhs) {
 //   新：mov ecx,[rbp-n]（wide 时 movsxd rcx,dword [rbp-n]）—— 一条，且**完全不碰 rax**（lhs 天然保住）。
 // 限制条件逐条都有理由，别放宽：
 //   · 只认「普通局部 int」：全局读走 rip-relative 的 64 位约定、char 是 movzx 字节读、double 走 xmm0、
-//     数组/结构体名是首地址、is_ref 要先 64 位读地址再解引用、T1 标记槽是 8 字节读 ——
+//     数组/结构体名是首地址、is_ref 要先 64 位读地址再解引用、T1 标记槽（已停用）——
 //     这些宽度/语义各不相同，在这里再复刻一份就是「同一条规则两处实现」，迟早分叉。
 //   · rhs 必须是无副作用的变量读（因此求值顺序无关，可以安全地"先读进 ecx"）。
 static bool try_load_var_to_ecx(FuncCtx *c, Node *n, bool wide) {
@@ -1303,7 +1297,7 @@ static bool try_load_var_to_ecx(FuncCtx *c, Node *n, bool wide) {
 
 // v1.4.26（M5 ③）：上面那套「什么才算普通局部 int 变量读」的**唯一出处**（返回槽偏移，不是则 -1）。
 //   比较就地化（`cmp rS,[rbp-n]` 一条顶三条）也要用同一套条件 —— 两处各判一次迟早分叉，
-//   而 char/double/引用/全局/T1 装地址槽的宽度语义各不相同（漏判 = 编译过、静默错值）。
+//   而 char/double/引用/全局/T1 装地址槽的宽度语义各不相同（漏判 = 编译过、静默错值；slot4 起 T1 槽不再存在）。
 //   槽偏移一律为正（rbp-off），故 -1 当"没有"是安全的。
 static int simple_int_var_off(Node *n) {
   if (!n || n->kind != ND_VAR) return -1;
@@ -2478,11 +2472,9 @@ static void gen_var_read(FuncCtx *c, Node *node) {
         slot_load_rax64(b, node->offset);
         return;
       }
-      // v1.0.13 T1 ②：装地址的 int 变量 → 8 字节读（高半完整；算术仍只消费 eax，语义不变）
-      if (node->ty == TY_INT && slot_marked(node->offset)) {
-        slot_load_rax64(b, node->offset);
-        return;
-      }
+      // slot4：本地标量 int 槽只有 4 字节 —— 一律 32 位读。
+      //   旧 T1 ②「装地址的 int 按 8 字节读」已删除：那种赋值在 ai_pass 里直接报错了，
+      //   若还按 8 字节读会读到相邻变量/栈残渣（与 4 字节槽语义不符）。
       slot_load_eax(b, node->offset);        // int 值（32 位）
 }
 
@@ -2506,7 +2498,7 @@ static void gen_deref(FuncCtx *c, Node *node) {
 }
 
 // —— v1.10.6（B2 第三族）：赋值（原 ND_ASSIGN case）——
-//   逐行搬运（含 T1 宽度红线、全局宽度约定、double / 间接写两条通路），
+//   逐行搬运（含 T1 宽度红线（slot4 起改为「int 装地址直接报错」）、全局宽度约定、double / 间接写两条通路），
 //   判据 = bytecmp 产物逐字节相同 + 1106 项回归。
 static void gen_assign(FuncCtx *c, Node *node) {
   Buf *b = &c->code;
@@ -2547,12 +2539,8 @@ static void gen_assign(FuncCtx *c, Node *node) {
           slot_store_rax64(b, node->lhs->offset);
         }
         else if (ty_is8(node->lhs->ty)) { slot_store_byte(b, node->lhs->offset); emit_movzx_eax_al(b); } // v1.0.5 字节写（v1.0.6.2 A2：表达式值截断=存储字节）
-        // v1.0.13 T1 ①：装地址的 int 槽按 8 字节存——地址值原样写满；普通 int 值先符号扩展再写满
-        // （否则高半留旧值/栈残渣，T1 ② 的 8 字节读会读回垃圾）
-        else if (node->lhs->ty == TY_INT && slot_marked(node->lhs->offset)) {
-          if (!is_addr_value(node->rhs)) emit_movsxd_rax_eax(b);
-          slot_store_rax64(b, node->lhs->offset);
-        }
+        // slot4：本地标量 int 槽只有 4 字节 —— 一律 32 位写（8 字节写会写穿相邻变量，槽布局已按 4 排）。
+        //   旧 T1 ①「装地址的 int 按 8 字节存」已删除：「int 装地址」在 ai_pass 就报错。
         else slot_store_eax(b, node->lhs->offset);
         return;
       }
@@ -3481,10 +3469,11 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   // v1.4.21/23（M2/M4）：本函数的"槽 → 位置"表开工（清表 + 调用纪元/块号归零；属性由下面几处 declare 申报）
   //   code 传进去是因为 M4 的"块边界写回"要往这个缓冲里发 store。
   slotmap_begin_function(&c->code);
-  // 帧：参数 + 局部变量槽，从 rbp-8 向下；≥32 保 shadow；16 对齐
-  int frame = fn->var_count * 8;
+  // 帧：**字节数**由 parse 按实际槽宽累加（slot4 起本地标量 int = 4 字节 ⇒ 不能再按 var_count*8 估：
+  //   槽数×8 会多算帧、也失去了"哪些字节真的被占"的真值）。帧从 rbp-8 向下；≥32 保 shadow；16 对齐。
+  int frame = fn->frame_bytes;
   if (frame < 32) frame = 32;
-  frame = (frame + 15) / 16 * 16;
+  frame = (frame + 15) / 16 * 16;   // 16 字节对齐（向上取整）：sub rsp 后 rsp 必须 ≡0，否则每个 call 点错位
   // v1.0.3：帧底部再留 8B 暂存槽——间接赋值（结构体字段/解引用/数组元素 = API 调用结果）
   // 先存槽再算目标地址，避免「地址压栈跨越 API 调用」把 call 时 rsp 顶成 ≡8
   // （CreateWindowExA/RegisterClassW 走 movaps 类指令即崩，决策 26 S3 纪律）。
@@ -3500,7 +3489,7 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
 
   emit_push_rbp(&c->code);
   // 返回地址相对 rbp 的偏移：`push rbp` 把旧 rbp 压在 [rbp+0..7]，返回地址紧贴其上 ⇒ 偏移 = **1 个栈槽**。
-  // 从栈槽单位推（与 `frame = fn->var_count * 8` 用的是同一个单位），不写裸字面量：
+  // 这是「序言压了几个 8 字节」的账（与帧的字节数无关，别和 frame_bytes 混）：
   //   将来若改成"序言保存两样东西"的形态，只需改这一行的乘数。
   fn->ret_addr_off = 1 * FRAME_SLOT_BYTES;
   emit_mov_rbp_rsp(&c->code);
@@ -3599,16 +3588,17 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   // 本函数统一退出点：id 必须先分配（body 里 return 要跳它），位置在 body 生成后标记
   c->exit_label_id = new_label(c);
 
-  // v1.0.13 T1：先算「装地址的 int」标记（定点收敛，最多 8 轮），body 生成时据此定存取宽度
+  // slot4：先扫一遍「int 装地址」——现在这是**编译期硬错**（4 字节槽装不下 64 位地址）。
+  //   旧 T1 在这时定点标记「装地址的 int」槽；本版本不再产生标记（见 ai_pass 的说明）。
   c->prog = prog;              // v1.4.25：-strict 在调用点要查被调函数的形参类型
   c->ret_ty = fn->ret_ty;      // v1.4.25：-strict 判"地址值经 int 返回被截断"
   c->ret_struct = (fn->ret_ty == TY_STRUCT) ? fn->ret_struct : -1;   // v2.14.0（指针返回的 ret_struct 也是 sidx）
   c->retbuf_off = fn->retbuf_off;
-  g_nai = 0;
+  // slot4：T1 标记表已删（见 slot_marked 的说明）——这里只剩「扫一遍报错」。
   for (int it = 0; it < 8; it++) if (!ai_pass(fn->body)) break;
 
   // v1.4.21（M2）：把本函数所有变量槽与其属性申报给映射层。
-  //   ⚠️ 必须在 ai_pass 之后 —— T1「装地址的 int」标记此时才确定（要记 SF_T1ADDR）。
+  //   ⚠️ 必须在 ai_pass 之后（ai_pass 可能报错退出；SF_T1ADDR 保留但不会命中，见上）。
   //   ⚠️ 申报由**生成层**做（它认识 AST），映射层只存（slotmap.c 里不许出现 AST 字样）。
   slotmap_declare(c->scratch_off, TY_INT, SF_SCRATCH);
   slotmap_declare_ast(fn->body);
@@ -3732,7 +3722,7 @@ static void codegen_func(FuncCtx *c, FuncDef *fn, Program *prog) {
   free(uoffs);
   free(soffs);
 
-  g_nai = 0;   // v1.0.13 T1：标记是函数内概念，出函数即清（槽偏移跨函数会撞号）
+  // slot4：T1 标记表已删（原先这里清 g_nai，防槽偏移跨函数撞号）。
 
   // 回填本函数内跳转
   resolve_patches(c);
