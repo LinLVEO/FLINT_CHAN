@@ -129,7 +129,7 @@ int main() {
      src='int main() { int x = 4; return sizeof(x + 1); }' }
   @{ n='c_cast';           kind='ok';   code=42; note='C 风格转型 (int)d —— **v1.8.0 起支持**（原 wall 用例按边界表订正：double→int 截断向零，3.9 → 3）';
      src='int main() { double d = 3.9; int x = (int)d; if (x == 3) { return 42; } return 7; }' }
-  @{ n='long_long';        kind='wall'; err="未声明的变量 'long'";  note='没有 64 位整数类型（long long / int64）';
+  @{ n='long_long';        kind='wall'; err="未声明的变量 'long'";  note='`long long` 这种 C 写法不认 —— **不等于"没有 64 位类型"**：64 位整数要写 `int_64`（v1.7.0 起支持，见 docs\语言参考.md §2 与 TY_INT64）。本条只钉「`long` 关键字不存在」这一件事，别再把它读成"没有 int64"（2026-11-05 一个陌生 agent 就差点被这句旧注释误导）';
      src='int main() { long long x = 5; return 42; }' }
   @{ n='amp_api';          kind='wall'; err='需带括号调用';        note='&外部API名 不支持（要回调 → 库侧按 id 分派）';
      src='api kernel32 int GetTickCount();' + "`n" + 'int main() { int *p = &GetTickCount; return 42; }' }

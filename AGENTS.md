@@ -17,7 +17,7 @@ cmd /c "gcc -O2 src\*.c -o hlc.exe"     # Windows。PowerShell 自己会展开�
 ./hlc.exe run examples/hello/hello.fl    # 退出码 = main 的返回值
 ```
 
-构建约十秒。若 `gcc` 报错，先确认它在你 PATH 里（`gcc --version`）。
+构建约二十秒（本机实测；若几分钟还没完，那是卡住了，不是慢）。若 `gcc` 报错，先确认它在你 PATH 里（`gcc --version`）。
 
 ## 1. 判断"语言支持什么"：三级来源，优先级递减
 
@@ -56,6 +56,15 @@ powershell -File test\边界探针.ps1        # 语言边界（全绿 = 实现�
 ```
 
 **同一目录别并行跑门**（会互删 `test\tmp`）。
+
+### 4.1 公开树有两个「必然红」，不是你的问题
+
+这棵树是从内部仓库裁剪出来的，所以下面两件事**一定会发生**，别去追：
+
+- `node test\docgate.mjs` 会 RED（`drift` / 索引缺失）——因为 `docs\索引.md`、`PROGRESS.md`、`docs\数字台账.md` 属内部件，不在包里；
+- `tools\文档事实.ps1 -Key <某些键>` 会返回 `NOT_COLLECTED`——有的键要量 `hlc.exe`，而二进制不在包里（按 §0 先构建）。
+
+**所以在公开树里，「文档门全绿」不能当证据。** 判据仍然是 §1 的三级来源。
 
 ## 5. 这份文件自己的规矩
 
