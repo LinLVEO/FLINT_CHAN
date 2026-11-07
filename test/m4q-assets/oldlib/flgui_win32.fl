@@ -334,8 +334,10 @@ int gui_win_pump(struct GuiWin *g, struct GuiInput *in) {
     //     默认档（纯后台、不做文本输入）保持原样调它，行为一字不动。
     if (g->kbd == 0) { TranslateMessage(&m); }
     if (m.message == 0x020A) {
-      wq = m.wparam;
-      d = wq / 65536;
+      // 2026-11-05：slot4 之后 `int` 只有 4 字节，`wq = m.wparam`（64 位 WPARAM 装进 int）
+      //   成了编译期硬错 ⇒ 本快照编不过、FLGUI 门整条红。改成与现行库同一写法
+      //   （`lib\flgui_win32.fl` 的 `d = m.wparam / 65536;`），语义一字不变。
+      d = m.wparam / 65536;
       d = d & 0xFFFF;
       if (d > 32767) { d = d - 65536; }
       in->wheel = in->wheel + d / 120;

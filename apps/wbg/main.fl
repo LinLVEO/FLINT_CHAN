@@ -1,0 +1,788 @@
+// wbg.fl — 世界观图谱（World-Building Graph）
+// ---------------------------------------------------------------------------
+// 目的：把"设定"变成一张可查、可改、**AI 能全权操作**的图。
+//
+// 为什么这样设计（不是复刻某个产品，是同样的目的换一种做法）：
+//   1. 数据用**行式文本**（world.txt）：一行一条。AI 直接读写、git diff 友好、
+//      出错有行号。不用 JSON —— 那要多一层解析器和转义，收益不成正比。
+//   2. **命令行就是 API**：每个子命令都是一次完整事务（读 → 改 → 写），
+//      AI 不需要长连接、不需要协议握手；失败就是非 0 退出码 + 一句人话。
+//   3. **GUI 只读不改**：人看图，AI 改数据，两边不抢同一份状态。
+//
+// 格式（UTF-8，一行一条）：
+//   @<kind> <name> | <note>        节点。kind 是任意词（人/地/势力/事件/物品…）
+//   -> <from> <rel> <to>            关系
+//   # 开头 = 注释
+//
+// 用法：
+//   wbg                        GUI（默认）
+//   wbg ls [kind]              列节点；给 kind 就只列这一类
+//   wbg show <name>            一个节点的全部关系（进和出都列）
+//   wbg add <kind> <name> [note]   加节点（重名拒绝）
+//   wbg link <from> <rel> <to>     加关系（两端必须已存在）
+//   wbg rm <name>              删节点，连带删掉它所有的边
+//   wbg check                  校验：断裂引用 / 重名 / 孤立节点
+// ---------------------------------------------------------------------------
+
+include "../lib/sys_lib.fl"
+include "../lib/io_lib.fl"
+
+api kernel32 int SetConsoleOutputCP(int);
+api kernel32 ptr GetCommandLineA();
+api kernel32 int MultiByteToWideChar(int, int, ptr, int, ptr, int);
+api kernel32 int WideCharToMultiByte(int, int, ptr, int, ptr, int, ptr, ptr);
+
+// ===== 命令行：走宽字符转 UTF-8 =====
+// 为什么不用 sys_lib 的 env_arg：它基于 GetCommandLineA（系统 ANSI = GBK），
+// 中文参数一进来就是 GBK 字节，跟 UTF-8 的数据文件和控制台对不上（实测全乱码）。
+// 这里从 GetCommandLineW 拿 UTF-16，再 WideCharToMultiByte(65001) 转成 UTF-8 ——
+// 参数、数据文件、控制台输出三处编码统一，AI 侧也是干净的 UTF-8。
+char g_cmd[8192];
+char g_wbuf[16384];
+
+int load_cmdline() {
+  char *a = GetCommandLineA();
+  int i = 0;
+  int n = 0;
+  if (a == 0) { return 0; }
+  n = MultiByteToWideChar(936, 0, a, 0 - 1, &g_wbuf[0], 8190);
+  if (n > 0) {
+    n = WideCharToMultiByte(65001, 0, &g_wbuf[0], 0 - 1, &g_cmd[0], 8190, 0, 0);
+    if (n > 0) { return 1; }
+  }
+  while (a[i] != 0 && i < 8190) { g_cmd[i] = a[i]; i = i + 1; }
+  g_cmd[i] = 0;
+  return 1;
+}
+
+int get_arg(int idx, char *buf, int cap) {
+  int i = 0;
+  int k = 0;
+  int cur = 0;
+  int inq = 0;
+  int started = 0;
+  buf[0] = 0;
+  while (g_cmd[i] != 0) {
+    if (g_cmd[i] == 34) {
+      if (inq != 0) { inq = 0; } else { inq = 1; }
+      started = 1;
+      i = i + 1;
+    } else if (inq == 0 && (g_cmd[i] == 32 || g_cmd[i] == 9)) {
+      if (started != 0) {
+        if (cur == idx) { buf[k] = 0; return k; }
+        cur = cur + 1;
+        k = 0;
+        started = 0;
+      }
+      i = i + 1;
+    } else {
+      if (cur == idx && k < cap - 1) { buf[k] = g_cmd[i]; k = k + 1; }
+      started = 1;
+      i = i + 1;
+    }
+  }
+  if (started != 0 && cur == idx) { buf[k] = 0; return k; }
+  return 0;
+}
+
+int get_argc() {
+  int i = 0;
+  int cur = 0;
+  int k = 0;
+  int inq = 0;
+  while (g_cmd[i] != 0) {
+    if (g_cmd[i] == 34) { if (inq != 0) { inq = 0; } else { inq = 1; } i = i + 1; }
+    else {
+      if (inq == 0 && (g_cmd[i] == 32 || g_cmd[i] == 9)) {
+        if (k > 0) { cur = cur + 1; k = 0; }
+        i = i + 1;
+      } else { k = k + 1; i = i + 1; }
+    }
+  }
+  if (k > 0) { cur = cur + 1; }
+  return cur;
+}
+
+// ===== 数据 =====
+char g_buf[262144];        // 整个 world.txt
+int  g_len = 0;
+char g_path[1024];
+char g_tmp[8192];          // 输出用的 0 结尾缓冲
+
+// 节点：所有字段都是"g_buf 里的偏移 + 长度"，不复制字符串
+struct WNode {
+  int noff; int nlen;      // name
+  int koff; int klen;      // kind
+  int toff; int tlen;      // note（没有 = 0）
+  int line;
+}
+struct WNode g_n[512];
+int g_nn = 0;
+
+// 边
+struct WEdge {
+  int aoff; int alen;      // from
+  int roff; int rlen;      // rel
+  int boff; int blen;      // to
+  int line;
+}
+struct WEdge g_e[1024];
+int g_ne = 0;
+
+// ===== 小工具 =====
+int slen(char *s) {
+  int i = 0;
+  while (s[i] != 0) { i = i + 1; }
+  return i;
+}
+
+// 长度 n 的字节是否等于 s（s 必须 0 结尾）
+int seq(char *a, int alen, char *s) {
+  int n = slen(s);
+  int i = 0;
+  if (alen != n) { return 0; }
+  while (i < n) { if (a[i] != s[i]) { return 0; } i = i + 1; }
+  return 1;
+}
+
+// 两段字节比长短版
+int blen_eq(char *a, int an, char *b, int bn) {
+  int i = 0;
+  if (an != bn) { return 0; }
+  while (i < an) { if (a[i] != b[i]) { return 0; } i = i + 1; }
+  return 1;
+}
+
+// 输出不保证 0 结尾的一段字节
+int outn(char *p, int n) {
+  int i = 0;
+  if (n <= 0) { return 0; }
+  if (n > 8180) { n = 8180; }
+  while (i < n) { g_tmp[i] = p[i]; i = i + 1; }
+  g_tmp[i] = 0;
+  print([g_tmp]);
+  return 0;
+}
+
+// ===== 载入与解析 =====
+int load_file() {
+  struct FileSt f;
+  g_len = 0;
+  if (std::open(&f, &g_path[0], 0) == 0) { return 0; }
+  g_len = std::read(&f, &g_buf[0], 262000);
+  std::close(&f);
+  if (g_len < 0) { g_len = 0; }
+  return 1;
+}
+
+// 从 st 开始找空格（返回下标；没有则 r）
+int skip_to_space(int st, int r) {
+  int i = st;
+  while (i < r && g_buf[i] != 32 && g_buf[i] != 9) { i = i + 1; }
+  return i;
+}
+
+int parse_all() {
+  int i = 0;
+  int st = 0;
+  int r = 0;
+  int ln = 1;
+  int p = 0;
+  g_nn = 0;
+  g_ne = 0;
+  while (i < g_len) {
+    st = i;
+    while (i < g_len && g_buf[i] != 10) { i = i + 1; }
+    r = i;
+    // 去掉行尾 \r
+    if (r > st && g_buf[r - 1] == 13) { r = r - 1; }
+    if (r > st && g_buf[st] == 64) {
+      // @kind name | note
+      p = st + 1;
+      int k0 = p;
+      p = skip_to_space(p, r);
+      int k1 = p;
+      while (p < r && (g_buf[p] == 32 || g_buf[p] == 9)) { p = p + 1; }
+      int n0 = p;
+      // name 到 " | " 或行尾
+      while (p < r && g_buf[p] != 124) { p = p + 1; }
+      int n1 = p;
+      while (n1 > n0 && (g_buf[n1 - 1] == 32 || g_buf[n1 - 1] == 9)) { n1 = n1 - 1; }
+      int t0 = 0;
+      int t1 = 0;
+      if (p < r && g_buf[p] == 124) {
+        p = p + 1;
+        while (p < r && (g_buf[p] == 32 || g_buf[p] == 9)) { p = p + 1; }
+        t0 = p;
+        t1 = r;
+      }
+      if (k1 > k0 && n1 > n0 && g_nn < 512) {
+        g_n[g_nn].koff = k0; g_n[g_nn].klen = k1 - k0;
+        g_n[g_nn].noff = n0; g_n[g_nn].nlen = n1 - n0;
+        g_n[g_nn].toff = t0; g_n[g_nn].tlen = t1 - t0;
+        g_n[g_nn].line = ln;
+        g_nn = g_nn + 1;
+      }
+    } else if (r > st + 2 && g_buf[st] == 45 && g_buf[st + 1] == 62) {
+      // -> from rel to
+      p = st + 2;
+      while (p < r && (g_buf[p] == 32 || g_buf[p] == 9)) { p = p + 1; }
+      int a0 = p;
+      p = skip_to_space(p, r);
+      int a1 = p;
+      while (p < r && (g_buf[p] == 32 || g_buf[p] == 9)) { p = p + 1; }
+      int x0 = p;
+      p = skip_to_space(p, r);
+      int x1 = p;
+      while (p < r && (g_buf[p] == 32 || g_buf[p] == 9)) { p = p + 1; }
+      int b0 = p;
+      int b1 = r;
+      while (b1 > b0 && (g_buf[b1 - 1] == 32 || g_buf[b1 - 1] == 9)) { b1 = b1 - 1; }
+      if (a1 > a0 && x1 > x0 && b1 > b0 && g_ne < 1024) {
+        g_e[g_ne].aoff = a0; g_e[g_ne].alen = a1 - a0;
+        g_e[g_ne].roff = x0; g_e[g_ne].rlen = x1 - x0;
+        g_e[g_ne].boff = b0; g_e[g_ne].blen = b1 - b0;
+        g_e[g_ne].line = ln;
+        g_ne = g_ne + 1;
+      }
+    }
+    i = i + 1;
+    ln = ln + 1;
+  }
+  return 1;
+}
+
+// 按名字找节点下标；-1 = 没有
+int find_node(char *name) {
+  int i = 0;
+  int n = slen(name);
+  while (i < g_nn) {
+    if (blen_eq(&g_buf[g_n[i].noff], g_n[i].nlen, name, n) != 0) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// ===== 子命令 =====
+int cmd_ls(char *kind) {
+  int i = 0;
+  int n = 0;
+  int want = 0;
+  if (kind != 0) { want = slen(kind); }
+  while (i < g_nn) {
+    if (want == 0 || blen_eq(&g_buf[g_n[i].koff], g_n[i].klen, kind, want) != 0) {
+      print(["["]);
+      outn(&g_buf[g_n[i].koff], g_n[i].klen);
+      print(["] "]);
+      outn(&g_buf[g_n[i].noff], g_n[i].nlen);
+      if (g_n[i].tlen > 0) {
+        print(["  —  "]);
+        outn(&g_buf[g_n[i].toff], g_n[i].tlen);
+      }
+      print(["\n"]);
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  print(["（共 ", n, " 个节点，", g_ne, " 条关系）\n"]);
+  return 0;
+}
+
+int cmd_show(char *name) {
+  int i = 0;
+  int idx = find_node(name);
+  int n = 0;
+  if (idx < 0) { print(["没有这个节点: ", name, "\n"]); return 1; }
+  print(["["]);
+  outn(&g_buf[g_n[idx].koff], g_n[idx].klen);
+  print(["] "]);
+  outn(&g_buf[g_n[idx].noff], g_n[idx].nlen);
+  print(["\n"]);
+  if (g_n[idx].tlen > 0) {
+    print(["  "]);
+    outn(&g_buf[g_n[idx].toff], g_n[idx].tlen);
+    print(["\n"]);
+  }
+  print(["  → 出边:\n"]);
+  while (i < g_ne) {
+    if (blen_eq(&g_buf[g_e[i].aoff], g_e[i].alen, &g_buf[g_n[idx].noff], g_n[idx].nlen) != 0) {
+      print(["     -["]);
+      outn(&g_buf[g_e[i].roff], g_e[i].rlen);
+      print(["]→ "]);
+      outn(&g_buf[g_e[i].boff], g_e[i].blen);
+      print(["\n"]);
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  i = 0;
+  print(["  ← 入边:\n"]);
+  while (i < g_ne) {
+    if (blen_eq(&g_buf[g_e[i].boff], g_e[i].blen, &g_buf[g_n[idx].noff], g_n[idx].nlen) != 0) {
+      outn(&g_buf[g_e[i].aoff], g_e[i].alen);
+      print([" -["]);
+      outn(&g_buf[g_e[i].roff], g_e[i].rlen);
+      print(["]→\n"]);
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  print(["  （共 ", n, " 条）\n"]);
+  return 0;
+}
+
+// 拼字符串到 dst（从偏移 o 开始），返回新的末尾偏移
+int put_str(char *dst, int o, char *s) {
+  int i = 0;
+  while (s[i] != 0) { dst[o + i] = s[i]; i = i + 1; }
+  dst[o + i] = 0;
+  return o + i;
+}
+
+// 把一整行追加到 world.txt（mode 2 = 追加）—— 一行只调一次，别拆两行
+int write_line(char *line) {
+  struct FileSt f;
+  if (std::open(&f, &g_path[0], 2) == 0) {
+    print(["打不开 ", g_path, "\n"]);
+    return 1;
+  }
+  std::write(&f, line, slen(line));
+  std::write(&f, "\n", 1);
+  std::close(&f);
+  return 0;
+}
+
+int cmd_add(char *kind, char *name, char *note) {
+  int o = 0;
+  if (find_node(name) >= 0) {
+    print(["已经有这个节点了: ", name, "\n"]);
+    return 1;
+  }
+  o = put_str(&g_tmp[0], 0, "@");
+  o = put_str(&g_tmp[0], o, kind);
+  o = put_str(&g_tmp[0], o, " ");
+  o = put_str(&g_tmp[0], o, name);
+  if (note != 0) {
+    o = put_str(&g_tmp[0], o, " | ");
+    o = put_str(&g_tmp[0], o, note);
+  }
+  write_line(&g_tmp[0]);
+  print(["已加: [", kind, "] ", name, "\n"]);
+  return 0;
+}
+
+int cmd_link(char *a, char *rel, char *b) {
+  int o = 0;
+  if (find_node(a) < 0) { print(["没有这个节点: ", a, "\n"]); return 1; }
+  if (find_node(b) < 0) { print(["没有这个节点: ", b, "\n"]); return 1; }
+  o = put_str(&g_tmp[0], 0, "-> ");
+  o = put_str(&g_tmp[0], o, a);
+  o = put_str(&g_tmp[0], o, " ");
+  o = put_str(&g_tmp[0], o, rel);
+  o = put_str(&g_tmp[0], o, " ");
+  o = put_str(&g_tmp[0], o, b);
+  write_line(&g_tmp[0]);
+  print(["已连: ", a, " -[", rel, "] -> ", b, "\n"]);
+  return 0;
+}
+
+int cmd_check() {
+  int i = 0;
+  int bad = 0;
+  int orphan = 0;
+  print(["== 校验 world.txt ==\n"]);
+  i = 0;
+  while (i < g_ne) {
+    if (find_node_in_buf(g_e[i].aoff, g_e[i].alen) < 0) {
+      print(["  ✗ 第 ", g_e[i].line, " 行：起点不存在\n"]);
+      bad = bad + 1;
+    }
+    if (find_node_in_buf(g_e[i].boff, g_e[i].blen) < 0) {
+      print(["  ✗ 第 ", g_e[i].line, " 行：终点不存在\n"]);
+      bad = bad + 1;
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < g_nn) {
+    int deg = 0;
+    int j = 0;
+    while (j < g_ne) {
+      if (blen_eq(&g_buf[g_e[j].aoff], g_e[j].alen, &g_buf[g_n[i].noff], g_n[i].nlen) != 0) { deg = deg + 1; }
+      if (blen_eq(&g_buf[g_e[j].boff], g_e[j].blen, &g_buf[g_n[i].noff], g_n[i].nlen) != 0) { deg = deg + 1; }
+      j = j + 1;
+    }
+    if (deg == 0) {
+      print(["  · 孤立节点: "]);
+      outn(&g_buf[g_n[i].noff], g_n[i].nlen);
+      print(["\n"]);
+      orphan = orphan + 1;
+    }
+    i = i + 1;
+  }
+  print(["== ", g_nn, " 节点 / ", g_ne, " 关系 / ", bad, " 处断裂 / ", orphan, " 个孤立 ==\n"]);
+  if (bad > 0) { return 1; }
+  return 0;
+}
+
+// 按缓冲里的偏移找节点（check 用）
+int find_node_in_buf(int off, int len) {
+  int i = 0;
+  while (i < g_nn) {
+    if (blen_eq(&g_buf[g_n[i].noff], g_n[i].nlen, &g_buf[off], len) != 0) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+int cmd_rm(char *name) {
+  int idx = find_node(name);
+  int ln_del = 0;
+  int i = 0;
+  int st = 0;
+  int r = 0;
+  int k = 0;
+  int n = 0;
+  struct FileSt f;
+  if (idx < 0) { print(["没有这个节点: ", name, "\n"]); return 1; }
+  ln_del = g_n[idx].line;
+  n = slen(name);
+  if (std::open(&f, &g_path[0], 1) == 0) { print(["打不开 ", g_path, "\n"]); return 1; }
+  i = 0;
+  while (i < g_len) {
+    st = i;
+    while (i < g_len && g_buf[i] != 10) { i = i + 1; }
+    r = i;
+    while (r > st && (g_buf[r - 1] == 13 || g_buf[r - 1] == 10)) { r = r - 1; }
+    k = 1;
+    if (st < g_len) {
+      int curline = 0;
+      int j = 0;
+      while (j < st) { if (g_buf[j] == 10) { curline = curline + 1; } j = j + 1; }
+      curline = curline + 1;
+      if (curline == ln_del) { k = 0; }
+      // 边行里出现这个名字也一起删
+      if (k != 0 && r > st + 2 && g_buf[st] == 45 && g_buf[st + 1] == 62) {
+        int q = st + 2;
+        while (q < r) {
+          int t0 = q;
+          while (q < r && g_buf[q] != 32 && g_buf[q] != 9) { q = q + 1; }
+          if (q - t0 == n) {
+            int m = 0;
+            int hit = 1;
+            while (m < n) { if (g_buf[t0 + m] != name[m]) { hit = 0; m = n; } m = m + 1; }
+            if (hit != 0) { k = 0; }
+          }
+          while (q < r && (g_buf[q] == 32 || g_buf[q] == 9)) { q = q + 1; }
+        }
+      }
+    }
+    if (k != 0 && r > st) {
+      std::write(&f, &g_buf[st], r - st);
+      std::write(&f, "\n", 1);
+    }
+    i = i + 1;
+  }
+  std::close(&f);
+  print(["已删: ", name, "（连带它所有的边）\n"]);
+  return 0;
+}
+api kernel32 ptr GetModuleHandleA(int);
+api kernel32 int ExitProcess(int);
+api user32 int RegisterClassA(ptr);
+api user32 ptr CreateWindowExA(int, int, int, int, int, int, int, int, int, int, int, int);
+api user32 int ShowWindow(int, int);
+api user32 int GetMessageA(ptr, int, int, int);
+api user32 int TranslateMessage(ptr);
+api user32 int DispatchMessageA(ptr);
+api user32 int DefWindowProcA(int, int, int, int);
+api user32 int ValidateRect(int, ptr);
+api user32 int InvalidateRect(int, ptr, int);
+api user32 ptr LoadCursorA(int, int);
+api user32 ptr GetDC(int);
+api user32 int ReleaseDC(int, int);
+api gdi32 ptr GetStockObject(int);
+api gdi32 int SetDCBrushColor(int, int);
+api gdi32 int SetBkMode(int, int);
+api gdi32 int SetTextColor(int, int);
+api gdi32 int PatBlt(int, int, int, int, int, int);
+api gdi32 ptr CreateSolidBrush(int);
+api gdi32 int DeleteObject(int);
+api gdi32 ptr SelectObject(int, int);
+struct WNDCLASS { int style; int *fn; int cb1; int cb2; int *inst; int *icon; int *cur; int *brush; int *menu; int *cls; }
+struct MSG { int *hwnd; int message; int *wparam; int *lparam; int time; int px; int py; }
+// ===== GUI：图谱视图（只读；改数据走 CLI）=====
+api gdi32 int MoveToEx(int, int, int, int);
+api gdi32 int LineTo(int, int, int);
+api gdi32 int Ellipse(int, int, int, int, int);
+api gdi32 int TextOutW(int, int, int, ptr, int);
+api user32 int GetClientRect(int, int);
+
+int g_px[1024];
+int g_py[1024];
+int g_drag = -1;
+char g_wtext[2048];
+
+int kind_color(int off, int len) {
+  int h = 0;
+  int i = 0;
+  int c = 0;
+  while (i < len) { h = (h * 31 + g_buf[off + i]) % 997; i = i + 1; }
+  c = h % 6;
+  if (c == 0) { return 0x6A5ACD; }
+  if (c == 1) { return 0x3C9B3C; }
+  if (c == 2) { return 0xB07A2A; }
+  if (c == 3) { return 0xA03C3C; }
+  if (c == 4) { return 0x3C7BA0; }
+  return 0x8A3CA0;
+}
+
+int node_at(int x, int y) {
+  int i = 0;
+  while (i < g_nn) {
+    int dx = g_px[i] - x;
+    int dy = g_py[i] - y;
+    if (dx * dx + dy * dy < 900) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 简单力导向：斥力(150px 内) + 弹簧(有边拉近) + 夹回窗口
+int layout_graph() {
+  int i = 0;
+  int j = 0;
+  int it = 0;
+  i = 0;
+  while (i < g_nn) {
+    g_px[i] = 260 + (i % 6) * 110;
+    g_py[i] = 120 + (i / 6) * 110;
+    i = i + 1;
+  }
+  it = 0;
+  while (it < 80) {
+    i = 0;
+    while (i < g_nn) {
+      j = i + 1;
+      while (j < g_nn) {
+        int dx = g_px[j] - g_px[i];
+        int dy = g_py[j] - g_py[i];
+        int d2 = dx * dx + dy * dy;
+        if (d2 < 400) { d2 = 400; }
+        if (d2 < 22500) {
+          int f = 700000 / d2;
+          g_px[i] = g_px[i] - dx * f / 100;
+          g_py[i] = g_py[i] - dy * f / 100;
+          g_px[j] = g_px[j] + dx * f / 100;
+          g_py[j] = g_py[j] + dy * f / 100;
+        }
+        j = j + 1;
+      }
+      i = i + 1;
+    }
+    i = 0;
+    while (i < g_ne) {
+      int a = find_node_in_buf(g_e[i].aoff, g_e[i].alen);
+      int b = find_node_in_buf(g_e[i].boff, g_e[i].blen);
+      if (a >= 0 && b >= 0 && a != b) {
+        int dx = g_px[b] - g_px[a];
+        int dy = g_py[b] - g_py[a];
+        g_px[a] = g_px[a] + dx / 30;
+        g_py[a] = g_py[a] + dy / 30;
+        g_px[b] = g_px[b] - dx / 30;
+        g_py[b] = g_py[b] - dy / 30;
+      }
+      i = i + 1;
+    }
+    it = it + 1;
+  }
+  i = 0;
+  while (i < g_nn) {
+    if (g_px[i] < 70) { g_px[i] = 70; }
+    if (g_px[i] > 930) { g_px[i] = 930; }
+    if (g_py[i] < 70) { g_py[i] = 70; }
+    if (g_py[i] > 630) { g_py[i] = 630; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+int draw_wtext(int *dc, int x, int y, int off, int len) {
+  int wl = MultiByteToWideChar(65001, 0, &g_buf[off], len, &g_wtext[0], 1020);
+  if (wl <= 0) { return 0; }
+  TextOutW(dc, x, y, &g_wtext[0], wl);
+  return wl;
+}
+
+int draw_graph(int *hwnd) {
+  int *dc = GetDC(hwnd);
+  int i = 0;
+  if (dc == 0) { return 0; }
+  SelectObject(dc, GetStockObject(18));
+  SetDCBrushColor(dc, 0x1E1E1E);
+  PatBlt(dc, 0, 0, 1000, 700, 0xF00021);
+  SetBkMode(dc, 1);
+  // 边
+  SelectObject(dc, GetStockObject(7));
+  SetDCBrushColor(dc, 0x505050);
+  i = 0;
+  while (i < g_ne) {
+    int a = find_node_in_buf(g_e[i].aoff, g_e[i].alen);
+    int b = find_node_in_buf(g_e[i].boff, g_e[i].blen);
+    if (a >= 0 && b >= 0) {
+      MoveToEx(dc, g_px[a], g_py[a], 0);
+      LineTo(dc, g_px[b], g_py[b]);
+      SetTextColor(dc, 0x808080);
+      int mx = (g_px[a] + g_px[b]) / 2;
+      int my = (g_py[a] + g_py[b]) / 2;
+      draw_wtext(dc, mx + 4, my - 8, g_e[i].roff, g_e[i].rlen);
+    }
+    i = i + 1;
+  }
+  // 节点
+  i = 0;
+  while (i < g_nn) {
+    int col = kind_color(g_n[i].koff, g_n[i].klen);
+    SelectObject(dc, GetStockObject(0));
+    SetDCBrushColor(dc, col);
+    SelectObject(dc, CreateSolidBrush(col));
+    Ellipse(dc, g_px[i] - 26, g_py[i] - 26, g_px[i] + 26, g_py[i] + 26);
+    SetTextColor(dc, 0xE0E0E0);
+    draw_wtext(dc, g_px[i] - 20, g_py[i] + 34, g_n[i].noff, g_n[i].nlen);
+    i = i + 1;
+  }
+  ReleaseDC(hwnd, dc);
+  return 0;
+}
+
+int wbg_wndproc(int *hwnd, int msg, int *wp, int *lp) {
+  if (msg == 0x000F) {
+    draw_graph(hwnd);
+    ValidateRect(hwnd, 0);
+    return 0;
+  }
+  if (msg == 0x0201) {
+    int x = lp % 65536;
+    int y = (lp / 65536) % 65536;
+    g_drag = node_at(x, y);
+    return 0;
+  }
+  if (msg == 0x0200) {
+    int x = lp % 65536;
+    int y = (lp / 65536) % 65536;
+    if (g_drag >= 0 && g_drag < g_nn) {
+      g_px[g_drag] = x;
+      g_py[g_drag] = y;
+      InvalidateRect(hwnd, 0, 0);
+    }
+    return 0;
+  }
+  if (msg == 0x0202) { g_drag = 0 - 1; return 0; }
+  if (msg == 0x0010) { ExitProcess(0); return 0; }
+  return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int log_step(char *s) {
+  struct FileSt f;
+  if (std::open(&f, "wbg.log", 2) == 0) { return 0; }
+  std::write(&f, s, slen(s));
+  std::write(&f, "\n", 1);
+  std::close(&f);
+  return 1;
+}
+int gui_main() {
+  struct WNDCLASS wc;
+  int *h = 0;
+  struct MSG m;
+  if (load_file() == 0) {
+    print(["找不到 world.txt（先用 add 建一个）\n"]);
+    return 1;
+  }
+  parse_all();
+  layout_graph();
+  wc.style = 0;
+  wc.fn = &wbg_wndproc;
+  wc.cb1 = 0; wc.cb2 = 0;
+  wc.inst = GetModuleHandleA(0);
+  wc.icon = 0; wc.cur = LoadCursorA(0, 32512); wc.brush = 0; wc.menu = 0;
+  wc.cls = "FLINTWBG";
+  if (RegisterClassA(&wc) == 0) { return 1; }
+  h = CreateWindowExA(0, wc.cls, "wbg - world graph", 0x00CF0000, 120, 90, 1000, 700, 0, 0, 0, 0);
+  if (h == 0) { return 2; }
+  ShowWindow(h, 1);
+  while (GetMessageA(&m, 0, 0, 0) != 0) {
+    TranslateMessage(&m);
+    DispatchMessageA(&m);
+  }
+  return 0;
+}
+// ===== main =====
+int main() {
+  char a[512];
+  char b[512];
+  char c[512];
+  char d[512];
+  int n = 0;
+  int i = 0;
+  SetConsoleOutputCP(65001);
+  g_path[0] = 119; g_path[1] = 111; g_path[2] = 114; g_path[3] = 108; g_path[4] = 100;
+  g_path[5] = 46; g_path[6] = 116; g_path[7] = 120; g_path[8] = 116; g_path[9] = 0;
+
+  load_cmdline();
+  n = get_argc();
+  if (n <= 1) {
+    print(["wbg — 世界观图谱\n"]);
+    print(["  用法: wbg <命令> [参数]\n"]);
+    print(["    ls [kind]              列节点\n"]);
+    print(["    show <name>            一个节点的全部关系\n"]);
+    print(["    add <kind> <name> [note]\n"]);
+    print(["    link <from> <rel> <to>\n"]);
+    print(["    rm <name>              删节点（连带删它的边）\n"]);
+    print(["    check                  校验\n"]);
+    return gui_main();
+    return 0;
+  }
+
+  get_arg(1, &a[0], 512);
+  if (load_file() == 0) {
+    // 没有 world.txt：只有 add 能创建
+    if (seq(&a[0], slen(&a[0]), "add") != 0) {
+      print(["找不到 world.txt（先用 add 建一个）\n"]);
+      return 1;
+    }
+  }
+  parse_all();
+
+  if (seq(&a[0], slen(&a[0]), "ls") != 0) {
+    if (n > 2) { get_arg(2, &b[0], 512); return cmd_ls(&b[0]); }
+    return cmd_ls(0);
+  }
+  if (seq(&a[0], slen(&a[0]), "show") != 0) {
+    if (n <= 2) { print(["show 要一个名字\n"]); return 1; }
+    get_arg(2, &b[0], 512);
+    return cmd_show(&b[0]);
+  }
+  if (seq(&a[0], slen(&a[0]), "add") != 0) {
+    if (n <= 3) { print(["add 要 kind 和 name\n"]); return 1; }
+    get_arg(2, &b[0], 512);
+    get_arg(3, &c[0], 512);
+    if (n > 4) { get_arg(4, &d[0], 512); return cmd_add(&b[0], &c[0], &d[0]); }
+    return cmd_add(&b[0], &c[0], 0);
+  }
+  if (seq(&a[0], slen(&a[0]), "link") != 0) {
+    if (n <= 4) { print(["link 要 from rel to\n"]); return 1; }
+    get_arg(2, &b[0], 512);
+    get_arg(3, &c[0], 512);
+    get_arg(4, &d[0], 512);
+    return cmd_link(&b[0], &c[0], &d[0]);
+  }
+  if (seq(&a[0], slen(&a[0]), "check") != 0) { return cmd_check(); }
+  if (seq(&a[0], slen(&a[0]), "rm") != 0) {
+    if (n <= 2) { print(["rm 要一个名字\n"]); return 1; }
+    get_arg(2, &b[0], 512);
+    return cmd_rm(&b[0]);
+    return 1;
+  }
+  print(["不认识的命令: ", a, "\n"]);
+  return 1;
+}

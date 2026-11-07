@@ -1,14 +1,14 @@
 ﻿# 等价门指纹基线 —— 由 等价门.ps1 -WriteBaseline / -UpdateFingerprint 生成
 # 含义：每个样本「当前实现」编译出的产物 SHA256 前 16 位。**重构期本文件必须逐行不变**（否则说明发射形状变了）
-# 生成时间：2026-11-05 01:54 ｜ 确定性样本 220 个
+# 生成时间：2026-11-05 14:07 ｜ 确定性样本 220 个
 #
 # ===== 变更记录（最近一次 -UpdateFingerprint）=====
-# 时间：2026-11-05 01:54
-# 理由：slot4：本地 int 4 字节 + vec_lib 双端兼容改写
+# 时间：2026-11-05 14:07
+# 理由：flgui_win32 gui_win_wait_full 忙等修复（175ms->16ms/帧）：MsgWait 不再响应输入消息
 # 变更样本 2 个 ｜ 新增样本 0 个
 # 变更清单（样本：旧前16 -> 新前16）
-#   vec_big	B5535A9A051A0A2E -> 0C072361CD6BB1DD
-#   vec1	F345B338CCBDBCAA -> BE9369D758E59A79
+#   flgui13	4AC98601B5A33DE3 -> 3D252DC592382530
+#   flgui19	473AE2454B712A1E -> 0AF624638A420CD1
 align_probe	9FAA4F91C94694F4
 align2_probe	804143246A57F621
 api1	E762F3BF196AF840
@@ -102,13 +102,13 @@ flgui1	D407210AD6ECC76C
 flgui10	D9D62C269C7088F3
 flgui11	498FBA7F2154B702
 flgui12	441F8662A9DE7857
-flgui13	4AC98601B5A33DE3
+flgui13	3D252DC592382530
 flgui14	20922E98F3354F4F
 flgui15	616D2508A2D5D1CF
 flgui16	A677C19D6C9BED3C
 flgui17	5C498A5D443BFF74
 flgui18	41BC4C1EF0538F28
-flgui19	473AE2454B712A1E
+flgui19	0AF624638A420CD1
 flgui2	6DA4A101755E4D53
 flgui3	4EC8587611B29788
 flgui4	4F47DFC95CE67654

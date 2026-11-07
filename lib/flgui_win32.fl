@@ -1216,7 +1216,14 @@ int gui_win_wait_full(int ms) {
     now = GetTickCount();
     rem = ms - (now - t0);
     if (rem <= 0) { break; }
-    gui_win_wait(rem);
+    // 2026-11-05 性能修复：原写法 `gui_win_wait(rem)` 的 `MsgWait` 语义是「队列没有输入才睡」——
+    //   按键/鼠标连发时每次都**立即返回**，这个 while 就退化成**纯忙等**
+    //   （实测 IDE 单次按键 175ms/帧；把 frame_wait 换成固定 wait 后 23ms）。
+    //   修法 = 同一个 api 把最后一个参数（QS_ALLINPUT）改成 **0**：不再被输入消息唤醒，
+    //   就是真睡满 rem —— 语义正是本函数想要的「消息不消费、照旧留给 Pump」，
+    //   且**不新增导入位**（`m2_float` 链的余量只剩 1 格，加 Sleep 会顶爆）。
+    //   判据：`tools\probes\perf-frame.ps1`（改前 175ms → 改后回到 25ms 预算内）。
+    MsgWaitForMultipleObjects(0, 0, 0, rem, 0);
   }
   return 0;
 }
